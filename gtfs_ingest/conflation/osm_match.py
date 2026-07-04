@@ -46,7 +46,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, bindparam, text
 
 log = logging.getLogger(__name__)
 
@@ -211,7 +211,13 @@ def nearest_transit_nodes(engine: Engine, schema: OsmSchema) -> pd.DataFrame:
             LIMIT 1
         ) o ON TRUE
         """
-    ).bindparams(pt_values=PT_VALUES, railway_values=RAILWAY_VALUES, point_srid=schema.point_srid)
+    ).bindparams(
+        # expanding=True renders IN :param as IN (v1, v2, ...) - psycopg3
+        # does not expand a plain tuple parameter itself.
+        bindparam("pt_values", value=list(PT_VALUES), expanding=True),
+        bindparam("railway_values", value=list(RAILWAY_VALUES), expanding=True),
+        bindparam("point_srid", value=schema.point_srid),
+    )
     with engine.connect() as conn:
         rows = conn.execute(sql).mappings().all()
     frame = pd.DataFrame(

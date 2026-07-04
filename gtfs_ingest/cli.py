@@ -17,6 +17,10 @@ Usage:
     python -m gtfs_ingest.cli conflate-osm --db-url $DATABASE_URL \\
         --match-threshold-m 50 --report ./out [--dry-run]
 
+    # Station locator - resolve a station list to coordinates + travel times
+    python -m gtfs_ingest.cli locate-stations --stations route.txt \\
+        --enable-google-api --transport-type SITREN --line 2 --report ./out [--dry-run]
+
 Backward compatibility: invoking without a subcommand but with flags
 (``python -m gtfs_ingest.cli --feeds ...``) is treated as ``ingest``.
 
@@ -43,7 +47,10 @@ from .models import Severity
 
 log = logging.getLogger(__name__)
 
-_SUBCOMMANDS = ("ingest", "analyze-frequency", "detect-interchanges", "conflate-osm")
+_SUBCOMMANDS = (
+    "ingest", "analyze-frequency", "detect-interchanges", "conflate-osm", "google-qa",
+    "locate-stations",
+)
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -183,6 +190,79 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Geometry column of the OSM tables (default: way / GTFS_OSM_GEOM_COLUMN).")
     conflate.add_argument("--crs", default=None, metavar="EPSG:XXXXX",
                           help="Metric CRS for side math (default: auto-detect a UTM zone).")
+
+    qa = subparsers.add_parser(
+        "google-qa",
+        help="Ephemeral Google Places QA cross-check of Phase 3 results "
+        "(OFF by default; needs --enable-google-qa AND GOOGLE_MAPS_API_KEY).",
+    )
+    qa.add_argument("--db-url", default=None,
+                    help="PostgreSQL SQLAlchemy URL (default: DATABASE_URL env var).")
+    qa.add_argument("--report", type=Path, default=None, metavar="DIR",
+                    help="Directory for the QA reports (default: ./out).")
+    qa.add_argument("--log-level", default=None,
+                    choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    help="Log verbosity (default: INFO, or GTFS_LOG_LEVEL env var).")
+    qa.add_argument("--enable-google-qa", action="store_true",
+                    help="Explicit opt-in; without it the command no-ops. The API key "
+                    "must come from the GOOGLE_MAPS_API_KEY env var (no flag, by design).")
+    qa.add_argument("--max-calls", type=int, default=200, metavar="N",
+                    help="Hard ceiling on Places API calls for this run (default: 200).")
+    qa.add_argument("--radius-m", type=float, default=50.0, metavar="METERS",
+                    help="Stop-existence search radius (default: 50).")
+    qa.add_argument("--interchange-radius-m", type=float, default=150.0, metavar="METERS",
+                    help="Interchange centroid search radius (default: 150).")
+    qa.add_argument("--rate-per-s", type=float, default=5.0, metavar="RPS",
+                    help="Max Places API requests per second (default: 5).")
+    qa.add_argument("--dry-run", action="store_true",
+                    help="Report eligibility only; no API calls, no DB writes.")
+
+    locate = subparsers.add_parser(
+        "locate-stations",
+        help="Resolve a station-name list to coordinates and travel times via "
+        "Google APIs and export the route to Excel (OFF by default; needs "
+        "--enable-google-api AND GOOGLE_MAPS_API_KEY). Never writes to the database.",
+    )
+    locate.add_argument("--stations", type=Path, required=True, metavar="FILE",
+                        help="TXT/CSV file with station names in route order "
+                        "(comma- and/or newline-separated).")
+    locate.add_argument("--report", type=Path, default=None, metavar="DIR",
+                        help="Directory for the reports and the Excel export (default: ./out).")
+    locate.add_argument("--log-level", default=None,
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="Log verbosity (default: INFO, or GTFS_LOG_LEVEL env var).")
+    locate.add_argument("--enable-google-api", action="store_true",
+                        help="Explicit opt-in; without it the command no-ops. The API key "
+                        "must come from the GOOGLE_MAPS_API_KEY env var (no flag, by design).")
+    locate.add_argument("--transport-type", default="SITREN", metavar="TYPE",
+                        help="Transport type used in the query and mode mapping, e.g. "
+                        "SITREN, MiMacro, Troncal, Alimentador, Expreso (default: SITREN).")
+    locate.add_argument("--line", default=None, metavar="LINE",
+                        help="Optional line identifier appended to queries ('... línea N').")
+    locate.add_argument("--language", default="es", metavar="LANG",
+                        help="Response language for all Google calls (default: es).")
+    locate.add_argument("--region", default="mx", metavar="REGION",
+                        help="Region bias for all Google calls (default: mx).")
+    locate.add_argument("--search-radius-m", type=float, default=3000.0, metavar="METERS",
+                        help="Anchor bias radius around the previous station (default: 3000).")
+    locate.add_argument("--no-distance-matrix", action="store_true",
+                        help="Skip the Distance Matrix API; estimate every travel time "
+                        "from the Haversine distance and --avg-speed-kmh.")
+    locate.add_argument("--avg-speed-kmh", type=float, default=25.0, metavar="KMH",
+                        help="Average speed for estimated travel times (default: 25).")
+    locate.add_argument("--max-route-minutes", type=float, default=60.0, metavar="MIN",
+                        help="Total route time used for the generic per-pair estimate when "
+                        "coordinates are missing (default: 60).")
+    locate.add_argument("--max-calls", type=int, default=200, metavar="N",
+                        help="Hard ceiling on Google API calls for this run (default: 200).")
+    locate.add_argument("--rate-per-s", type=float, default=5.0, metavar="RPS",
+                        help="Max Google API requests per second (default: 5).")
+    locate.add_argument("--excel-name", default="stations_route.xlsx", metavar="NAME",
+                        help="File name of the Excel export inside the report directory "
+                        "(default: stations_route.xlsx).")
+    locate.add_argument("--dry-run", action="store_true",
+                        help="Report the plan (stations read, worst-case call count) only; "
+                        "no API calls, no export.")
     return parser
 
 
@@ -325,6 +405,79 @@ def _run_conflate_osm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_google_qa(args: argparse.Namespace) -> int:
+    """Execute (or cleanly no-op) the Phase 4 QA flow; returns exit code."""
+    from .qa.pipeline_qa import QaConfig, run_google_qa
+
+    overrides: dict = {"feed_paths": [], "dry_run": args.dry_run}
+    if args.db_url:
+        overrides["database_url"] = args.db_url
+    if args.report:
+        overrides["report_dir"] = args.report
+    if args.log_level:
+        overrides["log_level"] = args.log_level
+    settings = Settings(**overrides)
+    setup_logging(settings.log_level)
+
+    config = QaConfig(
+        database_url=settings.database_url,
+        report_dir=settings.report_dir,
+        enabled=args.enable_google_qa,
+        api_key=settings.google_maps_api_key,  # env only - no CLI flag exists
+        max_calls=args.max_calls,
+        radius_m=args.radius_m,
+        interchange_radius_m=args.interchange_radius_m,
+        rate_per_s=args.rate_per_s,
+        dry_run=settings.dry_run,
+    )
+    try:
+        run_google_qa(config)
+    except Exception as exc:  # noqa: BLE001 - fatal run-level errors -> exit 1
+        log.error("Google QA aborted: %s", exc)
+        log.debug("Traceback:", exc_info=True)
+        return 1
+    return 0
+
+
+def _run_locate_stations(args: argparse.Namespace) -> int:
+    """Execute (or cleanly no-op) the station-locator flow; returns exit code."""
+    from .qa.station_locator import LocatorConfig, run_station_locator
+
+    overrides: dict = {"feed_paths": [], "dry_run": args.dry_run}
+    if args.report:
+        overrides["report_dir"] = args.report
+    if args.log_level:
+        overrides["log_level"] = args.log_level
+    settings = Settings(**overrides)
+    setup_logging(settings.log_level)
+
+    config = LocatorConfig(
+        stations_file=args.stations,
+        report_dir=settings.report_dir,
+        enabled=args.enable_google_api,
+        api_key=settings.google_maps_api_key,  # env only - no CLI flag exists
+        transport_type=args.transport_type,
+        line=args.line,
+        language=args.language,
+        region=args.region,
+        search_radius_m=args.search_radius_m,
+        use_distance_matrix=not args.no_distance_matrix,
+        avg_speed_kmh=args.avg_speed_kmh,
+        max_route_minutes=args.max_route_minutes,
+        max_calls=args.max_calls,
+        rate_per_s=args.rate_per_s,
+        excel_name=args.excel_name,
+        dry_run=settings.dry_run,
+    )
+    try:
+        run_station_locator(config)
+    except Exception as exc:  # noqa: BLE001 - fatal run-level errors -> exit 1
+        log.error("Station locator aborted: %s", exc)
+        log.debug("Traceback:", exc_info=True)
+        return 1
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI entry point.
 
@@ -347,7 +500,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_analyze(args)
     if args.command == "detect-interchanges":
         return _run_detect_interchanges(args)
-    return _run_conflate_osm(args)
+    if args.command == "conflate-osm":
+        return _run_conflate_osm(args)
+    if args.command == "locate-stations":
+        return _run_locate_stations(args)
+    return _run_google_qa(args)
 
 
 if __name__ == "__main__":

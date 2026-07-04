@@ -74,6 +74,13 @@ class Settings(BaseSettings):
         description="Metric CRS like 'EPSG:32618'; default auto-detects a UTM zone.",
     )
 
+    # --- Phase 4 Google QA (env only - never a CLI flag, never hardcoded) ---
+    google_maps_api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("GOOGLE_MAPS_API_KEY", "GTFS_GOOGLE_MAPS_API_KEY"),
+        repr=False,  # keep the key out of reprs/logs
+    )
+
 
 def setup_logging(level: str = "INFO") -> None:
     """Configure root logging for the pipeline.

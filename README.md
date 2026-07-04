@@ -227,6 +227,21 @@ Flags shared by both subcommands:
 `--osm-line-table`, `--osm-point-table`, `--osm-geom-column`,
 `--crs EPSG:XXXXX`. A DB is required even with `--dry-run`.
 
+`google-qa` only (no `--feeds`; **no-ops** unless `--enable-google-qa` is
+passed AND `GOOGLE_MAPS_API_KEY` is set): `--max-calls` (default 200),
+`--radius-m` (default 50), `--interchange-radius-m` (default 150),
+`--rate-per-s` (default 5), `--dry-run` (eligibility only — no API calls,
+no DB writes). See the [Phase 4 licensing constraints](#️-licensing--storage-constraints-enforced-in-code).
+
+`locate-stations` only (no `--feeds`, no DB; **no-ops** unless
+`--enable-google-api` is passed AND `GOOGLE_MAPS_API_KEY` is set):
+`--stations FILE` (required), `--transport-type` (default SITREN),
+`--line`, `--language` (default es), `--region` (default mx),
+`--search-radius-m` (default 3000), `--no-distance-matrix`,
+`--avg-speed-kmh` (default 25), `--max-route-minutes` (default 60),
+`--max-calls` (default 200), `--rate-per-s` (default 5), `--excel-name`,
+`--dry-run`. See [Station locator](#station-locator-locate-stations).
+
 Exit codes: **0** run completed (feeds may still have findings — read the
 report) · **1** fatal run-level problem (no feeds found, DB unreachable or
 missing PostGIS, no DB URL on a non-dry run, unwritable report dir, invalid
@@ -300,6 +315,12 @@ gtfs_ingest/
     side_of_street.py   nearest centerline + left/right sign math
     storage.py          DDL + idempotent loads for the Phase 3 tables
     pipeline_day3.py    Phase 3 orchestration + reports
+  qa/            Phase 4 subpackage (Google QA - off by default)
+    google_client.py    Places API (New) + legacy Geocoding/Distance Matrix client
+    crosscheck.py       eligibility + verdict logic (in-memory comparisons)
+    storage.py          allowlisted verdict tables (StorageViolation guard)
+    pipeline_qa.py      gating, budget enforcement, QA report
+    station_locator.py  station list -> coords + travel times -> Excel route
 tests/           pytest suite with synthetic fixture feeds
 docker-compose.yaml  local PostGIS (postgis/postgis:16-3.4)
 init/            optional first-boot SQL/shell scripts for the DB container
@@ -727,7 +748,171 @@ low-confidence count).
   `GTFS_TEST_DATABASE_URL` (synthetic OSM tables built on the fly); all
   geometry/clustering math is unit-tested without a database.
 
+---
+
+# Phase 4: Google Maps QA cross-check (`google-qa`)
+
+```bash
+python -m gtfs_ingest.cli google-qa --db-url $DATABASE_URL \
+    --enable-google-qa --max-calls 200 --radius-m 50 --report ./out [--dry-run]
+```
+
+An **ephemeral, targeted** quality-assurance pass that cross-checks a small
+subset of Phase 3 results against the Google Places API (New). It is *not*
+a data source, *not* a bulk enrichment pass, and never mutates GTFS/OSM
+data — it only writes verdict rows.
+
+## ⚠️ Licensing & storage constraints (enforced in code)
+
+The Google Maps Platform Terms restrict caching and prohibit building a
+derived or substitute database from Google content. This phase therefore:
+
+- **Persists only**: the opaque `place_id`, verdicts/flags **we** compute,
+  and a timestamp **we** compute. Never Google names, transit line names,
+  agency names, coordinates, ratings, or any other Places field — to DB,
+  files, or logs.
+- **Keeps everything else in memory** for the duration of one comparison,
+  then discards it. Debug logging redacts responses to field *names* only.
+- **Never modifies upstream data**: no GTFS or OSM record is corrected or
+  overwritten from Google data.
+- Enforcement is mechanical: `qa/storage.py` validates every record
+  against a frozen column allowlist and raises `StorageViolation`
+  otherwise, and `tests/test_storage_guard.py` fails if any non-allowlisted
+  column ever appears in the DDL or INSERT statements.
+
+> **This code is not legal advice.** Verify the current
+> [Google Maps Platform Terms of Service](https://cloud.google.com/maps-platform/terms)
+> yourself before enabling this phase.
+
+## Conditions of use
+
+- **OFF by default.** Runs only when `--enable-google-qa` is passed AND
+  `GOOGLE_MAPS_API_KEY` is set in the environment (env only — there is
+  deliberately no CLI flag for the key). Missing either → clean no-op with
+  a clear log message and a `skipped_*` status in the report, exit 0.
+- **Targeted, never exhaustive.** Only two record sets are eligible:
+  (a) `interchanges` rows with `is_multimodal = true` — verify the mode
+  combination; (b) stops with `stop_osm_matches.needs_review = true` —
+  verify a transit place exists. The full stops table is never iterated.
+- **Hard call budget**: `--max-calls` (default **200**) is a ceiling with a
+  running counter; the run stops and logs when it is reached (retries of a
+  failed call count once). Rate limit via `--rate-per-s` (default 5) with
+  exponential backoff on 429/5xx.
+
+## 💰 Cost note (Enterprise SKU)
+
+The interchange check requests exactly
+`places.id, places.types, places.transitStation` — **`transitStation`
+triggers Google's Enterprise SKU, the highest price tier**. That is why
+this check is limited to multimodal interchanges and capped by the budget.
+The stop-existence check requests only `places.id, places.types` (cheaper
+SKU). An explicit `X-Goog-FieldMask` is mandatory — the client refuses to
+issue any request without one.
+
+## Verdicts
+
+Interchange (Google's observed mode set vs ours, compared in our GTFS
+route_type vocabulary and discarded immediately after):
+
+| Verdict | Meaning |
+| --- | --- |
+| `CONFIRMED` | Google's modes cover every mode we inferred (`mode_agreement = true`) |
+| `PARTIAL` | some overlap, but not all our modes observed |
+| `CONFLICT` | transit observed with zero mode overlap — listed for human review |
+| `NO_DATA` | call failed, nothing returned, or no usable mode evidence |
+
+Stop existence: `STATION_FOUND` (a transit-typed place within
+`--radius-m`, default 50 m), `NOT_FOUND` (Google answered and nothing
+transit was there), `NO_DATA` (the call failed).
+
+## Phase 4 outputs
+
+- `google_qa_interchange` (interchange_cluster_id PK, verdict,
+  mode_agreement, google_place_id, checked_at) and `google_qa_stop`
+  (stop_uid PK, verdict, google_place_id, checked_at). Idempotency:
+  **per-row upsert** — QA runs are budgeted and partial by design, so a
+  re-check must not wipe verdicts from earlier runs (deliberate deviation
+  from Phase 3's full reload).
+- `google_qa_report.json/.md` — verdict counts, the CONFLICT list (our
+  cluster ids + our inferred modes only), calls made and budget remaining.
+
+## Phase 4 assumptions
+
+- Nearby Search (`places:searchNearby`) is used for both checks because its
+  `locationRestriction` circle makes "nothing within the radius" a real
+  answer (Text Search only *biases* toward a location); Text Search and
+  Place Details are implemented in the client and available.
+- The `transitStation` payload shape is treated as opaque: `vehicleType`
+  values are extracted tolerantly wherever they appear; schema drift
+  degrades to `NO_DATA`, never a crash. Google vehicle types map onto basic
+  GTFS route_type codes (BUS→3, SUBWAY→1, HEAVY_RAIL→2, …); places without
+  vehicle data fall back to their place types (`bus_station`→bus, …).
+- All test-suite network traffic uses mocked transports; no live calls.
+
 ## Out of scope
 
 Pedestrian-network routing (walking times here remain straight-line),
-polygon/area conflation, and turn-by-turn interchange path generation.
+polygon/area conflation, turn-by-turn interchange path generation, and any
+bulk use of Google data.
+
+---
+
+# Station locator (`locate-stations`)
+
+```bash
+python -m gtfs_ingest.cli locate-stations --stations route.txt \
+    --enable-google-api --transport-type SITREN --line 2 \
+    --report ./out [--dry-run]
+```
+
+A user-facing tool (ported from the Station Locator desktop app, see
+`GetlocationApiGoogle.md`) that reads a list of station names in route
+order from a TXT/CSV file (comma- and/or newline-separated), resolves each
+name to coordinates, computes the travel time between consecutive
+stations, and exports the directed route to an Excel file plus the usual
+JSON + Markdown report.
+
+## How it resolves stations
+
+1. **Text Search** (Places API New, `places:searchText`) with the query
+   `"Estación {transport-type} {name}"` (+ `" línea {line}"` when
+   `--line` is given). The first result is taken.
+2. **Anchoring**: the coordinates of the previously resolved station are
+   sent as a location-bias circle (`--search-radius-m`, default 3000 m) so
+   Google ranks results near the route first — this is what disambiguates
+   two stations sharing a name. The first station has no anchor.
+3. **Geocoding API fallback** when Text Search yields no coordinates,
+   using the recommended name if one was returned, else the raw query.
+
+## Travel times (directed, consecutive pairs)
+
+- **Distance Matrix API** (default; disable with `--no-distance-matrix`)
+  with the mode mapped from `--transport-type` (SITREN → transit/train;
+  MiMacro/Troncal/Alimentador/Expreso → transit/bus) and
+  `departure_time=now` → labeled `real`.
+- **Haversine estimate** at `--avg-speed-kmh` (default 25) when the matrix
+  is disabled or returns nothing → labeled `estimado`.
+- **Generic estimate** `--max-route-minutes / stations` (default 60) for
+  pairs with missing coordinates → labeled `generico`.
+
+## Conditions of use (same rails as Phase 4)
+
+- **OFF by default**: needs `--enable-google-api` AND `GOOGLE_MAPS_API_KEY`
+  in the environment (no CLI flag for the key); otherwise a clean no-op.
+- Hard `--max-calls` budget (default 200) shared across all three APIs,
+  `--rate-per-s` throttle, backoff on 429/5xx, `--dry-run` (reads the
+  station list and reports the worst-case call count; zero API calls).
+- Cost: 1 Text Search per station (+ up to 1 Geocoding fallback each) and
+  1 Distance Matrix element per consecutive pair when real times are on.
+
+## ⚠️ Licensing note (read before enabling)
+
+Unlike the QA cross-check, this tool's Excel export
+(`--excel-name`, default `stations_route.xlsx`: `ID, Nombre_Estación,
+Modalidad, Línea, Latitud, Longitud, Estacion_Proxima`) deliberately
+contains Google-resolved coordinates — that is its purpose as a user
+export. It **never writes to the database**, and the export must not be
+loaded into PostGIS or redistributed; the Phase 4 storage constraints
+continue to apply to everything else. Verify the
+[Google Maps Platform Terms](https://cloud.google.com/maps-platform/terms)
+for your use case.
