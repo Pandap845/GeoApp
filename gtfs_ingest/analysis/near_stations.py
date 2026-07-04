@@ -1,0 +1,170 @@
+"""Per-station "near stations" export.
+
+For every normalized stop, lists the other stops within the proximity
+threshold together with the transit lines serving them and an estimated
+walking time, rendered exactly as::
+
+    [(ID, station, linea, time to reach), (ID2, station, linea, time to reach)]
+
+one tuple per (near station, line) combination, sorted by walking time.
+
+Conventions (documented in the README):
+
+- IDs are the feed-qualified ``stop_uid`` (``"{feed_id}:{stop_id}"``) so
+  entries stay unambiguous when several feeds are analyzed together.
+- ``linea`` is the route's ``route_short_name`` when present, otherwise its
+  ``route_id``; only lines active on the analyzed service date appear, so a
+  near stop served by no route that day (e.g. a bare parent-station node)
+  is omitted from neighbour lists.
+- ``time to reach`` is straight-line distance divided by a 5 km/h walking
+  speed (~83 m/min), rounded to whole minutes with a 1-minute floor. It is
+  an estimate - no street network is consulted (that is Phase 3 territory).
+- "near" reuses the connectivity proximity threshold (``--proximity-m``,
+  default 150 m) and the same distance engine (PostGIS geography when a
+  database is available, local UTM math otherwise).
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+log = logging.getLogger(__name__)
+
+#: ~5 km/h walking speed.
+WALK_M_PER_MIN = 83.0
+
+NEAR_STATIONS_NAME = "near_stations.csv"
+
+#: Columns of the exported file.
+COLUMNS = ["stop_uid", "feed_id", "stop_id", "station", "stop_lat", "stop_lon", "near_stations"]
+
+
+def _line_labels(routes: pd.DataFrame) -> pd.DataFrame:
+    """Map route_uid -> display label (short name, falling back to route_id)."""
+    if routes.empty:
+        return pd.DataFrame(columns=["route_uid", "line"])
+    labels = routes[["route_uid", "route_id"]].copy()
+    short = routes.get("route_short_name")
+    if short is not None:
+        short = short.astype("string").str.strip()
+        labels["line"] = short.where(short.notna() & (short != ""), routes["route_id"])
+    else:
+        labels["line"] = routes["route_id"]
+    return labels[["route_uid", "line"]]
+
+
+def walk_minutes(distance_m: pd.Series) -> pd.Series:
+    """Estimated walking minutes for straight-line distances (>= 1 min)."""
+    return np.maximum(1, (distance_m / WALK_M_PER_MIN).round()).astype(int)
+
+
+def build_near_stations(
+    stops: pd.DataFrame,
+    route_stops: pd.DataFrame,
+    routes: pd.DataFrame,
+    stop_pairs: pd.DataFrame,
+) -> pd.DataFrame:
+    """Assemble the near-stations table for all analyzed stops.
+
+    Args:
+        stops: Phase 1 normalized stops (all feeds; needs ``stop_uid``,
+            ``feed_id``, ``stop_id``, ``stop_name``, ``stop_lat``,
+            ``stop_lon``).
+        route_stops: ``connectivity.route_stop_map`` frames (all feeds).
+        routes: route metadata with ``route_uid``/``route_id`` and optional
+            ``route_short_name``.
+        stop_pairs: proximity stop pairs (``stop_uid_a, stop_uid_b,
+            distance_m``) from either ``proximity_pairs_*`` function.
+
+    Returns:
+        One row per stop with :data:`COLUMNS`; ``near_stations`` holds the
+        formatted tuple list (``"[]"`` when nothing is within the
+        threshold). Never raises on empty inputs.
+    """
+    base = stops[["stop_uid", "feed_id", "stop_id", "stop_name", "stop_lat", "stop_lon"]].copy()
+    base = base.rename(columns={"stop_name": "station"})
+    base["station"] = base["station"].fillna("")
+
+    entries = _near_entries(base, route_stops, routes, stop_pairs)
+    if entries.empty:
+        base["near_stations"] = "[]"
+        return base.rename(columns={"stop_lat": "stop_lat", "stop_lon": "stop_lon"})[COLUMNS]
+
+    entries = entries.sort_values(["stop_uid", "minutes", "near_station", "line"])
+    entries["tuple"] = (
+        "(" + entries["near_uid"] + ", " + entries["near_station"] + ", "
+        + entries["line"].astype(str) + ", " + entries["minutes"].astype(str) + " min)"
+    )
+    rendered = (
+        entries.groupby("stop_uid")["tuple"]
+        .agg(lambda parts: "[" + ", ".join(parts) + "]")
+        .rename("near_stations")
+        .reset_index()
+    )
+    result = base.merge(rendered, on="stop_uid", how="left")
+    result["near_stations"] = result["near_stations"].fillna("[]")
+    return result[COLUMNS]
+
+
+def _near_entries(
+    base: pd.DataFrame,
+    route_stops: pd.DataFrame,
+    routes: pd.DataFrame,
+    stop_pairs: pd.DataFrame,
+) -> pd.DataFrame:
+    """One row per (stop, near stop, line): the tuples before rendering."""
+    if stop_pairs.empty or route_stops.empty:
+        return pd.DataFrame(columns=["stop_uid", "near_uid", "near_station", "line", "minutes"])
+
+    # Pairs are stored once per unordered pair; neighbourhood is symmetric.
+    both = pd.concat(
+        [
+            stop_pairs.rename(columns={"stop_uid_a": "stop_uid", "stop_uid_b": "near_uid"}),
+            stop_pairs.rename(columns={"stop_uid_b": "stop_uid", "stop_uid_a": "near_uid"}),
+        ],
+        ignore_index=True,
+    )
+
+    lines_at = (
+        route_stops[["stop_uid", "route_uid"]]
+        .merge(_line_labels(routes), on="route_uid")
+        [["stop_uid", "line"]]
+        .drop_duplicates()
+    )
+    entries = both.merge(lines_at.rename(columns={"stop_uid": "near_uid"}), on="near_uid")
+    if entries.empty:
+        return pd.DataFrame(columns=["stop_uid", "near_uid", "near_station", "line", "minutes"])
+    entries = entries.merge(
+        base[["stop_uid", "station"]].rename(
+            columns={"stop_uid": "near_uid", "station": "near_station"}
+        ),
+        on="near_uid",
+        how="left",
+    )
+    entries["near_station"] = entries["near_station"].fillna("")
+    entries["minutes"] = walk_minutes(entries["distance_m"])
+    return entries[["stop_uid", "near_uid", "near_station", "line", "minutes"]]
+
+
+def write_near_stations(near: pd.DataFrame, out_dir: Path) -> Path:
+    """Write the table as ``near_stations.csv`` in *out_dir*.
+
+    Args:
+        near: frame from :func:`build_near_stations`.
+        out_dir: report directory (created if needed).
+
+    Returns:
+        The written path.
+
+    Raises:
+        OSError: if the file cannot be written (run-level problem).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / NEAR_STATIONS_NAME
+    near.to_csv(path, index=False, encoding="utf-8")
+    log.info("Near-stations export written: %s (%d stops)", path, len(near))
+    return path

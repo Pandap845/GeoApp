@@ -55,6 +55,25 @@ class Settings(BaseSettings):
     )
     dry_run: bool = False
 
+    # --- OSM layer names (Phase 3 conflation; osm2pgsql classic defaults) ---
+    osm_line_table: str = Field(
+        default="planet_osm_line",
+        validation_alias=AliasChoices("osm_line_table", "GTFS_OSM_LINE_TABLE"),
+    )
+    osm_point_table: str = Field(
+        default="planet_osm_point",
+        validation_alias=AliasChoices("osm_point_table", "GTFS_OSM_POINT_TABLE"),
+    )
+    osm_geom_column: str = Field(
+        default="way",
+        validation_alias=AliasChoices("osm_geom_column", "GTFS_OSM_GEOM_COLUMN"),
+    )
+    metric_crs: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("metric_crs", "GTFS_METRIC_CRS"),
+        description="Metric CRS like 'EPSG:32618'; default auto-detects a UTM zone.",
+    )
+
 
 def setup_logging(level: str = "INFO") -> None:
     """Configure root logging for the pipeline.
