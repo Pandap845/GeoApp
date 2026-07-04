@@ -32,7 +32,7 @@ from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
 from ..models import FeedSource
-from . import connectivity, geopackage, graph_export, near_stations, storage
+from . import connectivity, geopackage, graph_export, near_stations, route_geometry, storage
 from .headways import DEFAULT_WINDOWS, TimeWindow, compute_stop_headways, route_rollup, stop_departures
 from .service_filter import load_service_feed
 
@@ -102,6 +102,8 @@ class _FeedData:
         self.route_stops = pd.DataFrame()
         self.routes = pd.DataFrame()
         self.stops: Optional[gpd.GeoDataFrame] = None
+        self.route_shapes = gpd.GeoDataFrame()
+        self.stop_links = pd.DataFrame()
 
 
 def _route_metadata(feed: Any, feed_id: str, route_ids: pd.Series) -> pd.DataFrame:
@@ -142,6 +144,8 @@ def _analyze_feed(
         data.rollup = route_rollup(data.stop_headways)
         data.route_stops = connectivity.route_stop_map(feed, source.feed_id)
         data.routes = _route_metadata(feed, source.feed_id, data.route_stops["route_id"])
+        data.route_shapes = route_geometry.route_shapes(feed, source.feed_id)
+        data.stop_links = route_geometry.route_stop_links(feed, source.feed_id)
         result.routes_analyzed = int(len(data.routes))
         result.stop_headway_rows = int(len(data.stop_headways))
 
@@ -220,9 +224,17 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         stop_pairs = connectivity.proximity_pairs_local(all_stops, config.proximity_m)
     edges = connectivity.build_edges(route_stops, stations, stop_pairs)
 
+    shape_frames = [d.route_shapes for d in feed_data if not d.route_shapes.empty]
+    all_shapes = gpd.GeoDataFrame(
+        pd.concat(shape_frames, ignore_index=True), crs="EPSG:4326"
+    ) if shape_frames else gpd.GeoDataFrame()
+    link_frames = [d.stop_links for d in feed_data if not d.stop_links.empty]
+    all_links = pd.concat(link_frames, ignore_index=True) if link_frames else pd.DataFrame()
+
     near = near_stations.build_near_stations(all_stops, route_stops, routes, stop_pairs)
     near_stations.write_near_stations(near, config.report_dir)
-    geopackage.write_geopackage(all_stops, near, stop_pairs, config.report_dir)
+    geopackage.write_geopackage(all_stops, near, stop_pairs, config.report_dir,
+                                route_shapes=all_shapes, stop_links=all_links)
 
     graph = graph_export.build_graph(routes, edges)
     metrics = graph_export.graph_metrics(graph)
@@ -312,7 +324,8 @@ def _render_markdown(report: AnalysisReport) -> str:
         "(per stop: numeric ID, name, lat, lon, combined stop+line ids, and "
         "nearby stations as `[(ID, station, linea, time to reach), ...]`).  ",
         f"GeoPackage export: `{geopackage.GEOPACKAGE_NAME}` "
-        "(layers: `stops` points, `near_links` lines - open in QGIS).",
+        "(layers: `stops` points, `near_links` walking lines, `route_shapes` "
+        "real route paths, `route_stop_links` consecutive-stop segments - open in QGIS).",
         "",
     ]
     return "\n".join(lines)

@@ -1,6 +1,6 @@
 """GeoPackage export of the analysis outputs (QGIS/GDAL-ready).
 
-Writes ``transit_analysis.gpkg`` with two layers, both EPSG:4326:
+Writes ``transit_analysis.gpkg`` with up to four layers, all EPSG:4326:
 
 - ``stops`` (POINT): every analyzed stop with ``stop_num_id``, ``stop_uid``,
   feed/stop ids, name, ``location_type``, ``parent_station``, plus the
@@ -8,7 +8,15 @@ Writes ``transit_analysis.gpkg`` with two layers, both EPSG:4326:
   layer is self-contained for map use.
 - ``near_links`` (LINESTRING): one line per near-stop pair (within the
   proximity threshold), carrying both numeric ids, the geodesic distance,
-  and the estimated walking minutes - the node relations as geometry.
+  and the estimated walking minutes. This is the WALKING overlay - it
+  connects any two stops that are close, regardless of route or direction.
+- ``route_shapes`` (LINESTRING): the real route paths from ``shapes.txt``
+  per (route, direction, shape) - follows the streets. Only written when
+  at least one analyzed feed ships shapes.
+- ``route_stop_links`` (LINESTRING): one straight segment per consecutive
+  stop pair of a route/direction (``stop_times`` order) - the route
+  topology on the stops, distinguishing "next stop of my route" from
+  "stop I can walk to".
 
 GeoPackage supports 64-bit integers, so the numeric ids survive intact
 (unlike e.g. shapefiles, which would truncate them).
@@ -18,6 +26,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 import geopandas as gpd
 import pandas as pd
@@ -42,6 +51,8 @@ def write_geopackage(
     near: pd.DataFrame,
     stop_pairs: pd.DataFrame,
     out_dir: Path,
+    route_shapes: Optional[gpd.GeoDataFrame] = None,
+    stop_links: Optional[pd.DataFrame] = None,
 ) -> Path:
     """Write the analysis GeoPackage.
 
@@ -52,6 +63,10 @@ def write_geopackage(
         stop_pairs: proximity stop pairs (``stop_uid_a, stop_uid_b,
             distance_m``) used to draw the ``near_links`` lines.
         out_dir: report directory (created if needed).
+        route_shapes: ``route_geometry.route_shapes`` output (all feeds
+            concatenated); the layer is skipped when None/empty.
+        stop_links: ``route_geometry.route_stop_links`` output (all feeds
+            concatenated); the layer is skipped when None/empty.
 
     Returns:
         The written path.
@@ -71,9 +86,19 @@ def write_geopackage(
     links_layer = _near_links_layer(stops, stop_pairs)
     links_layer.to_file(path, layer="near_links", driver="GPKG", mode="a")
 
+    n_shapes = n_route_links = 0
+    if route_shapes is not None and not route_shapes.empty:
+        route_shapes.to_file(path, layer="route_shapes", driver="GPKG", mode="a")
+        n_shapes = len(route_shapes)
+    route_links_layer = _route_stop_links_layer(stops, stop_links)
+    if not route_links_layer.empty:
+        route_links_layer.to_file(path, layer="route_stop_links", driver="GPKG", mode="a")
+        n_route_links = len(route_links_layer)
+
     log.info(
-        "GeoPackage written: %s (stops: %d, near_links: %d)",
-        path, len(stops_layer), len(links_layer),
+        "GeoPackage written: %s (stops: %d, near_links: %d, route_shapes: %d, "
+        "route_stop_links: %d)",
+        path, len(stops_layer), len(links_layer), n_shapes, n_route_links,
     )
     return path
 
@@ -117,3 +142,29 @@ def _near_links_layer(stops: gpd.GeoDataFrame, stop_pairs: pd.DataFrame) -> gpd.
         for a, b in zip(pairs["stop_uid_a"], pairs["stop_uid_b"])
     ]
     return gpd.GeoDataFrame(pairs[columns], geometry=lines, crs=stops.crs or "EPSG:4326")
+
+
+def _route_stop_links_layer(
+    stops: gpd.GeoDataFrame, stop_links: Optional[pd.DataFrame]
+) -> gpd.GeoDataFrame:
+    """One LINESTRING per consecutive stop pair of a route/direction.
+
+    Pairs whose stops were dropped during normalization (no geometry) are
+    skipped silently - the layer shows what can be drawn, the DB tables
+    remain the source of truth.
+    """
+    columns = ["route_uid", "feed_id", "linea", "direction_id", "stop_uid_a", "stop_uid_b"]
+    if stop_links is None or stop_links.empty:
+        return gpd.GeoDataFrame(pd.DataFrame(columns=columns),
+                                geometry=gpd.GeoSeries([], crs="EPSG:4326"))
+    geom_by_uid = stops.drop_duplicates("stop_uid").set_index("stop_uid")["geometry"]
+    links = stop_links[
+        stop_links["stop_uid_a"].isin(geom_by_uid.index)
+        & stop_links["stop_uid_b"].isin(geom_by_uid.index)
+    ].copy()
+    lines = [
+        LineString([geom_by_uid[a], geom_by_uid[b]])
+        for a, b in zip(links["stop_uid_a"], links["stop_uid_b"])
+    ]
+    return gpd.GeoDataFrame(links[columns].reset_index(drop=True), geometry=lines,
+                            crs=stops.crs or "EPSG:4326")

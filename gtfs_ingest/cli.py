@@ -190,6 +190,14 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Geometry column of the OSM tables (default: way / GTFS_OSM_GEOM_COLUMN).")
     conflate.add_argument("--crs", default=None, metavar="EPSG:XXXXX",
                           help="Metric CRS for side math (default: auto-detect a UTM zone).")
+    conflate.add_argument("--coverage-radius-m", type=float, default=100.0, metavar="METERS",
+                          help="Reverse coverage: an OSM transit node is a gap when no GTFS "
+                          "stop is within this distance (default: 100).")
+    conflate.add_argument("--coverage-buffer-m", type=float, default=500.0, metavar="METERS",
+                          help="Reverse coverage: buffer around the stops' convex hull that "
+                          "defines the service area (default: 500).")
+    conflate.add_argument("--skip-coverage", action="store_true",
+                          help="Skip the reverse OSM coverage check and its GeoPackage export.")
 
     qa = subparsers.add_parser(
         "google-qa",
@@ -394,6 +402,9 @@ def _run_conflate_osm(args: argparse.Namespace) -> int:
         osm_point_table=args.osm_point_table or settings.osm_point_table,
         osm_geom_column=args.osm_geom_column or settings.osm_geom_column,
         metric_crs=args.crs or settings.metric_crs,
+        coverage_radius_m=args.coverage_radius_m,
+        coverage_buffer_m=args.coverage_buffer_m,
+        skip_coverage=args.skip_coverage,
         dry_run=settings.dry_run,
     )
     try:

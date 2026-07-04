@@ -30,7 +30,7 @@ from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
 from ..analysis.connectivity import route_stop_map
-from . import clustering, osm_match, side_of_street, storage
+from . import clustering, coverage, osm_match, side_of_street, storage
 from .transfers_check import TransferCheck, check_transfers
 
 log = logging.getLogger(__name__)
@@ -68,6 +68,9 @@ class ConflationConfig(BaseModel):
     osm_point_table: str = "planet_osm_point"
     osm_geom_column: str = "way"
     metric_crs: Optional[str] = None
+    coverage_radius_m: float = Field(default=100.0, gt=0)
+    coverage_buffer_m: float = Field(default=500.0, gt=0)
+    skip_coverage: bool = False
     dry_run: bool = False
 
 
@@ -117,6 +120,10 @@ class ConflationReport(BaseModel):
     side_distribution: dict[str, int] = Field(default_factory=dict)
     side_low_confidence: int = 0
     stops_without_street: int = 0
+    coverage_radius_m: Optional[float] = None
+    coverage_buffer_m: Optional[float] = None
+    osm_only_stops: int = 0
+    osm_only_by_kind: dict[str, int] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -262,6 +269,14 @@ def run_conflation(config: ConflationConfig) -> ConflationReport:
         storage.load_osm_matches(engine, matches)
         storage.load_sides(engine, sides)
 
+    # Part D - reverse coverage: OSM transit nodes with no GTFS stop nearby.
+    gaps = coverage.rows_to_frame([])
+    if not config.skip_coverage:
+        gaps = coverage.osm_only_stops(
+            engine, schema, config.coverage_radius_m, config.coverage_buffer_m
+        )
+        coverage.write_coverage_gpkg(gaps, config.report_dir)
+
     matched = int((~matches["needs_review"]).sum()) if not matches.empty else 0
     total = int(len(matches))
     side_counts = sides["side"].fillna("(no street)").value_counts().to_dict() if not sides.empty else {}
@@ -279,6 +294,10 @@ def run_conflation(config: ConflationConfig) -> ConflationReport:
         side_distribution={str(k): int(v) for k, v in side_counts.items()},
         side_low_confidence=int((sides["side_confidence"] == "low").sum()) if not sides.empty else 0,
         stops_without_street=int(sides["side"].isna().sum()) if not sides.empty else 0,
+        coverage_radius_m=None if config.skip_coverage else config.coverage_radius_m,
+        coverage_buffer_m=None if config.skip_coverage else config.coverage_buffer_m,
+        osm_only_stops=int(len(gaps)),
+        osm_only_by_kind={str(k): int(v) for k, v in gaps["kind"].fillna("(untagged)").value_counts().items()} if not gaps.empty else {},
     )
     _write(report, config.report_dir, CONFLATION_JSON, CONFLATION_MD, _conflation_markdown)
     log.info(
@@ -371,4 +390,22 @@ def _conflation_markdown(report: ConflationReport) -> str:
         f"No highway within threshold: {report.stops_without_street}",
         "",
     ]
+    if report.coverage_radius_m is not None:
+        lines += [
+            "## Reverse coverage (OSM transit nodes without a GTFS stop)",
+            "",
+            f"Service area: stops hull + {report.coverage_buffer_m:g} m buffer · "
+            f"covered when a stop is within {report.coverage_radius_m:g} m",
+            "",
+            f"- OSM-only transit nodes: **{report.osm_only_stops}**",
+        ]
+        for kind, count in sorted(report.osm_only_by_kind.items()):
+            lines.append(f"  - {kind}: {count}")
+        if report.osm_only_stops:
+            lines.append(
+                f"- Reviewable layer: `{coverage.COVERAGE_GPKG}` "
+                f"(layer `{coverage.COVERAGE_LAYER}`) - coverage gaps in the "
+                "feeds, or OSM noise."
+            )
+        lines.append("")
     return "\n".join(lines)
