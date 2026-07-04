@@ -288,7 +288,7 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
 
 def _run_ingest(args: argparse.Namespace) -> int:
     """Execute the Phase 1 ingest flow; returns the process exit code."""
-    from .pipeline import run_pipeline
+    from .pipeline_phase1 import run_pipeline
 
     settings = _settings_from_args(args)
     setup_logging(settings.log_level)
@@ -312,7 +312,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
 def _run_analyze(args: argparse.Namespace) -> int:
     """Execute the Phase 2 analysis flow; returns the process exit code."""
     from .analysis.headways import DEFAULT_WINDOWS, TimeWindow
-    from .analysis.pipeline_day2 import AnalysisConfig, run_analysis
+    from .analysis.pipeline_phase2 import AnalysisConfig, run_analysis
 
     settings = _settings_from_args(args)
     setup_logging(settings.log_level)
@@ -357,7 +357,7 @@ def _run_analyze(args: argparse.Namespace) -> int:
 
 def _run_detect_interchanges(args: argparse.Namespace) -> int:
     """Execute the Phase 3A interchange flow; returns the process exit code."""
-    from .conflation.pipeline_day3 import InterchangeConfig, run_interchanges
+    from .conflation.pipeline_phase3 import InterchangeConfig, run_interchanges
 
     settings = _settings_from_args(args)
     setup_logging(settings.log_level)
@@ -381,7 +381,7 @@ def _run_detect_interchanges(args: argparse.Namespace) -> int:
 
 def _run_conflate_osm(args: argparse.Namespace) -> int:
     """Execute the Phase 3B+C conflation flow; returns the process exit code."""
-    from .conflation.pipeline_day3 import ConflationConfig, run_conflation
+    from .conflation.pipeline_phase3 import ConflationConfig, run_conflation
 
     overrides: dict = {"feed_paths": [], "dry_run": args.dry_run}
     if args.db_url:
@@ -418,7 +418,7 @@ def _run_conflate_osm(args: argparse.Namespace) -> int:
 
 def _run_google_qa(args: argparse.Namespace) -> int:
     """Execute (or cleanly no-op) the Phase 4 QA flow; returns exit code."""
-    from .qa.pipeline_qa import QaConfig, run_google_qa
+    from .qa.pipeline_phase4 import QaConfig, run_google_qa
 
     overrides: dict = {"feed_paths": [], "dry_run": args.dry_run}
     if args.db_url:

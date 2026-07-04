@@ -231,7 +231,9 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
     link_frames = [d.stop_links for d in feed_data if not d.stop_links.empty]
     all_links = pd.concat(link_frames, ignore_index=True) if link_frames else pd.DataFrame()
 
-    near = near_stations.build_near_stations(all_stops, route_stops, routes, stop_pairs)
+    near = near_stations.build_near_stations(
+        all_stops, route_stops, routes, stop_pairs, stop_links=all_links
+    )
     near_stations.write_near_stations(near, config.report_dir)
     geopackage.write_geopackage(all_stops, near, stop_pairs, config.report_dir,
                                 route_shapes=all_shapes, stop_links=all_links)

@@ -23,7 +23,7 @@ from gtfs_ingest.qa.google_client import (
     PlaceResult,
     field_names_only,
 )
-from gtfs_ingest.qa.pipeline_qa import QaConfig, run_google_qa
+from gtfs_ingest.qa.pipeline_phase4 import QaConfig, run_google_qa
 
 
 def place(pid="p1", types=(), transit=None) -> PlaceResult:

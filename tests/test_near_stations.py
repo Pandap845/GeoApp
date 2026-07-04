@@ -56,8 +56,10 @@ def test_near_stations_numeric_ids_and_format(tmp_path: Path) -> None:
 
     assert list(result.columns) == [
         "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
-        "stop_lat", "stop_lon", "stop_line_ids", "near_stations",
+        "stop_lat", "stop_lon", "stop_line_ids", "near_stations", "same_line_stations",
     ]
+    # No stop_links passed -> the same-line relation is empty, not missing.
+    assert row_of(result, "f:S1")["same_line_stations"] == "[]"
     s1 = row_of(result, "f:S1")
     # Numeric id column matches the deterministic derivation.
     assert s1["stop_num_id"] == nid("f:S1")

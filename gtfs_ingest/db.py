@@ -1,20 +1,6 @@
-"""PostgreSQL/PostGIS engine, schema DDL, and idempotent stop loading.
-
-Idempotency strategy: **per-feed delete-and-reload inside one transaction**.
-Re-running the pipeline for a feed first deletes that feed's rows, then
-inserts the fresh set, all atomically. Chosen over row-level upsert because:
-  * it correctly removes stops that disappeared from a newer feed version
-    (upsert would leave stale rows behind);
-  * it is simple to reason about and to make atomic;
-  * other feeds' rows are untouched, so feeds can be re-ingested
-    independently.
-Readers never observe a half-loaded feed: the DELETE + INSERTs commit as
-one transaction.
-
-Geometry is built server-side with ``ST_SetSRID(ST_MakePoint(lon, lat), 4326)``
-- SRID 4326 (WGS84) because that is the coordinate system the GTFS spec
-mandates for stop_lat/stop_lon, so no reprojection is needed or wanted at
-ingest time.
+"""
+GTFS ingest database schema and load functions.
+Basic PostGIS schema for normalized stops, plus idempotent load of one feed's stops.
 """
 
 from __future__ import annotations

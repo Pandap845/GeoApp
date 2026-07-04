@@ -299,7 +299,7 @@ gtfs_ingest/
   normalizer.py  raw stops.txt -> common-schema GeoDataFrame (EPSG:4326)
   db.py          engine, DDL, idempotent per-feed load
   report.py      JSON + Markdown emission
-  pipeline.py    orchestration + per-feed failure isolation
+  pipeline_phase1.py  orchestration + per-feed failure isolation
   cli.py         argparse entry point: ingest / analyze-frequency subcommands
   analysis/      Phase 2 subpackage
     service_filter.py   service-date + calendar_dates filtering (partridge)
@@ -307,19 +307,19 @@ gtfs_ingest/
     connectivity.py     shared-stop / parent_station / proximity edges
     graph_export.py     networkx graph, metrics, GraphML
     storage.py          DDL + idempotent loads for the analysis tables
-    pipeline_day2.py    Phase 2 orchestration + report
+    pipeline_phase2.py  Phase 2 orchestration + report
   conflation/    Phase 3 subpackage
     clustering.py       DBSCAN + parent_station merge -> interchanges
     transfers_check.py  inferred vs declared transfers
     osm_match.py        OSM schema validation + nearest transit node + confidence
     side_of_street.py   nearest centerline + left/right sign math
     storage.py          DDL + idempotent loads for the Phase 3 tables
-    pipeline_day3.py    Phase 3 orchestration + reports
+    pipeline_phase3.py  Phase 3 orchestration + reports
   qa/            Phase 4 subpackage (Google QA - off by default)
     google_client.py    Places API (New) + legacy Geocoding/Distance Matrix client
     crosscheck.py       eligibility + verdict logic (in-memory comparisons)
     storage.py          allowlisted verdict tables (StorageViolation guard)
-    pipeline_qa.py      gating, budget enforcement, QA report
+    pipeline_phase4.py  gating, budget enforcement, QA report
     station_locator.py  station list -> coords + travel times -> Excel route
 tests/           pytest suite with synthetic fixture feeds
 docker-compose.yaml  local PostGIS (postgis/postgis:16-3.4)
@@ -353,7 +353,7 @@ init/            optional first-boot SQL/shell scripts for the DB container
 ```
 
 Each feed goes through steps 2–5 independently inside a per-feed exception
-boundary (`pipeline.process_feed`): any failure becomes an ERROR finding on
+boundary (`pipeline_phase1.process_feed`): any failure becomes an ERROR finding on
 that feed and the next feed proceeds.
 
 ## Validation checks performed

@@ -11,6 +11,6 @@ PostGIS database is the ONLY reference source - no external APIs.
   with a documented confidence score; also validates the OSM schema.
 - ``side_of_street``   - nearest highway centerline + left/right sign math.
 - ``storage``          - DDL + idempotent loads for the Phase 3 tables.
-- ``pipeline_day3``    - orchestrates ``detect-interchanges`` and
+- ``pipeline_phase3`` - orchestrates ``detect-interchanges`` and
   ``conflate-osm``.
 """

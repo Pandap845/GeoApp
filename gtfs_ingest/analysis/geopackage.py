@@ -43,6 +43,7 @@ GEOPACKAGE_NAME = "transit_analysis.gpkg"
 STOPS_LAYER_COLUMNS = [
     "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
     "location_type", "parent_station", "stop_line_ids", "near_stations",
+    "same_line_stations",
 ]
 
 
@@ -109,12 +110,13 @@ def _stops_layer(stops: gpd.GeoDataFrame, near: pd.DataFrame) -> gpd.GeoDataFram
         ["stop_num_id", "stop_uid", "feed_id", "stop_id",
          "location_type", "parent_station", "geometry"]
     ].copy()
-    extras = near[["stop_uid", "station", "stop_line_ids", "near_stations"]] \
-        if not near.empty else pd.DataFrame(columns=["stop_uid", "station", "stop_line_ids", "near_stations"])
+    extra_cols = ["stop_uid", "station", "stop_line_ids", "near_stations", "same_line_stations"]
+    extras = near[extra_cols] if not near.empty else pd.DataFrame(columns=extra_cols)
     layer = layer.merge(extras, on="stop_uid", how="left")
     layer["station"] = layer["station"].fillna("")
     layer["stop_line_ids"] = layer["stop_line_ids"].fillna("")
     layer["near_stations"] = layer["near_stations"].fillna("[]")
+    layer["same_line_stations"] = layer["same_line_stations"].fillna("[]")
     # GPKG has no NaN for strings; parent_station NULLs are fine as None.
     layer["parent_station"] = layer["parent_station"].where(layer["parent_station"].notna(), None)
     gdf = gpd.GeoDataFrame(layer[STOPS_LAYER_COLUMNS + ["geometry"]],

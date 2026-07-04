@@ -11,7 +11,7 @@ normalization, PostGIS access are reused, not re-implemented):
   shared parent_station, or spatial proximity.
 - ``graph_export``    - networkx graph construction, metrics, GraphML.
 - ``storage``         - DDL + idempotent loads for the analysis tables.
-- ``pipeline_day2``   - orchestration of the full Phase 2 flow.
+- ``pipeline_phase2`` - orchestration of the full Phase 2 flow.
 
 OSM data and interchange clustering are explicitly out of scope (Phase 3).
 """

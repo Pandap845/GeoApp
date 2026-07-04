@@ -16,11 +16,6 @@ feed_id derivation (deterministic, documented contract):
      suffix ``_<first 8 hex chars of sha256(absolute path)>`` is appended,
      which is stable across runs on the same machine layout.
 
-Feeds are loaded with ``partridge.load_raw_feed`` (no type coercion, no
-service-date filtering): validation wants to see the file contents as-is,
-and all type normalization happens explicitly in ``normalizer.py``.
-partridge sniffs file encodings internally; files it still cannot parse are
-recorded per-table in ``LoadedFeed.table_errors`` instead of raising.
 """
 
 from __future__ import annotations

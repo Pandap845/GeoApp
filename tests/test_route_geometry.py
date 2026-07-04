@@ -137,6 +137,52 @@ def test_geopackage_gets_route_layers(tmp_path: Path) -> None:
     assert read["stop_uid_a"].iloc[0] == "feedx:A"
 
 
+def test_same_line_stations_lists_adjacent_stops_in_route_order() -> None:
+    from gtfs_ingest.analysis.near_stations import build_near_stations
+
+    # Three stops of one line; A-B-C in direction 0.
+    stops = pd.DataFrame(
+        {
+            "stop_num_id": [11, 22, 33],
+            "stop_uid": ["f:A", "f:B", "f:C"],
+            "feed_id": ["f", "f", "f"],
+            "stop_id": ["A", "B", "C"],
+            "stop_name": ["Alfa", "Beta", "Gamma"],
+            "stop_lat": [20.00, 20.01, 20.02],
+            "stop_lon": [-103.0, -103.0, -103.0],
+        }
+    )
+    route_stops = pd.DataFrame(
+        {
+            "stop_uid": ["f:A", "f:B", "f:C"],
+            "route_uid": ["f:R1", "f:R1", "f:R1"],
+        }
+    )
+    routes = pd.DataFrame({"route_uid": ["f:R1"], "route_id": ["R1"], "route_short_name": ["L1"]})
+    stop_pairs = pd.DataFrame(columns=["stop_uid_a", "stop_uid_b", "distance_m"])
+    stop_links = pd.DataFrame(
+        {
+            "route_uid": ["f:R1", "f:R1"],
+            "feed_id": ["f", "f"],
+            "linea": ["L1", "L1"],
+            "direction_id": [0, 0],
+            "stop_uid_a": ["f:A", "f:B"],
+            "stop_uid_b": ["f:B", "f:C"],
+        }
+    )
+    out = build_near_stations(stops, route_stops, routes, stop_pairs, stop_links=stop_links).set_index("stop_uid")
+
+    # B is the middle stop: its same-line neighbours are A (prev) and C (next).
+    b = out.loc["f:B", "same_line_stations"]
+    assert "11, Alfa, L1, dir0" in b and "33, Gamma, L1, dir0" in b
+    # A is an endpoint: only B is adjacent; distance ~1.1 km (0.01 deg lat).
+    a = out.loc["f:A", "same_line_stations"]
+    assert a.count("(") == 1 and "22, Beta, L1, dir0" in a
+    assert "1112.0m" in a or "1111." in a  # ~0.01 deg latitude
+    # near_stations (proximity) stays empty - no stop_pairs given.
+    assert out.loc["f:A", "near_stations"] == "[]"
+
+
 def test_coverage_rows_to_frame() -> None:
     rows = [
         {"osm_id": 1, "kind": "bus_stop", "osm_name": "Parada X",

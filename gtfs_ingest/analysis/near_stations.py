@@ -30,6 +30,19 @@ Identifier conventions (documented in the README):
 - "near" reuses the connectivity proximity threshold (``--proximity-m``,
   default 150 m) and the same distance engine (PostGIS geography when a
   database is available, local UTM math otherwise).
+
+A second relation, ``same_line_stations``, lists the stop's **adjacent
+stations along each line it serves** - the actual previous/next stop in
+route order (``stop_times`` sequence), per line and direction, rendered as::
+
+    [(ID, station, linea, dir{d}, {dist}m), ...]
+
+Unlike ``near_stations`` (any line, geographic proximity only), this is the
+route topology: it comes from the consecutive-stop pairs of
+``route_geometry.route_stop_links`` and includes both the previous and next
+stop of every (line, direction) serving the stop, even when they are farther
+than the proximity threshold. ``dist`` is the straight-line (haversine)
+distance between the two consecutive stops in meters.
 """
 
 from __future__ import annotations
@@ -50,8 +63,11 @@ NEAR_STATIONS_NAME = "near_stations.csv"
 #: Columns of the exported file.
 COLUMNS = [
     "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
-    "stop_lat", "stop_lon", "stop_line_ids", "near_stations",
+    "stop_lat", "stop_lon", "stop_line_ids", "near_stations", "same_line_stations",
 ]
+
+#: Mean earth radius (meters) for the straight-line inter-stop distance.
+_EARTH_RADIUS_M = 6_371_000.0
 
 
 def _line_labels(routes: pd.DataFrame) -> pd.DataFrame:
@@ -78,6 +94,7 @@ def build_near_stations(
     route_stops: pd.DataFrame,
     routes: pd.DataFrame,
     stop_pairs: pd.DataFrame,
+    stop_links: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Assemble the near-stations table for all analyzed stops.
 
@@ -90,13 +107,17 @@ def build_near_stations(
             ``route_short_name``.
         stop_pairs: proximity stop pairs (``stop_uid_a, stop_uid_b,
             distance_m``) from either ``proximity_pairs_*`` function.
+        stop_links: consecutive-stop pairs per route/direction
+            (``route_geometry.route_stop_links``, all feeds) used to build
+            the ``same_line_stations`` column; ``None``/empty yields ``"[]"``.
 
     Returns:
         One row per stop with :data:`COLUMNS`; ``near_stations`` holds the
-        formatted tuple list (``"[]"`` when nothing is within the
-        threshold) using numeric ids, and ``stop_line_ids`` the combined
-        ``num_id-line`` identifiers of the stop's own lines (``""`` when
-        unserved). Never raises on empty inputs.
+        formatted proximity tuple list (``"[]"`` when nothing is within the
+        threshold), ``same_line_stations`` the adjacent same-line stations
+        in route order, and ``stop_line_ids`` the combined ``num_id-line``
+        identifiers of the stop's own lines (``""`` when unserved). Never
+        raises on empty inputs.
     """
     base = stops[
         ["stop_num_id", "stop_uid", "feed_id", "stop_id", "stop_name", "stop_lat", "stop_lon"]
@@ -118,6 +139,10 @@ def build_near_stations(
     )
     base = base.merge(combos, on="stop_uid", how="left")
     base["stop_line_ids"] = base["stop_line_ids"].fillna("")
+
+    # Adjacent same-line stations (route order); carried through both the
+    # early-return and normal paths because it is attached to `base`.
+    base = _attach_same_line(base, stop_links)
 
     entries = _near_entries(base, lines_at, stop_pairs)
     if entries.empty:
@@ -187,6 +212,77 @@ def _near_entries(
     entries["near_station"] = entries["near_station"].fillna("")
     entries["minutes"] = walk_minutes(entries["distance_m"])
     return entries[columns]
+
+
+def _haversine_m(
+    lat1: pd.Series, lon1: pd.Series, lat2: pd.Series, lon2: pd.Series
+) -> pd.Series:
+    """Vectorized great-circle distance in meters between two point series."""
+    p1, p2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlmb = np.radians(lon2 - lon1)
+    a = np.sin(dphi / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dlmb / 2) ** 2
+    meters = 2 * _EARTH_RADIUS_M * np.arcsin(np.sqrt(a))
+    return pd.Series(np.asarray(meters), index=lat1.index)
+
+
+def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> pd.DataFrame:
+    """One row per (stop, adjacent same-line stop, line, direction).
+
+    Both the next stop (this stop is ``stop_uid_a`` of a link) and the
+    previous stop (this stop is ``stop_uid_b``) are collected, so each
+    (line, direction) contributes up to two neighbours. Distance is the
+    straight-line distance between the two consecutive stops.
+    """
+    columns = ["stop_uid", "near_num_id", "near_station", "linea", "direction_id", "distance_m"]
+    if stop_links is None or stop_links.empty:
+        return pd.DataFrame(columns=columns)
+    keep = ["stop_uid", "near_uid", "linea", "direction_id"]
+    forward = stop_links.rename(columns={"stop_uid_a": "stop_uid", "stop_uid_b": "near_uid"})[keep]
+    backward = stop_links.rename(columns={"stop_uid_b": "stop_uid", "stop_uid_a": "near_uid"})[keep]
+    both = pd.concat([forward, backward], ignore_index=True).drop_duplicates(keep)
+
+    near_attr = base[["stop_uid", "stop_num_id", "station", "stop_lat", "stop_lon"]].rename(
+        columns={
+            "stop_uid": "near_uid", "stop_num_id": "near_num_id",
+            "station": "near_station", "stop_lat": "near_lat", "stop_lon": "near_lon",
+        }
+    )
+    entries = both.merge(near_attr, on="near_uid", how="inner").merge(
+        base[["stop_uid", "stop_lat", "stop_lon"]], on="stop_uid", how="left"
+    )
+    if entries.empty:
+        return pd.DataFrame(columns=columns)
+    entries["near_station"] = entries["near_station"].fillna("")
+    entries["distance_m"] = _haversine_m(
+        entries["stop_lat"], entries["stop_lon"], entries["near_lat"], entries["near_lon"]
+    ).round(1)
+    return entries[columns]
+
+
+def _attach_same_line(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> pd.DataFrame:
+    """Add the rendered ``same_line_stations`` column to *base* (in place)."""
+    entries = _same_line_entries(base, stop_links)
+    if entries.empty:
+        base["same_line_stations"] = "[]"
+        return base
+    entries = entries.sort_values(
+        ["stop_uid", "linea", "direction_id", "distance_m", "near_num_id"]
+    )
+    entries["tuple"] = (
+        "(" + entries["near_num_id"].astype(str) + ", " + entries["near_station"] + ", "
+        + entries["linea"].astype(str) + ", dir" + entries["direction_id"].astype(str) + ", "
+        + entries["distance_m"].astype(str) + "m)"
+    )
+    rendered = (
+        entries.groupby("stop_uid")["tuple"]
+        .agg(lambda parts: "[" + ", ".join(parts) + "]")
+        .rename("same_line_stations")
+        .reset_index()
+    )
+    base = base.merge(rendered, on="stop_uid", how="left")
+    base["same_line_stations"] = base["same_line_stations"].fillna("[]")
+    return base
 
 
 def write_near_stations(near: pd.DataFrame, out_dir: Path) -> Path:

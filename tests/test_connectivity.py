@@ -11,7 +11,7 @@ import pandas as pd
 
 from gtfs_ingest.analysis import connectivity
 from gtfs_ingest.analysis.graph_export import build_graph, graph_metrics, write_graphml
-from gtfs_ingest.analysis.pipeline_day2 import GRAPHML_NAME, JSON_NAME, MARKDOWN_NAME
+from gtfs_ingest.analysis.pipeline_phase2 import GRAPHML_NAME, JSON_NAME, MARKDOWN_NAME
 
 from test_headways import ANALYSIS_FEED
 from conftest import write_feed_dir

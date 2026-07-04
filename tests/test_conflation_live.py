@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 def test_conflate_osm_live(valid_feed, tmp_path: Path) -> None:
     from sqlalchemy import text
 
-    from gtfs_ingest.conflation.pipeline_day3 import ConflationConfig, run_conflation
+    from gtfs_ingest.conflation.pipeline_phase3 import ConflationConfig, run_conflation
     from gtfs_ingest.db import ensure_schema, load_feed_stops, make_engine
     from gtfs_ingest.normalizer import normalize_stops
 
