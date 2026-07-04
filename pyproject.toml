@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gtfs-ingest"
+version = "0.1.0"
+description = "GTFS ingestion & validation pipeline (Phase 1): validate feeds, normalize stops, load into PostGIS."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "partridge>=1.1.2",
+    "pandas>=2.0",
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "SQLAlchemy>=2.0",
+    "psycopg[binary]>=3.1",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+gtfs-ingest = "gtfs_ingest.cli:main"
+
+[tool.setuptools]
+packages = ["gtfs_ingest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+log_cli_level = "WARNING"

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+transitland-lib/
+gtfs_ingest.egg-info/
+# Pipeline outputs & local config
+out/
+.env
+
+# IDE
+.idea/
+
+
+
