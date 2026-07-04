@@ -36,7 +36,7 @@ import logging
 import geopandas as gpd
 import pandas as pd
 
-from .models import Finding, LoadedFeed, STOP_COLUMNS, Severity
+from .models import Finding, LoadedFeed, STOP_COLUMNS, Severity, numeric_stop_id
 
 log = logging.getLogger(__name__)
 
@@ -138,9 +138,10 @@ def normalize_stops(loaded: LoadedFeed) -> tuple[gpd.GeoDataFrame, list[Finding]
         "duplicate stop_id (first occurrence kept)",
     )
 
-    # 7. Provenance + globally unique key.
+    # 7. Provenance + globally unique key (+ its numeric alias).
     df["feed_id"] = loaded.feed_id
     df["stop_uid"] = loaded.feed_id + ":" + df["stop_id"].astype(str)
+    df["stop_num_id"] = df["stop_uid"].map(numeric_stop_id)
 
     df = df[list(STOP_COLUMNS)].reset_index(drop=True)
     gdf = gpd.GeoDataFrame(

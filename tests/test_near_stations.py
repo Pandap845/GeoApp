@@ -1,4 +1,4 @@
-"""Tests for the near-stations export (format, distances, line labels)."""
+"""Tests for the near-stations export (numeric ids, combined ids, format)."""
 
 from __future__ import annotations
 
@@ -13,8 +13,13 @@ from gtfs_ingest.analysis.near_stations import (
     walk_minutes,
     write_near_stations,
 )
+from gtfs_ingest.models import numeric_stop_id
 
 from test_connectivity import rs, stops_geo
+
+
+def nid(stop_uid: str) -> int:
+    return numeric_stop_id(stop_uid)
 
 
 def routes_meta(*rows: tuple[str, str, str | None]) -> pd.DataFrame:
@@ -28,15 +33,16 @@ def make_stops(*rows: tuple[str, str, str, float, float]) -> pd.DataFrame:
     """Rows of (feed_id, stop_id, stop_name, lat, lon) shaped like normalizer output."""
     geo = stops_geo(*[(f, s, lat, lon) for f, s, _, lat, lon in rows])
     geo["stop_name"] = [name for _, _, name, _, _ in rows]
+    geo["stop_num_id"] = geo["stop_uid"].map(numeric_stop_id)
     return geo
 
 
-def near_cell(result: pd.DataFrame, stop_uid: str) -> str:
+def row_of(result: pd.DataFrame, stop_uid: str) -> dict:
     (row,) = result[result["stop_uid"] == stop_uid].to_dict("records")
-    return row["near_stations"]
+    return row
 
 
-def test_near_stations_format_and_walk_time(tmp_path: Path) -> None:
+def test_near_stations_numeric_ids_and_format(tmp_path: Path) -> None:
     # Two stops ~100 m apart: walkable in ~1 min at 5 km/h.
     stops = make_stops(
         ("f", "S1", "First Stop", 40.0, -75.0),
@@ -49,19 +55,28 @@ def test_near_stations_format_and_walk_time(tmp_path: Path) -> None:
     result = build_near_stations(stops, route_stops, routes, pairs)
 
     assert list(result.columns) == [
-        "stop_uid", "feed_id", "stop_id", "station", "stop_lat", "stop_lon", "near_stations",
+        "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
+        "stop_lat", "stop_lon", "stop_line_ids", "near_stations",
     ]
-    # Exact requested format: [(ID, station, linea, time to reach), ...]
-    assert near_cell(result, "f:S1") == "[(f:S2, Second Stop, 20, 1 min)]"
-    assert near_cell(result, "f:S2") == "[(f:S1, First Stop, 10, 1 min)]"
+    s1 = row_of(result, "f:S1")
+    # Numeric id column matches the deterministic derivation.
+    assert s1["stop_num_id"] == nid("f:S1")
+    # Node relation tuples use the NUMERIC id of the near stop.
+    assert s1["near_stations"] == f"[({nid('f:S2')}, Second Stop, 20, 1 min)]"
+    # Combined stop+line id of the row's own stop.
+    assert s1["stop_line_ids"] == f"{nid('f:S1')}-10"
+
+    s2 = row_of(result, "f:S2")
+    assert s2["near_stations"] == f"[({nid('f:S1')}, First Stop, 10, 1 min)]"
+    assert s2["stop_line_ids"] == f"{nid('f:S2')}-20"
 
     path = write_near_stations(result, tmp_path)
     assert path.name == NEAR_STATIONS_NAME
     reread = pd.read_csv(path)
-    assert reread.loc[reread["stop_uid"] == "f:S1", "near_stations"].item().startswith("[(f:S2,")
+    assert int(reread.loc[reread["stop_uid"] == "f:S1", "stop_num_id"].item()) == nid("f:S1")
 
 
-def test_multiple_lines_yield_one_tuple_each() -> None:
+def test_multiple_lines_yield_one_tuple_and_one_combo_each() -> None:
     stops = make_stops(
         ("f", "S1", "Hub", 40.0, -75.0),
         ("f", "S2", "Side", 40.0009, -75.0),
@@ -72,7 +87,11 @@ def test_multiple_lines_yield_one_tuple_each() -> None:
     pairs = connectivity.proximity_pairs_local(stops, threshold_m=150.0)
 
     result = build_near_stations(stops, route_stops, routes, pairs)
-    assert near_cell(result, "f:S1") == "[(f:S2, Side, 20, 1 min), (f:S2, Side, r3, 1 min)]"
+    s2 = nid("f:S2")
+    assert row_of(result, "f:S1")["near_stations"] == (
+        f"[({s2}, Side, 20, 1 min), ({s2}, Side, r3, 1 min)]"
+    )
+    assert row_of(result, "f:S2")["stop_line_ids"] == f"{s2}-20, {s2}-r3"
 
 
 def test_stops_without_neighbours_get_empty_list() -> None:
@@ -85,10 +104,8 @@ def test_stops_without_neighbours_get_empty_list() -> None:
     pairs = connectivity.proximity_pairs_local(stops, threshold_m=150.0)
 
     result = build_near_stations(stops, route_stops, routes, pairs)
-    assert near_cell(result, "f:S1") == "[]"
-    assert near_cell(result, "f:S9") == "[]"
-    # A stop never lists itself.
-    assert "f:S1" not in near_cell(result, "f:S1")
+    assert row_of(result, "f:S1")["near_stations"] == "[]"
+    assert row_of(result, "f:S9")["near_stations"] == "[]"
 
 
 def test_unserved_near_stop_is_omitted_from_lists() -> None:
@@ -102,8 +119,17 @@ def test_unserved_near_stop_is_omitted_from_lists() -> None:
     pairs = connectivity.proximity_pairs_local(stops, threshold_m=150.0)
 
     result = build_near_stations(stops, route_stops, routes, pairs)
-    assert near_cell(result, "f:S1") == "[]"                      # S2 has no line
-    assert near_cell(result, "f:S2") == "[(f:S1, Stop, 10, 1 min)]"  # S1 does
+    assert row_of(result, "f:S1")["near_stations"] == "[]"          # S2 has no line
+    assert row_of(result, "f:S2")["near_stations"] == f"[({nid('f:S1')}, Stop, 10, 1 min)]"
+    assert row_of(result, "f:S2")["stop_line_ids"] == ""            # unserved itself
+
+
+def test_numeric_ids_are_stable_and_unique() -> None:
+    uids = [f"feed{i % 3}:S{i}" for i in range(500)]
+    ids = [numeric_stop_id(u) for u in uids]
+    assert ids == [numeric_stop_id(u) for u in uids]   # deterministic
+    assert len(set(ids)) == len(ids)                   # no collisions here
+    assert all(0 <= i < 2**48 for i in ids)            # fits BIGINT and JS numbers
 
 
 def test_walk_minutes_floor_and_rounding() -> None:

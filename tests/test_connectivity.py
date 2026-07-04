@@ -164,13 +164,26 @@ def test_analyze_frequency_cli_dry_run(tmp_path: Path) -> None:
     assert "## Route connectivity" in md and "am_peak" in md
 
     # Near-stations export: S3 (platform) sits ~14 m from S2 (its station).
+    from gtfs_ingest.models import numeric_stop_id
+
     near = pd.read_csv(out / "near_stations.csv")
     s2 = near.loc[near["stop_uid"] == "metro:S2", "near_stations"].item()
-    assert s2.startswith("[(metro:S3, Central Platform, ")
+    assert s2.startswith(f"[({numeric_stop_id('metro:S3')}, Central Platform, ")
     assert ", 1 min)" in s2
     # S2 is an unserved station node, so it appears in no one's list.
     s3 = near.loc[near["stop_uid"] == "metro:S3", "near_stations"].item()
     assert s3 == "[]"
+    # The numeric id column matches the stops table derivation.
+    assert int(near.loc[near["stop_uid"] == "metro:S3", "stop_num_id"].item()) \
+        == numeric_stop_id("metro:S3")
+
+    # GeoPackage export exists with both layers.
+    import geopandas as gpd
+
+    gpkg = out / "transit_analysis.gpkg"
+    assert gpkg.is_file()
+    assert len(gpd.read_file(gpkg, layer="stops")) == 3
+    assert len(gpd.read_file(gpkg, layer="near_links")) == 1   # S2 <-> S3
 
 
 def test_analyze_cli_rejects_bad_service_date(tmp_path: Path) -> None:

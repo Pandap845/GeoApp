@@ -9,12 +9,25 @@ which wraps a live partridge feed object and is therefore a plain dataclass.
 from __future__ import annotations
 
 import enum
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 import pandas as pd
 from pydantic import BaseModel, Field
+
+
+def numeric_stop_id(stop_uid: str) -> int:
+    """Deterministic numeric ID for a stop, derived from its ``stop_uid``.
+
+    First 48 bits of ``sha256(stop_uid)`` as an unsigned integer: numeric,
+    globally unique in practice (collision odds for even 100k stops are
+    ~1e-5), stable across runs and feed sets, and small enough to survive
+    a round-trip through JSON/JavaScript numbers. ``stop_uid`` remains the
+    durable human-readable key; this is its machine-friendly alias.
+    """
+    return int.from_bytes(hashlib.sha256(stop_uid.encode("utf-8")).digest()[:6], "big")
 
 # --------------------------------------------------------------------------
 # GTFS schema constants
@@ -212,6 +225,8 @@ class StopRecord(BaseModel):
 
     Attributes:
         stop_uid: globally unique key, ``"{feed_id}:{stop_id}"``.
+        stop_num_id: numeric alias of ``stop_uid`` (see
+            :func:`numeric_stop_id`) for consumers that need integer ids.
         feed_id: provenance - which feed the stop came from.
         stop_id: original GTFS stop_id (whitespace-stripped).
         stop_name: stop name or ``None`` when blank in the source.
@@ -223,6 +238,7 @@ class StopRecord(BaseModel):
     """
 
     stop_uid: str
+    stop_num_id: int
     feed_id: str
     stop_id: str
     stop_name: Optional[str] = None

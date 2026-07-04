@@ -32,7 +32,7 @@ from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
 from ..models import FeedSource
-from . import connectivity, graph_export, near_stations, storage
+from . import connectivity, geopackage, graph_export, near_stations, storage
 from .headways import DEFAULT_WINDOWS, TimeWindow, compute_stop_headways, route_rollup, stop_departures
 from .service_filter import load_service_feed
 
@@ -222,6 +222,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
 
     near = near_stations.build_near_stations(all_stops, route_stops, routes, stop_pairs)
     near_stations.write_near_stations(near, config.report_dir)
+    geopackage.write_geopackage(all_stops, near, stop_pairs, config.report_dir)
 
     graph = graph_export.build_graph(routes, edges)
     metrics = graph_export.graph_metrics(graph)
@@ -308,8 +309,10 @@ def _render_markdown(report: AnalysisReport) -> str:
         "",
         f"GraphML export: `{GRAPHML_NAME}` (same directory).  ",
         f"Near-stations export: `{near_stations.NEAR_STATIONS_NAME}` "
-        "(per stop: ID, name, lat, lon, and nearby stations as "
-        "`[(ID, station, linea, time to reach), ...]`).",
+        "(per stop: numeric ID, name, lat, lon, combined stop+line ids, and "
+        "nearby stations as `[(ID, station, linea, time to reach), ...]`).  ",
+        f"GeoPackage export: `{geopackage.GEOPACKAGE_NAME}` "
+        "(layers: `stops` points, `near_links` lines - open in QGIS).",
         "",
     ]
     return "\n".join(lines)

@@ -27,6 +27,11 @@ consume the `stops` table and the JSON report; their contracts — the table
 schema, `feed_id` semantics, and finding codes — are documented here and are
 considered stable.
 
+> **[WORKFLOW.md](WORKFLOW.md)** traces the data end-to-end — every
+> processing stage, normalization rule, and calculation formula in one
+> narrative document. This README focuses on running and operating the
+> pipeline.
+
 ---
 
 ## 1. Requirements
@@ -148,6 +153,7 @@ docker exec -it transit-db psql -U transit -d transit \
 ```sql
 CREATE TABLE stops (
     stop_uid       text PRIMARY KEY,          -- "{feed_id}:{stop_id}"
+    stop_num_id    bigint NOT NULL,           -- numeric alias (see below)
     feed_id        text NOT NULL,             -- provenance
     stop_id        text NOT NULL,             -- original GTFS id
     stop_name      text,
@@ -160,7 +166,15 @@ CREATE TABLE stops (
 );
 CREATE INDEX ix_stops_geom    ON stops USING GIST (geom);
 CREATE INDEX ix_stops_feed_id ON stops (feed_id);
+CREATE UNIQUE INDEX ux_stops_num_id ON stops (stop_num_id);
 ```
+
+`stop_num_id` is a **deterministic numeric alias** of `stop_uid`: the first
+48 bits of `sha256(stop_uid)` as an unsigned integer. It is stable across
+runs and feed sets, unique in practice (collision odds at 100k stops are
+~1e-5, and the unique index would surface one immediately), and fits both
+`bigint` and JavaScript numbers. Consumers that need integer node ids use
+it; `stop_uid` remains the durable human-readable key.
 
 **Reports** in the `--report` directory:
 
@@ -524,23 +538,36 @@ Files in `--report DIR`:
   service date used and whether it was explicit or auto-picked, routes and
   trips analyzed; plus route-pair counts by connection type, graph metrics
   (components, sizes), and **isolated routes** (no connections at all).
-- `near_stations.csv` — one row per stop with `stop_uid`, `feed_id`,
-  `stop_id`, `station` (name), `stop_lat`, `stop_lon`, and `near_stations`:
-  the stations within the proximity threshold, formatted exactly as
+- `near_stations.csv` — one row per stop with `stop_num_id`, `stop_uid`,
+  `feed_id`, `stop_id`, `station` (name), `stop_lat`, `stop_lon`,
+  `stop_line_ids`, and `near_stations`: the stations within the proximity
+  threshold, formatted exactly as
 
   ```
   [(ID, station, linea, time to reach), (ID2, station, linea, time to reach)]
   ```
 
   one tuple per (near station, line) combination, sorted by walking time.
-  Conventions: IDs are feed-qualified `stop_uid`s; `linea` is the route's
-  `route_short_name` (falling back to `route_id`), restricted to lines
-  active on the analyzed service date — an unserved station node is omitted
-  from neighbour lists; `time to reach` is straight-line distance at a
-  **5 km/h walking speed** (~83 m/min), rounded to whole minutes with a
-  1-minute floor (no street network is consulted — Phase 3). "Near" reuses
-  `--proximity-m` (default 150 m) and the same distance engine as
-  connectivity (PostGIS geography, or local UTM math on dry runs).
+  Conventions: `ID` in the tuples is the near stop's **numeric id**
+  (`stop_num_id`, matching the `stops` table column — node relations join
+  directly against the database); `stop_line_ids` is the row's own set of
+  **combined stop+line ids** `"{stop_num_id}-{line}"` (e.g.
+  `128733941436-L10`), for consumers modelling one node per (station, line)
+  pair; `linea` is the route's `route_short_name` (falling back to
+  `route_id`), restricted to lines active on the analyzed service date — an
+  unserved station node is omitted from neighbour lists; `time to reach` is
+  straight-line distance at a **5 km/h walking speed** (~83 m/min), rounded
+  to whole minutes with a 1-minute floor (no street network is consulted —
+  Phase 3). "Near" reuses `--proximity-m` (default 150 m) and the same
+  distance engine as connectivity (PostGIS geography, or local UTM math on
+  dry runs).
+- `transit_analysis.gpkg` — **GeoPackage** (open directly in QGIS/GDAL)
+  with two EPSG:4326 layers: `stops` (points; numeric id, uid, feed/stop
+  ids, name, location_type, parent_station, `stop_line_ids`, and the
+  `near_stations` relation string) and `near_links` (one LineString per
+  near pair with both numeric ids, geodesic `distance_m`, and `walk_min`).
+  GeoPackage keeps 64-bit integers intact, so the numeric ids are safe
+  (a shapefile would truncate them). The file is rewritten per run.
 
 ## Phase 2 assumptions
 

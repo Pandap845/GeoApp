@@ -33,6 +33,7 @@ _DDL_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS stops (
         stop_uid       text PRIMARY KEY,
+        stop_num_id    bigint NOT NULL,
         feed_id        text NOT NULL,
         stop_id        text NOT NULL,
         stop_name      text,
@@ -46,16 +47,17 @@ _DDL_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS ix_stops_geom ON stops USING GIST (geom)",
     "CREATE INDEX IF NOT EXISTS ix_stops_feed_id ON stops (feed_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_stops_num_id ON stops (stop_num_id)",
 )
 
 _INSERT_SQL = text(
     """
     INSERT INTO stops (
-        stop_uid, feed_id, stop_id, stop_name,
+        stop_uid, stop_num_id, feed_id, stop_id, stop_name,
         stop_lat, stop_lon, location_type, parent_station, geom
     )
     VALUES (
-        :stop_uid, :feed_id, :stop_id, :stop_name,
+        :stop_uid, :stop_num_id, :feed_id, :stop_id, :stop_name,
         :stop_lat, :stop_lon, :location_type, :parent_station,
         ST_SetSRID(ST_MakePoint(:stop_lon, :stop_lat), 4326)
     )

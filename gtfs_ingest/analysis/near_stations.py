@@ -8,10 +8,17 @@ walking time, rendered exactly as::
 
 one tuple per (near station, line) combination, sorted by walking time.
 
-Conventions (documented in the README):
+Identifier conventions (documented in the README):
 
-- IDs are the feed-qualified ``stop_uid`` (``"{feed_id}:{stop_id}"``) so
-  entries stay unambiguous when several feeds are analyzed together.
+- ``ID`` in the tuples is the stop's **numeric id** (``stop_num_id`` -
+  first 48 bits of ``sha256(stop_uid)``; see ``models.numeric_stop_id``).
+  It is deterministic and stable across runs, and matches the
+  ``stop_num_id`` column of the PostGIS ``stops`` table, so the node
+  relations in this file join directly against the database.
+- ``stop_line_ids`` is the **combined stop+line identifier** set of the
+  row's own stop: ``"{stop_num_id}-{line}"`` per line serving it (e.g.
+  ``"128733941436-L10"``), for consumers that model a node per
+  (station, line) pair.
 - ``linea`` is the route's ``route_short_name`` when present, otherwise its
   ``route_id``; only lines active on the analyzed service date appear, so a
   near stop served by no route that day (e.g. a bare parent-station node)
@@ -40,7 +47,10 @@ WALK_M_PER_MIN = 83.0
 NEAR_STATIONS_NAME = "near_stations.csv"
 
 #: Columns of the exported file.
-COLUMNS = ["stop_uid", "feed_id", "stop_id", "station", "stop_lat", "stop_lon", "near_stations"]
+COLUMNS = [
+    "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
+    "stop_lat", "stop_lon", "stop_line_ids", "near_stations",
+]
 
 
 def _line_labels(routes: pd.DataFrame) -> pd.DataFrame:
@@ -72,8 +82,8 @@ def build_near_stations(
 
     Args:
         stops: Phase 1 normalized stops (all feeds; needs ``stop_uid``,
-            ``feed_id``, ``stop_id``, ``stop_name``, ``stop_lat``,
-            ``stop_lon``).
+            ``stop_num_id``, ``feed_id``, ``stop_id``, ``stop_name``,
+            ``stop_lat``, ``stop_lon``).
         route_stops: ``connectivity.route_stop_map`` frames (all feeds).
         routes: route metadata with ``route_uid``/``route_id`` and optional
             ``route_short_name``.
@@ -83,20 +93,39 @@ def build_near_stations(
     Returns:
         One row per stop with :data:`COLUMNS`; ``near_stations`` holds the
         formatted tuple list (``"[]"`` when nothing is within the
-        threshold). Never raises on empty inputs.
+        threshold) using numeric ids, and ``stop_line_ids`` the combined
+        ``num_id-line`` identifiers of the stop's own lines (``""`` when
+        unserved). Never raises on empty inputs.
     """
-    base = stops[["stop_uid", "feed_id", "stop_id", "stop_name", "stop_lat", "stop_lon"]].copy()
+    base = stops[
+        ["stop_num_id", "stop_uid", "feed_id", "stop_id", "stop_name", "stop_lat", "stop_lon"]
+    ].copy()
     base = base.rename(columns={"stop_name": "station"})
     base["station"] = base["station"].fillna("")
 
-    entries = _near_entries(base, route_stops, routes, stop_pairs)
+    lines_at = _lines_at_stops(route_stops, routes)
+
+    # Combined stop+line ids for the row's own stop.
+    own = base[["stop_uid", "stop_num_id"]].merge(lines_at, on="stop_uid")
+    own["combo"] = own["stop_num_id"].astype(str) + "-" + own["combo_line"]
+    combos = (
+        own.sort_values(["stop_uid", "combo"])
+        .groupby("stop_uid")["combo"]
+        .agg(", ".join)
+        .rename("stop_line_ids")
+        .reset_index()
+    )
+    base = base.merge(combos, on="stop_uid", how="left")
+    base["stop_line_ids"] = base["stop_line_ids"].fillna("")
+
+    entries = _near_entries(base, lines_at, stop_pairs)
     if entries.empty:
         base["near_stations"] = "[]"
-        return base.rename(columns={"stop_lat": "stop_lat", "stop_lon": "stop_lon"})[COLUMNS]
+        return base[COLUMNS]
 
     entries = entries.sort_values(["stop_uid", "minutes", "near_station", "line"])
     entries["tuple"] = (
-        "(" + entries["near_uid"] + ", " + entries["near_station"] + ", "
+        "(" + entries["near_num_id"].astype(str) + ", " + entries["near_station"] + ", "
         + entries["line"].astype(str) + ", " + entries["minutes"].astype(str) + " min)"
     )
     rendered = (
@@ -110,15 +139,29 @@ def build_near_stations(
     return result[COLUMNS]
 
 
+def _lines_at_stops(route_stops: pd.DataFrame, routes: pd.DataFrame) -> pd.DataFrame:
+    """Distinct (stop_uid, line label) pairs; ``combo_line`` is the label."""
+    if route_stops.empty:
+        return pd.DataFrame(columns=["stop_uid", "combo_line"])
+    lines = (
+        route_stops[["stop_uid", "route_uid"]]
+        .merge(_line_labels(routes), on="route_uid")
+        [["stop_uid", "line"]]
+        .drop_duplicates()
+        .rename(columns={"line": "combo_line"})
+    )
+    return lines
+
+
 def _near_entries(
     base: pd.DataFrame,
-    route_stops: pd.DataFrame,
-    routes: pd.DataFrame,
+    lines_at: pd.DataFrame,
     stop_pairs: pd.DataFrame,
 ) -> pd.DataFrame:
     """One row per (stop, near stop, line): the tuples before rendering."""
-    if stop_pairs.empty or route_stops.empty:
-        return pd.DataFrame(columns=["stop_uid", "near_uid", "near_station", "line", "minutes"])
+    columns = ["stop_uid", "near_num_id", "near_station", "line", "minutes"]
+    if stop_pairs.empty or lines_at.empty:
+        return pd.DataFrame(columns=columns)
 
     # Pairs are stored once per unordered pair; neighbourhood is symmetric.
     both = pd.concat(
@@ -128,26 +171,21 @@ def _near_entries(
         ],
         ignore_index=True,
     )
-
-    lines_at = (
-        route_stops[["stop_uid", "route_uid"]]
-        .merge(_line_labels(routes), on="route_uid")
-        [["stop_uid", "line"]]
-        .drop_duplicates()
+    entries = both.merge(
+        lines_at.rename(columns={"stop_uid": "near_uid", "combo_line": "line"}), on="near_uid"
     )
-    entries = both.merge(lines_at.rename(columns={"stop_uid": "near_uid"}), on="near_uid")
     if entries.empty:
-        return pd.DataFrame(columns=["stop_uid", "near_uid", "near_station", "line", "minutes"])
+        return pd.DataFrame(columns=columns)
     entries = entries.merge(
-        base[["stop_uid", "station"]].rename(
-            columns={"stop_uid": "near_uid", "station": "near_station"}
+        base[["stop_uid", "stop_num_id", "station"]].rename(
+            columns={"stop_uid": "near_uid", "stop_num_id": "near_num_id", "station": "near_station"}
         ),
         on="near_uid",
         how="left",
     )
     entries["near_station"] = entries["near_station"].fillna("")
     entries["minutes"] = walk_minutes(entries["distance_m"])
-    return entries[["stop_uid", "near_uid", "near_station", "line", "minutes"]]
+    return entries[columns]
 
 
 def write_near_stations(near: pd.DataFrame, out_dir: Path) -> Path:
