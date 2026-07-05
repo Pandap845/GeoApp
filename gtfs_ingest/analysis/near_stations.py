@@ -11,15 +11,19 @@ one tuple per (near station, line) combination, sorted by walking time.
 
 Identifier conventions (documented in the README):
 
-- ``ID`` in the tuples is the stop's **numeric id** (``stop_num_id`` -
-  first 48 bits of ``sha256(stop_uid)``; see ``models.numeric_stop_id``).
-  It is deterministic and stable across runs, and matches the
-  ``stop_num_id`` column of the PostGIS ``stops`` table, so the node
-  relations in this file join directly against the database.
+- ``ID`` (first column) is the file's own **sequential node id**: 1..N in
+  row order. It is what every relation column references (``near_stations``
+  and ``same_line_stations`` tuples, ``stop_line_ids`` combos), so the file
+  is a self-contained node/edge list. It is deterministic for identical
+  inputs in the same order; the durable cross-run/database key remains
+  ``stop_uid`` (second column).
+- ``Modalidad`` is the transport system(s) whose lines serve the stop -
+  the agency names from ``agency.txt`` (e.g. ``Mi Macro``, ``Sitren``,
+  ``Mi Transporte``), comma-joined when several systems share the stop,
+  empty for unserved stops.
 - ``stop_line_ids`` is the **combined stop+line identifier** set of the
-  row's own stop: ``"{stop_num_id}-{line}"`` per line serving it (e.g.
-  ``"128733941436-L10"``), for consumers that model a node per
-  (station, line) pair.
+  row's own stop: ``"{ID}-{line}"`` per line serving it (e.g. ``"17-L10"``),
+  for consumers that model a node per (station, line) pair.
 - ``linea`` is the route's ``route_short_name`` when present, otherwise its
   ``route_id``; only lines active on the analyzed service date appear, so a
   near stop served by no route that day (e.g. a bare parent-station node)
@@ -60,9 +64,12 @@ WALK_M_PER_MIN = 83.0
 
 NEAR_STATIONS_NAME = "near_stations.csv"
 
-#: Columns of the exported file.
+#: Columns of the exported file. ``ID`` is the file's own sequential node
+#: id (1..N, row order) - the key the relation columns reference;
+#: ``Modalidad`` is the transport system(s) serving the stop (agency names,
+#: e.g. "Mi Macro, Sitren").
 COLUMNS = [
-    "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
+    "ID", "stop_uid", "station", "Modalidad", "feed_id", "stop_id",
     "stop_lat", "stop_lon", "stop_line_ids", "near_stations", "same_line_stations",
 ]
 
@@ -104,7 +111,7 @@ def build_near_stations(
             ``stop_lat``, ``stop_lon``).
         route_stops: ``connectivity.route_stop_map`` frames (all feeds).
         routes: route metadata with ``route_uid``/``route_id`` and optional
-            ``route_short_name``.
+            ``route_short_name`` / ``modalidad`` (agency name) columns.
         stop_pairs: proximity stop pairs (``stop_uid_a, stop_uid_b,
             distance_m``) from either ``proximity_pairs_*`` function.
         stop_links: consecutive-stop pairs per route/direction
@@ -112,24 +119,30 @@ def build_near_stations(
             the ``same_line_stations`` column; ``None``/empty yields ``"[]"``.
 
     Returns:
-        One row per stop with :data:`COLUMNS`; ``near_stations`` holds the
-        formatted proximity tuple list (``"[]"`` when nothing is within the
-        threshold), ``same_line_stations`` the adjacent same-line stations
-        in route order, and ``stop_line_ids`` the combined ``num_id-line``
-        identifiers of the stop's own lines (``""`` when unserved). Never
-        raises on empty inputs.
+        One row per stop with :data:`COLUMNS`; ``ID`` is the sequential node
+        id (1..N) all relation columns reference, ``near_stations`` holds
+        the formatted proximity tuple list (``"[]"`` when nothing is within
+        the threshold), ``same_line_stations`` the adjacent same-line
+        stations in route order, ``Modalidad`` the serving system name(s),
+        and ``stop_line_ids`` the combined ``ID-line`` identifiers of the
+        stop's own lines (``""`` when unserved). Never raises on empty
+        inputs.
     """
     base = stops[
-        ["stop_num_id", "stop_uid", "feed_id", "stop_id", "stop_name", "stop_lat", "stop_lon"]
+        ["stop_uid", "feed_id", "stop_id", "stop_name", "stop_lat", "stop_lon"]
     ].copy()
     base = base.rename(columns={"stop_name": "station"})
     base["station"] = base["station"].fillna("")
+    # The file's own node id: sequential, starting at 1, in row order.
+    base.insert(0, "ID", range(1, len(base) + 1))
 
     lines_at = _lines_at_stops(route_stops, routes)
+    base = base.merge(_modalidades(route_stops, routes), on="stop_uid", how="left")
+    base["Modalidad"] = base["Modalidad"].fillna("")
 
     # Combined stop+line ids for the row's own stop.
-    own = base[["stop_uid", "stop_num_id"]].merge(lines_at, on="stop_uid")
-    own["combo"] = own["stop_num_id"].astype(str) + "-" + own["combo_line"]
+    own = base[["stop_uid", "ID"]].merge(lines_at, on="stop_uid")
+    own["combo"] = own["ID"].astype(str) + "-" + own["combo_line"]
     combos = (
         own.sort_values(["stop_uid", "combo"])
         .groupby("stop_uid")["combo"]
@@ -163,6 +176,33 @@ def build_near_stations(
     result = base.merge(rendered, on="stop_uid", how="left")
     result["near_stations"] = result["near_stations"].fillna("[]")
     return result[COLUMNS]
+
+
+def _modalidades(route_stops: pd.DataFrame, routes: pd.DataFrame) -> pd.DataFrame:
+    """``stop_uid -> Modalidad``: distinct system (agency) names, joined.
+
+    Empty frame when the route metadata carries no ``modalidad`` column
+    (e.g. feeds without agency info) - callers fill with ``""``.
+    """
+    columns = ["stop_uid", "Modalidad"]
+    if route_stops.empty or routes.empty or "modalidad" not in routes.columns:
+        return pd.DataFrame(columns=columns)
+    served = (
+        route_stops[["stop_uid", "route_uid"]]
+        .merge(routes[["route_uid", "modalidad"]], on="route_uid")
+        .dropna(subset=["modalidad"])
+    )
+    served["modalidad"] = served["modalidad"].astype("string").str.strip()
+    served = served[served["modalidad"] != ""].drop_duplicates(["stop_uid", "modalidad"])
+    if served.empty:
+        return pd.DataFrame(columns=columns)
+    return (
+        served.sort_values(["stop_uid", "modalidad"])
+        .groupby("stop_uid")["modalidad"]
+        .agg(", ".join)
+        .rename("Modalidad")
+        .reset_index()
+    )
 
 
 def _lines_at_stops(route_stops: pd.DataFrame, routes: pd.DataFrame) -> pd.DataFrame:
@@ -203,8 +243,8 @@ def _near_entries(
     if entries.empty:
         return pd.DataFrame(columns=columns)
     entries = entries.merge(
-        base[["stop_uid", "stop_num_id", "station"]].rename(
-            columns={"stop_uid": "near_uid", "stop_num_id": "near_num_id", "station": "near_station"}
+        base[["stop_uid", "ID", "station"]].rename(
+            columns={"stop_uid": "near_uid", "ID": "near_num_id", "station": "near_station"}
         ),
         on="near_uid",
         how="left",
@@ -242,9 +282,9 @@ def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> p
     backward = stop_links.rename(columns={"stop_uid_b": "stop_uid", "stop_uid_a": "near_uid"})[keep]
     both = pd.concat([forward, backward], ignore_index=True).drop_duplicates(keep)
 
-    near_attr = base[["stop_uid", "stop_num_id", "station", "stop_lat", "stop_lon"]].rename(
+    near_attr = base[["stop_uid", "ID", "station", "stop_lat", "stop_lon"]].rename(
         columns={
-            "stop_uid": "near_uid", "stop_num_id": "near_num_id",
+            "stop_uid": "near_uid", "ID": "near_num_id",
             "station": "near_station", "stop_lat": "near_lat", "stop_lon": "near_lon",
         }
     )

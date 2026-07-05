@@ -72,13 +72,19 @@ def resolve_service(path: str, service_date: Optional[date]) -> ServiceSelection
 
 
 def load_service_feed(
-    source: FeedSource, service_date: Optional[date]
+    source: FeedSource,
+    service_date: Optional[date],
+    route_ids: Optional[set[str]] = None,
 ) -> tuple[Any, ServiceSelection]:
     """Load a feed filtered to trips active on the (resolved) service date.
 
     Args:
         source: discovered feed (Phase 1 ``loader.discover_feeds``).
         service_date: explicit date, or ``None`` for the busiest date.
+        route_ids: optional route restriction (``--mode`` / ``--route``);
+            when given, the partridge view also filters ``trips.route_id``,
+            so stop_times/shapes/routes cascade to just those routes.
+            ``None`` (the default) analyzes every route.
 
     Returns:
         ``(feed, selection)`` where *feed* is a typed partridge feed whose
@@ -91,5 +97,8 @@ def load_service_feed(
     """
     path = str(source.path)
     selection = resolve_service(path, service_date)
-    feed = ptg.load_feed(path, view={"trips.txt": {"service_id": selection.service_ids}})
+    view: dict[str, dict[str, Any]] = {"trips.txt": {"service_id": selection.service_ids}}
+    if route_ids is not None:
+        view["trips.txt"]["route_id"] = route_ids
+    feed = ptg.load_feed(path, view=view)
     return feed, selection

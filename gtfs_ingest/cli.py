@@ -133,6 +133,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the default time windows (repeatable; hours may exceed "
         "23 for post-midnight service, e.g. night=23:00-27:00).",
     )
+    analyze.add_argument(
+        "--transport-mode",
+        action="append",
+        default=None,
+        metavar="MODE",
+        help="Restrict the analysis to these transport modes (repeatable or "
+        "comma-separated). Accepts names (bus, tram, metro, rail, ferry, "
+        "cable_tram, aerial_lift, funicular, trolleybus, monorail) or GTFS "
+        "route_type codes, basic or extended (3, 700, ...). Default: all modes.",
+    )
+    analyze.add_argument(
+        "--route",
+        action="append",
+        default=None,
+        metavar="ROUTE",
+        help="Restrict the analysis to these routes, matched by route_id or "
+        "route_short_name (repeatable or comma-separated). Combines with "
+        "--transport-mode: a route passes if it matches either. Default: all routes.",
+    )
 
     detect = subparsers.add_parser(
         "detect-interchanges",
@@ -311,6 +330,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
 
 def _run_analyze(args: argparse.Namespace) -> int:
     """Execute the Phase 2 analysis flow; returns the process exit code."""
+    from .analysis import route_filter
     from .analysis.headways import DEFAULT_WINDOWS, TimeWindow
     from .analysis.pipeline_phase2 import AnalysisConfig, run_analysis
 
@@ -330,6 +350,8 @@ def _run_analyze(args: argparse.Namespace) -> int:
                 windows.append(TimeWindow.parse(name.strip(), rng.strip()))
         else:
             windows = list(DEFAULT_WINDOWS)
+        mode_codes = route_filter.parse_modes(args.transport_mode) if args.transport_mode else None
+        route_specs = route_filter.parse_routes(args.route) if args.route else None
         config = AnalysisConfig(
             feed_paths=settings.feed_paths,
             database_url=settings.database_url,
@@ -337,6 +359,8 @@ def _run_analyze(args: argparse.Namespace) -> int:
             service_date=service_date,
             proximity_m=args.proximity_m,
             windows=windows,
+            mode_codes=mode_codes,
+            route_specs=route_specs,
             dry_run=settings.dry_run,
         )
     except ValueError as exc:

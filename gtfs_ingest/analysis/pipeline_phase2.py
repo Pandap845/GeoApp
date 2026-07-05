@@ -32,7 +32,7 @@ from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
 from ..models import FeedSource
-from . import connectivity, geopackage, graph_export, near_stations, route_geometry, storage
+from . import connectivity, geopackage, graph_export, near_stations, route_filter, route_geometry, storage
 from .headways import DEFAULT_WINDOWS, TimeWindow, compute_stop_headways, route_rollup, stop_departures
 from .service_filter import load_service_feed
 
@@ -54,6 +54,11 @@ class AnalysisConfig(BaseModel):
             feed's busiest date.
         proximity_m: connectivity proximity threshold in meters.
         windows: time windows for headway statistics.
+        mode_codes: restrict the analysis to these basic route_type codes
+            (``route_filter.parse_modes`` output); ``None`` = all modes.
+        route_specs: restrict to these route_id/route_short_name values;
+            ``None`` = all routes. A route passes when it matches either
+            filter (union with ``mode_codes``).
         dry_run: skip all database writes (and use local proximity math).
     """
 
@@ -63,6 +68,8 @@ class AnalysisConfig(BaseModel):
     service_date: Optional[date] = None
     proximity_m: float = Field(default=150.0, gt=0)
     windows: list[TimeWindow] = Field(default_factory=lambda: list(DEFAULT_WINDOWS))
+    mode_codes: Optional[frozenset[int]] = None
+    route_specs: Optional[frozenset[str]] = None
     dry_run: bool = False
 
 
@@ -71,7 +78,7 @@ class FeedAnalysis(BaseModel):
 
     feed_id: str
     source_path: str
-    status: str  # "analyzed" | "no_service" | "failed"
+    status: str  # "analyzed" | "no_service" | "filtered_out" | "failed"
     service_date: Optional[str] = None
     service_date_source: Optional[str] = None  # "explicit" | "busiest"
     routes_analyzed: int = 0
@@ -86,6 +93,8 @@ class AnalysisReport(BaseModel):
     generated_at: str
     dry_run: bool
     proximity_m: float
+    mode_filter: list[str] = Field(default_factory=list)   # mode names; [] = all
+    route_filter: list[str] = Field(default_factory=list)  # route specs; [] = all
     windows: dict[str, str]  # name -> "HH:MM-HH:MM"
     feeds: list[FeedAnalysis]
     connections_by_type: dict[str, int]
@@ -107,19 +116,40 @@ class _FeedData:
 
 
 def _route_metadata(feed: Any, feed_id: str, route_ids: pd.Series) -> pd.DataFrame:
-    """Node attributes for analyzed routes (best effort from routes.txt)."""
+    """Node attributes for analyzed routes (best effort from routes.txt).
+
+    ``modalidad`` is the serving system's name from ``agency.txt``
+    (routes.agency_id -> agency_name; single-agency feeds map every route
+    to that agency, per the GTFS default). Missing agency data leaves the
+    column NULL - metadata is cosmetic, never fatal.
+    """
     routes = pd.DataFrame({"route_id": route_ids.astype(str).unique()})
     routes["feed_id"] = feed_id
     routes["route_uid"] = feed_id + ":" + routes["route_id"]
     try:
         meta = feed.routes
-        keep = [c for c in ("route_id", "route_short_name", "route_long_name", "route_type") if c in meta.columns]
+        keep = [c for c in ("route_id", "route_short_name", "route_long_name",
+                            "route_type", "agency_id") if c in meta.columns]
         meta = meta[keep].drop_duplicates("route_id").copy()
         meta["route_id"] = meta["route_id"].astype(str)
         routes = routes.merge(meta, on="route_id", how="left")
+
+        agency = feed.agency
+        if agency is not None and not agency.empty and "agency_name" in agency.columns:
+            if "agency_id" in routes.columns and "agency_id" in agency.columns:
+                names = agency[["agency_id", "agency_name"]].drop_duplicates("agency_id")
+                routes = routes.merge(
+                    names.rename(columns={"agency_name": "modalidad"}), on="agency_id", how="left"
+                )
+            elif len(agency) == 1:
+                routes["modalidad"] = agency["agency_name"].iloc[0]
     except Exception:  # noqa: BLE001 - metadata is cosmetic, never fatal
-        log.warning("Feed %s: could not read routes.txt metadata", feed_id)
-    return routes[["route_uid", "feed_id", "route_id"] + [c for c in routes.columns if c.startswith("route_") and c not in ("route_uid", "route_id")]]
+        log.warning("Feed %s: could not read routes.txt/agency.txt metadata", feed_id)
+    if "modalidad" not in routes.columns:
+        routes["modalidad"] = None
+    extra = [c for c in routes.columns
+             if (c.startswith("route_") or c == "modalidad") and c not in ("route_uid", "route_id")]
+    return routes[["route_uid", "feed_id", "route_id"] + extra]
 
 
 def _analyze_feed(
@@ -129,7 +159,28 @@ def _analyze_feed(
     data = _FeedData()
     result = FeedAnalysis(feed_id=source.feed_id, source_path=str(source.path), status="analyzed")
     try:
-        feed, selection = load_service_feed(source, config.service_date)
+        raw = loader.load_feed(source)
+
+        # Optional --mode/--route restriction, resolved against raw routes.txt
+        # and pushed into the partridge view so everything trip-derived
+        # (stop_times, shapes, routes) cascades. None = analyze everything.
+        allowed: Optional[set[str]] = None
+        if config.mode_codes or config.route_specs:
+            routes_raw = raw.table("routes.txt")
+            allowed = route_filter.allowed_route_ids(
+                routes_raw, config.mode_codes, config.route_specs
+            )
+            total = int(routes_raw["route_id"].nunique()) if routes_raw is not None and "route_id" in getattr(routes_raw, "columns", []) else 0
+            if not allowed:
+                result.status = "filtered_out"
+                result.notes.append(
+                    f"no route matches the --mode/--route filter ({total} route(s) in feed)"
+                )
+                log.info("Feed %s: excluded by route/mode filter", source.feed_id)
+                return result, data
+            result.notes.append(f"route filter: {len(allowed)} of {total} route(s) selected")
+
+        feed, selection = load_service_feed(source, config.service_date, route_ids=allowed)
         result.service_date = selection.service_date.isoformat()
         result.service_date_source = selection.source
         if not selection.service_ids:
@@ -156,7 +207,8 @@ def _analyze_feed(
                 frame.insert(1, "service_date", selection.service_date)
 
         # Stops via the Phase 1 path: parent_station links + proximity input.
-        raw = loader.load_feed(source)
+        # Deliberately from the RAW feed - the stop inventory stays complete
+        # even under a route/mode filter (filtered-out stops appear unserved).
         data.stops, _ = normalizer.normalize_stops(raw)
 
         if engine is not None:
@@ -251,6 +303,8 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         dry_run=config.dry_run,
         proximity_m=config.proximity_m,
+        mode_filter=route_filter.mode_labels(config.mode_codes),
+        route_filter=sorted(config.route_specs) if config.route_specs else [],
         windows={w.name: w.label for w in config.windows},
         feeds=feed_results,
         connections_by_type={k: int(v) for k, v in by_type.items()},
@@ -280,7 +334,12 @@ def _render_markdown(report: AnalysisReport) -> str:
         "",
         f"Generated: {report.generated_at}  ",
         f"Mode: {'dry run (no DB writes)' if report.dry_run else 'full run'}  ",
-        f"Proximity threshold: {report.proximity_m:g} m",
+        f"Proximity threshold: {report.proximity_m:g} m  ",
+        "Transport modes: "
+        + (", ".join(report.mode_filter) if report.mode_filter else "all (no filter)")
+        + "  ",
+        "Routes: "
+        + (", ".join(report.route_filter) if report.route_filter else "all (no filter)"),
         "",
         "## Time windows",
         "",

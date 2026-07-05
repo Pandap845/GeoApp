@@ -36,8 +36,10 @@ def test_geopackage_two_layers_roundtrip(tmp_path: Path) -> None:
     assert stops_layer.geometry.geom_type.eq("Point").all()
     s1 = stops_layer[stops_layer["stop_uid"] == "f:S1"].iloc[0]
     assert int(s1["stop_num_id"]) == numeric_stop_id("f:S1")   # int64 survives GPKG
-    assert s1["stop_line_ids"] == f"{numeric_stop_id('f:S1')}-10"
-    assert s1["near_stations"].startswith(f"[({numeric_stop_id('f:S2')},")
+    assert int(s1["ID"]) == 1                                  # sequential file id
+    # Relation strings reference the sequential ID (S1=1, S2=2 in row order).
+    assert s1["stop_line_ids"] == "1-10"
+    assert s1["near_stations"].startswith("[(2,")
 
     links = gpd.read_file(path, layer="near_links")
     assert len(links) == 1                                     # only S1<->S2 are near

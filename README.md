@@ -219,6 +219,18 @@ Flags shared by both subcommands:
 | `--proximity-m METERS` | Stop proximity threshold for connectivity. Default `150`. |
 | `--window NAME=HH:MM-HH:MM` | Replace the default time windows (repeatable). Hours may exceed 23, e.g. `night=23:00-27:00`. |
 
+`analyze-frequency` only (in addition to `--service-date`, `--proximity-m`,
+`--window`): `--transport-mode MODE` and `--route ROUTE` (both repeatable or
+comma-separated) restrict the analysis to certain transport modes and/or
+routes — **default: everything**. Modes accept names (bus, tram, metro,
+rail, ferry, cable_tram, aerial_lift, funicular, trolleybus, monorail) or
+GTFS route_type codes (basic or extended, e.g. `3`, `700`); routes match
+`route_id` or `route_short_name`; a route passes if it matches either
+filter. The filter cascades to everything trip-derived (headways,
+connectivity, near/same-line stations, route shapes/links); the stop
+inventory itself stays complete. Feeds with no matching route are reported
+as `filtered_out`.
+
 `detect-interchanges` only: `--eps METERS` (DBSCAN radius, default 120),
 `--min-samples N` (default 2), `--crs EPSG:XXXXX` (metric CRS override).
 

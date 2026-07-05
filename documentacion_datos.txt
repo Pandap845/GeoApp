@@ -1,0 +1,367 @@
+================================================================================
+ DOCUMENTACION DE DATOS DEL PROYECTO (gtfs-ingest / geoApp)
+================================================================================
+
+Pipeline de ingesta, validacion y analisis de datos de transporte publico
+(GTFS) sobre PostGIS, con conflacion contra OpenStreetMap y verificacion
+externa opcional contra Google Maps. Cuatro fases operativas:
+
+  Fase 1  ingest               validacion + normalizacion + carga de paradas
+  Fase 2  analyze-frequency    frecuencias (headways) + conectividad + exportes
+  Fase 3  detect-interchanges  intercambiadores multimodales
+          conflate-osm         correspondencia con OSM + lado de calle + cobertura
+  Fase 4  google-qa            verificacion externa (opcional, apagada por defecto)
+          locate-stations      localizador de estaciones (opcional, Google)
+
+Este documento describe: (1) fuentes de datos y adquisicion, (2) diccionarios
+de datos, (3) limpieza y transformacion, (4) fusion, calculo e integracion.
+
+
+================================================================================
+ 1. FUENTES DE DATOS Y ADQUISICION
+================================================================================
+
+1.1 GTFS (General Transit Feed Specification) — fuente primaria
+--------------------------------------------------------------------------------
+Archivos .zip que contienen tablas de texto (CSV) segun el estandar GTFS.
+Dos feeds del Area Metropolitana de Guadalajara, Jalisco, Mexico:
+
+  a) improved-gtfs-mimacro-mitren-sitren.zip
+     - Sistemas: Mi Macro (BRT), Mi Tren (tren ligero), Sitren (trolebus),
+       Mi Transporte Electrico. 40 rutas, 1,634 paradas.
+     - Archivos: agency, calendar, calendar_dates, routes, stops, stop_times,
+       shapes, trips, frequencies, feed_info.
+     - feed_id derivado: improved_gtfs_mimacro_mitren_sitren
+
+  b) mdb-2366-202502241922.zip
+     - Catalogo Mobility Database (id mdb-2366): red completa Mi Transporte
+       (autobuses urbanos) + Mi Macro + Mi Tren + SiTren. 276 rutas,
+       12,231 paradas.
+     - feed_id derivado: mdb_2366_202502241922
+
+  Adquisicion: los .zip se colocan localmente y se pasan al CLI con --feeds.
+  El descubrimiento acepta zips sueltos, carpetas de feed descomprimidas o
+  carpetas colectoras. Cada feed recibe un feed_id deterministico (nombre del
+  archivo en minusculas, caracteres no [a-z0-9] -> "_"; colision -> sufijo
+  sha256). El feed_id es la clave de procedencia en TODAS las tablas y salidas.
+
+1.2 OpenStreetMap (OSM) — fuente de referencia geografica
+--------------------------------------------------------------------------------
+  - Extracto: data/mexico.osm.pbf (~628 MB).
+  - Adquisicion: importado a la MISMA base PostGIS con osm2pgsql (esquema
+    clasico): tablas planet_osm_point y planet_osm_line, columna de geometria
+    "way" en SRID 3857 (nombres configurables; el esquema se valida al
+    arrancar con mensajes de fallo explicitos).
+  - Uso: unicamente como referencia para la conflacion (nodo de transporte
+    mas cercano), el lado de calle (eje vial mas cercano) y la cobertura
+    inversa. Nunca se consulta una API externa de OSM.
+
+1.3 Google Maps Platform — verificacion externa OPCIONAL (apagada por defecto)
+--------------------------------------------------------------------------------
+  - APIs: Places API (New) (searchNearby / searchText), y las APIs clasicas
+    Geocoding y Distance Matrix (solo el localizador de estaciones).
+  - Adquisicion: solo en tiempo de ejecucion, jamas se almacena contenido.
+    Requiere doble opt-in: bandera explicita (--enable-google-qa /
+    --enable-google-api) Y la variable de entorno GOOGLE_MAPS_API_KEY (no
+    existe bandera CLI para la clave, por diseno).
+  - Salvaguardas en codigo: presupuesto duro de llamadas (--max-calls, 200
+    por defecto), limite de tasa, reintentos con backoff, mascara de campos
+    obligatoria, y redaccion de logs (solo NOMBRES de campos, nunca valores).
+  - Restriccion de almacenamiento (terminos de Google Maps, verificada por
+    codigo y por tests): el UNICO dato derivado de Google que puede
+    persistirse es el place_id opaco.
+
+1.4 Base de datos PostgreSQL/PostGIS
+--------------------------------------------------------------------------------
+  - Motor de almacenamiento y calculo espacial (docker-compose: transit-db).
+  - Credenciales solo via --db-url o DATABASE_URL (nunca en el codigo).
+  - PostGIS es requisito verificado (PostGIS_Version()) antes de operar.
+
+
+================================================================================
+ 2. DESCRIPCION DE DATOS (DICCIONARIOS DE DATOS)
+================================================================================
+
+2.1 Entradas GTFS (columnas minimas exigidas por el pipeline)
+--------------------------------------------------------------------------------
+  agency.txt          agency_id, agency_name (=> "Modalidad"), agency_url,
+                      agency_timezone
+  stops.txt           stop_id, stop_name, stop_lat, stop_lon, location_type
+                      (0 parada/anden, 1 estacion, 2 entrada, 3 nodo,
+                      4 area de abordaje), parent_station
+  routes.txt          route_id, agency_id, route_short_name, route_long_name,
+                      route_type (0 tranvia, 1 metro, 2 tren, 3 autobus,
+                      4 ferry, 11 trolebus, 12 monorriel; codigos extendidos
+                      100-1499 se normalizan al basico)
+  trips.txt           route_id, service_id, trip_id, direction_id (0/1),
+                      shape_id
+  stop_times.txt      trip_id, stop_id, stop_sequence (orden de recorrido),
+                      departure_time (puede exceder 24:00)
+  calendar.txt        service_id, lunes..domingo, start_date, end_date
+  calendar_dates.txt  service_id, date, exception_type (1 agrega, 2 quita)
+  shapes.txt          shape_id, shape_pt_lat/lon, shape_pt_sequence
+  transfers.txt       from_stop_id, to_stop_id (opcional; cruce declarado)
+  frequencies.txt     servicio por intervalos (limitacion documentada: no se
+                      expande en el calculo de headways)
+
+2.2 Tablas producidas en PostGIS
+--------------------------------------------------------------------------------
+  stops  (Fase 1; recarga por feed)
+    stop_uid        text PK    "{feed_id}:{stop_id}" — clave global durable
+    stop_num_id     bigint     alias numerico deterministico (48 bits de
+                               sha256(stop_uid)); indice unico
+    feed_id         text       procedencia
+    stop_id         text       id original del feed
+    stop_name       text       nombre (NULL si vacio)
+    stop_lat/lon    float      WGS84 validado
+    location_type   int        0 por defecto
+    parent_station  text       estacion madre (NULL si no hay)
+    geom            POINT 4326 geometria construida en servidor (indice GiST)
+    loaded_at       timestamptz
+
+  route_stop_headways  (Fase 2; recarga por feed)
+    feed_id, service_date, route_id, direction_id (-1 = desconocida),
+    stop_id, time_window (am_peak/midday/pm_peak/evening o personalizada),
+    trip_count, mean/median/min/max_headway_s (segundos; NULL si < 2 salidas)
+
+  route_headways  (Fase 2; recarga por feed)
+    resumen por (feed, ruta, direccion, ventana): mean_headway_s (promedio de
+    los promedios por parada), stop_count, stops_with_headway, trip_count
+
+  route_connections  (Fase 2; recarga total por corrida)
+    route_a < route_b (route_uid), feed_id_a/b, connection_type
+    (same_stop | same_parent_station | proximity), shared_stop_count,
+    min_stop_distance_m
+
+  interchanges  (Fase 3A; recarga total)
+    cluster_id PK, is_multimodal (>= 2 modos distintos), stop_count,
+    modes int[] (codigos basicos), mode_names text[], member_stop_uids
+    text[], routes text[], feed_ids text[], centroid POINT 4326,
+    hull GEOMETRY 4326
+
+  stop_osm_matches  (Fase 3B; recarga total)
+    stop_uid PK, feed_id, stop_id, osm_id, osm_kind (bus_stop/platform/
+    stop_position/station/halt/tram_stop), osm_name, distance_m (geodesica),
+    match_confidence [0..1], needs_review bool
+
+  stop_side_of_street  (Fase 3C; recarga total)
+    stop_uid PK, osm_way_id, highway, oneway, perpendicular_distance_m,
+    side (left | right | on), side_confidence (high | low), near_endpoint
+
+  google_qa_interchange / google_qa_stop  (Fase 4; upsert por fila)
+    clave nuestra (interchange_cluster_id / stop_uid), verdict,
+    mode_agreement (solo intercambiadores), google_place_id (unico dato de
+    Google permitido), checked_at
+    Veredictos intercambiador: CONFIRMED | PARTIAL | CONFLICT | NO_DATA
+    Veredictos parada: STATION_FOUND | NOT_FOUND | NO_DATA
+
+2.3 Archivos de salida (directorio ./out)
+--------------------------------------------------------------------------------
+  validation_report.json/.md   hallazgos por feed (severidad ERROR/WARNING/
+                               INFO, codigo, conteo, muestras), conteos de
+                               filas, matriz de archivos opcionales,
+                               paradas normalizadas vs cargadas
+
+  analysis_report.json/.md     fechas de servicio usadas, filtro de modos/
+                               rutas aplicado, resumen de conectividad,
+                               rutas aisladas
+
+  near_stations.csv            UNA FILA POR PARADA. Columnas:
+    ID                 id secuencial de nodo (1..N, orden de fila). ES LA
+                       CLAVE que usan todas las columnas de relacion.
+    stop_uid           clave durable (para cruzar con la base de datos)
+    station            nombre de la parada
+    Modalidad          sistema(s) que la sirven — nombres de agencia:
+                       "Mi Macro", "Mi Tren", "Sitren", "Mi Transporte",
+                       "Mi Transporte Electrico"; unidos por coma si varios
+    feed_id, stop_id   procedencia
+    stop_lat/stop_lon  coordenadas WGS84
+    stop_line_ids      combinaciones "{ID}-{linea}" de la propia parada
+    near_stations      relacion por CERCANIA GEOGRAFICA (<= 150 m, cualquier
+                       linea): [(ID, estacion, linea, minutos a pie), ...]
+                       minutos = max(1, round(distancia_m / 83))  (~5 km/h)
+    same_line_stations relacion por TOPOLOGIA DE RUTA (misma linea):
+                       estaciones adyacentes en orden de recorrido, por linea
+                       y direccion: [(ID, estacion, linea, dirD, metros), ...]
+
+  transit_analysis.gpkg        GeoPackage EPSG:4326, 4 capas:
+    stops              puntos + todos los atributos del CSV (ID, Modalidad,
+                       relaciones) + stop_num_id (clave de BD)
+    near_links         lineas peatonales entre pares cercanos (ids numericos,
+                       distance_m, walk_min)
+    route_shapes       trazados reales de ruta desde shapes.txt (por ruta/
+                       direccion/shape)
+    route_stop_links   segmentos DIRIGIDOS parada -> siguiente parada de la
+                       misma ruta/direccion (orden stop_sequence)
+
+  route_connectivity.graphml   grafo de rutas NO dirigido (nodos = route_uid
+                               con metadatos; aristas = conexiones con tipo,
+                               paradas compartidas, distancia minima)
+
+  interchanges_report.json/.md combinaciones de modos, acuerdo con
+                               transfers.txt declarados
+  conflation_report.json/.md   tasa de correspondencia OSM, needs_review,
+                               distribucion de lados, resumen de cobertura
+  osm_coverage_gaps.gpkg       capa osm_only_stops: nodos de transporte OSM
+                               sin parada GTFS cercana (osm_id, kind,
+                               osm_name, nearest_stop_m, posicion)
+  google_qa_report.json/.md    estado, llamadas vs presupuesto, conteos de
+                               veredictos, lista CONFLICT (solo ids nuestros)
+  station_locator_report + stations_route.xlsx  (localizador opcional)
+                               columnas: ID, Nombre_Estacion, Modalidad,
+                               Linea, Latitud, Longitud, Estacion_Proxima
+
+
+================================================================================
+ 3. LIMPIEZA Y TRANSFORMACION DE DATOS
+================================================================================
+
+Principio rector: LA VALIDACION REPORTA, LA NORMALIZACION REPARA POR
+EXCLUSION. Cada fila descartada se cuenta en el reporte, de modo que
+"filas fuente - descartadas = filas cargadas" siempre es reconstruible.
+
+3.1 Validacion (Fase 1) — solo reporta, nunca bloquea ni corrige
+--------------------------------------------------------------------------------
+  ERROR   archivos obligatorios ausentes/vacios/ilegibles; columnas
+          obligatorias ausentes; stop_id nulo o duplicado; coordenadas
+          faltantes/no numericas/fuera de rango WGS84; referencias rotas
+          (trips->routes, stop_times->trips, stop_times->stops)
+  WARNING parent_station colgante (la parada se conserva; el vinculo no)
+  INFO    inventario de archivos opcionales
+  Un feed corrupto se registra como "failed" y la corrida continua
+  (aislamiento de fallos en todas las fases).
+
+3.2 Normalizacion de paradas (transformaciones en orden)
+--------------------------------------------------------------------------------
+  1. Columnas uniformes: opcionales ausentes se agregan como NULL.
+  2. Limpieza de cadenas: recorte de espacios; "" -> NULL.
+  3. Tipificacion de coordenadas: stop_lat/lon -> float (ilegible -> NaN).
+  4. location_type -> entero; vacio/ilegible -> 0 (default GTFS).
+  5. DESCARTE contado: filas sin stop_id utilizable; filas sin geometria
+     valida (incluye location_type 3/4 sin coordenadas: una tabla de
+     geometria no admite filas sin punto).
+  6. Duplicados de stop_id: GANA LA PRIMERA aparicion (orden de archivo,
+     deterministico); el resto se descarta y se cuenta.
+  7. Identidad: stop_uid = "{feed_id}:{stop_id}";
+     stop_num_id = int(primeros 6 bytes de sha256(stop_uid)).
+  8. Geometria: POINT(lon, lat) en EPSG:4326 (el datum de GTFS; los datos
+     en reposo nunca se reproyectan).
+
+3.3 Transformaciones de analisis
+--------------------------------------------------------------------------------
+  - Filtrado por fecha de servicio: calendar + calendar_dates via partridge;
+    sin --service-date se usa la fecha MAS OCUPADA de cada feed (registrada
+    en el reporte). Tiempos -> segundos desde medianoche del dia de
+    servicio; horas > 24:00 se preservan (25:10 -> 90600 s).
+  - direction_id vacio -> centinela -1 (direcciones opuestas jamas se
+    mezclan).
+  - Normalizacion de modos: route_type extendidos -> codigo basico
+    (700-799 -> bus 3, 100-199 -> tren 2, 400-404 -> metro 1,
+    900-999 -> tranvia 0, ...).
+  - Filtro OPCIONAL de analisis (por defecto TODO se analiza):
+    --transport-mode (nombres o codigos) y --route (route_id o
+    route_short_name); un feed sin rutas coincidentes queda "filtered_out".
+    El filtro se inyecta en la vista de partridge y cascada a todo lo
+    derivado de viajes; el inventario de paradas NO se filtra.
+  - Politica CRS: datos en reposo EPSG:4326; matematicas metricas (DBSCAN,
+    lado de calle) en zona UTM autodetectada o --crs; distancias
+    autoritativas en PostGIS geography (metros geodesicos).
+
+
+================================================================================
+ 4. FUSION, CALCULO E INTEGRACION DE DATOS
+================================================================================
+
+4.1 Fusion de multiples feeds
+--------------------------------------------------------------------------------
+  - Claves con prefijo de feed (stop_uid, route_uid): los ids nunca chocan
+    entre feeds; los headways jamas mezclan feeds.
+  - La PROXIMIDAD ESPACIAL es la unica relacion que cruza feeds (los ids no
+    coinciden entre feeds, la geografia si).
+  - Estrategias de idempotencia (el "contrato de fusion" con la BD):
+      * tablas por feed (stops, headways): BORRA-Y-RECARGA POR FEED en una
+        transaccion — reejecutar un feed reemplaza exactamente sus filas;
+      * tablas derivadas por corrida (route_connections, interchanges,
+        stop_osm_matches, stop_side_of_street): RECARGA TOTAL — pasar
+        siempre todos los feeds de interes en una corrida;
+      * veredictos QA (presupuestados y parciales): UPSERT POR FILA.
+
+4.2 Calculos principales (formulas)
+--------------------------------------------------------------------------------
+  HEADWAY (por parada, ruta, direccion y ventana [inicio, fin)):
+      salidas ordenadas -> brechas[i] = salida[i+1] - salida[i]
+      N salidas -> N-1 brechas; media/mediana/min/max en segundos
+      N < 2 -> indefinido (fila conservada con estadisticas NULL)
+  RESUMEN POR RUTA:
+      media de las medias por parada (solo paradas con headway definido);
+      trip_count = max por parada (proxy de corridas por el corredor)
+
+  CONECTIVIDAD (precedencia; la mas fuerte da el tipo):
+      1) same_stop: comparten stop_uid identico (distancia 0)
+      2) same_parent_station: paradas de la misma estacion madre
+      3) proximity: paradas a <= 150 m (ST_DWithin sobre geography)
+      Aristas NO dirigidas, normalizadas route_a < route_b, una por par.
+
+  RELACIONES DE NODOS (near_stations.csv):
+      minutos a pie = max(1, round(distancia_m / 83))     (~5 km/h, recta)
+      same_line_stations = anterior/siguiente por (linea, direccion) segun
+      stop_sequence, con distancia haversine entre paradas consecutivas.
+      Criterio de inclusion: near = SOLO cercania (cualquier linea);
+      same_line = SOLO topologia de ruta (sin umbral de distancia).
+
+  INTERCAMBIADORES (Fase 3A):
+      DBSCAN (eps 120 m, min_samples 2) en CRS metrico, FUSIONADO con los
+      grupos parent_station por componentes conexas (una estacion declarada
+      nunca se parte). Componentes >= 2 paradas = cluster; ids
+      deterministicos. is_multimodal = (modos distintos > 1).
+      Geometria: centroide + envolvente convexa (EPSG:4326).
+      Contraste con transfers.txt: declarado-e-inferido / declarado-no-
+      inferido / inferido-sin-declarar.
+
+  CORRESPONDENCIA OSM (Fase 3B):
+      nodo OSM compatible mas cercano (operador KNN <->, distancia geodesica
+      real sobre geography):
+        distance_score = max(0, 1 - distancia_m / umbral)      (umbral 50 m)
+        type_score     = 1.0 tipos compatibles; 0.8 anden<->estacion;
+                         0.6 estacion<->no-estacion; 0.7 resto
+        confidence     = round(distance_score * type_score, 3)
+        needs_review   = sin candidato | distancia > umbral | conf < 0.5
+
+  LADO DE CALLE (Fase 3C, geometria plana en CRS metrico):
+      d = vector del segmento mas cercano EN DIRECCION DE CIRCULACION
+          (orden digitalizado; invertido si oneway in {-1, reverse})
+      v = vector del pie perpendicular hacia la parada
+      cross = d.x*v.y - d.y*v.x
+      lado = izquierda si cross > 0; derecha si cross < 0; "on" si <= 1 m
+      confianza "low" si: lado "on", pie a <= 10 m de un extremo de via
+      (interseccion), o distancia perpendicular < 2 m.
+
+  COBERTURA INVERSA (Fase 3D):
+      area de servicio = buffer(envolvente convexa de las paradas, 500 m);
+      brecha = nodo de transporte OSM dentro del area SIN parada GTFS a
+      <= 100 m (radio configurable). Salida revisable con distancia a la
+      parada mas cercana.
+
+  VERIFICACION GOOGLE (Fase 4, opcional):
+      elegibilidad dirigida (nunca la tabla completa): intercambiadores
+      multimodales y paradas needs_review. Los vehicleType de Google se
+      mapean a NUESTROS codigos de modo y se comparan en nuestro
+      vocabulario; el contenido de Google se descarta tras cada veredicto.
+
+4.3 Integracion final
+--------------------------------------------------------------------------------
+  - PostGIS: 9 tablas (seccion 2.2) con geometria construida en servidor e
+    indices espaciales GiST.
+  - Exportes autocontenidos: near_stations.csv es una lista de nodos y
+    relaciones que se sostiene sola (ID secuencial 1..N como clave interna;
+    stop_uid como clave durable hacia la BD); el GeoPackage integra puntos,
+    enlaces peatonales, trazados de ruta y topologia dirigida para SIG
+    (QGIS); el GraphML integra la red de rutas para analisis de grafos.
+  - Reglas transversales: procedencia (feed_id) en todo; determinismo (ids,
+    orden de deduplicado, numeracion de clusters); aislamiento de fallos
+    (solo problemas a nivel de corrida abortan); APIs externas apagadas por
+    defecto con presupuesto duro y sin persistencia de contenido.
+
+================================================================================
+ FIN DEL DOCUMENTO
+================================================================================

@@ -55,27 +55,30 @@ def test_near_stations_numeric_ids_and_format(tmp_path: Path) -> None:
     result = build_near_stations(stops, route_stops, routes, pairs)
 
     assert list(result.columns) == [
-        "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
+        "ID", "stop_uid", "station", "Modalidad", "feed_id", "stop_id",
         "stop_lat", "stop_lon", "stop_line_ids", "near_stations", "same_line_stations",
     ]
     # No stop_links passed -> the same-line relation is empty, not missing.
     assert row_of(result, "f:S1")["same_line_stations"] == "[]"
     s1 = row_of(result, "f:S1")
-    # Numeric id column matches the deterministic derivation.
-    assert s1["stop_num_id"] == nid("f:S1")
-    # Node relation tuples use the NUMERIC id of the near stop.
-    assert s1["near_stations"] == f"[({nid('f:S2')}, Second Stop, 20, 1 min)]"
+    # Sequential node id: 1..N in row order.
+    assert s1["ID"] == 1
+    # Node relation tuples use the sequential ID of the near stop.
+    assert s1["near_stations"] == "[(2, Second Stop, 20, 1 min)]"
     # Combined stop+line id of the row's own stop.
-    assert s1["stop_line_ids"] == f"{nid('f:S1')}-10"
+    assert s1["stop_line_ids"] == "1-10"
+    # No modalidad metadata in this fixture -> empty, never missing.
+    assert s1["Modalidad"] == ""
 
     s2 = row_of(result, "f:S2")
-    assert s2["near_stations"] == f"[({nid('f:S1')}, First Stop, 10, 1 min)]"
-    assert s2["stop_line_ids"] == f"{nid('f:S2')}-20"
+    assert s2["ID"] == 2
+    assert s2["near_stations"] == "[(1, First Stop, 10, 1 min)]"
+    assert s2["stop_line_ids"] == "2-20"
 
     path = write_near_stations(result, tmp_path)
     assert path.name == NEAR_STATIONS_NAME
     reread = pd.read_csv(path)
-    assert int(reread.loc[reread["stop_uid"] == "f:S1", "stop_num_id"].item()) == nid("f:S1")
+    assert list(reread["ID"]) == [1, 2]  # starts at 1, row order
 
 
 def test_multiple_lines_yield_one_tuple_and_one_combo_each() -> None:
@@ -89,11 +92,10 @@ def test_multiple_lines_yield_one_tuple_and_one_combo_each() -> None:
     pairs = connectivity.proximity_pairs_local(stops, threshold_m=150.0)
 
     result = build_near_stations(stops, route_stops, routes, pairs)
-    s2 = nid("f:S2")
     assert row_of(result, "f:S1")["near_stations"] == (
-        f"[({s2}, Side, 20, 1 min), ({s2}, Side, r3, 1 min)]"
+        "[(2, Side, 20, 1 min), (2, Side, r3, 1 min)]"
     )
-    assert row_of(result, "f:S2")["stop_line_ids"] == f"{s2}-20, {s2}-r3"
+    assert row_of(result, "f:S2")["stop_line_ids"] == "2-20, 2-r3"
 
 
 def test_stops_without_neighbours_get_empty_list() -> None:
@@ -122,8 +124,24 @@ def test_unserved_near_stop_is_omitted_from_lists() -> None:
 
     result = build_near_stations(stops, route_stops, routes, pairs)
     assert row_of(result, "f:S1")["near_stations"] == "[]"          # S2 has no line
-    assert row_of(result, "f:S2")["near_stations"] == f"[({nid('f:S1')}, Stop, 10, 1 min)]"
+    assert row_of(result, "f:S2")["near_stations"] == "[(1, Stop, 10, 1 min)]"
     assert row_of(result, "f:S2")["stop_line_ids"] == ""            # unserved itself
+    assert row_of(result, "f:S2")["Modalidad"] == ""                # unserved -> no system
+
+
+def test_modalidad_joins_distinct_agency_names() -> None:
+    stops = make_stops(
+        ("f", "S1", "Hub", 40.0, -75.0),
+        ("f", "S2", "Side", 40.0009, -75.0),
+    )
+    route_stops = rs(("f", "r1", "S1"), ("f", "r2", "S1"), ("f", "r3", "S2"))
+    routes = routes_meta(("f", "r1", "10"), ("f", "r2", "20"), ("f", "r3", "30"))
+    routes["modalidad"] = ["Mi Macro", "Sitren", "Mi Macro"]
+    pairs = connectivity.proximity_pairs_local(stops, threshold_m=150.0)
+
+    result = build_near_stations(stops, route_stops, routes, pairs)
+    assert row_of(result, "f:S1")["Modalidad"] == "Mi Macro, Sitren"  # distinct, sorted
+    assert row_of(result, "f:S2")["Modalidad"] == "Mi Macro"
 
 
 def test_numeric_ids_are_stable_and_unique() -> None:

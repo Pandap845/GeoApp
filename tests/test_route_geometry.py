@@ -173,11 +173,12 @@ def test_same_line_stations_lists_adjacent_stops_in_route_order() -> None:
     out = build_near_stations(stops, route_stops, routes, stop_pairs, stop_links=stop_links).set_index("stop_uid")
 
     # B is the middle stop: its same-line neighbours are A (prev) and C (next).
+    # IDs are the sequential file ids (A=1, B=2, C=3 in row order).
     b = out.loc["f:B", "same_line_stations"]
-    assert "11, Alfa, L1, dir0" in b and "33, Gamma, L1, dir0" in b
+    assert "1, Alfa, L1, dir0" in b and "3, Gamma, L1, dir0" in b
     # A is an endpoint: only B is adjacent; distance ~1.1 km (0.01 deg lat).
     a = out.loc["f:A", "same_line_stations"]
-    assert a.count("(") == 1 and "22, Beta, L1, dir0" in a
+    assert a.count("(") == 1 and "2, Beta, L1, dir0" in a
     assert "1112.0m" in a or "1111." in a  # ~0.01 deg latitude
     # near_stations (proximity) stays empty - no stop_pairs given.
     assert out.loc["f:A", "near_stations"] == "[]"
