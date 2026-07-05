@@ -71,6 +71,7 @@ def test_route_stop_links_follow_stop_sequence_not_proximity() -> None:
             "trip_id": ["t1", "t1", "t1", "t2", "t2"],
             "stop_id": ["A", "B", "C", "C", "A"],
             "stop_sequence": [1, 2, 3, 1, 2],
+            "departure_time": [0.0, 120.0, 300.0, 0.0, 240.0],
         }
     )
     links = route_stop_links(fake_feed(None, TRIPS, stop_times, ROUTES), "feedx")
@@ -81,6 +82,12 @@ def test_route_stop_links_follow_stop_sequence_not_proximity() -> None:
         ("feedx:C", "feedx:A", 1),   # reverse direction is its own edge
     }
     assert set(links["linea"]) == {"Línea 2"}
+    # Scheduled segment times: median departure difference, in minutes.
+    minutes = {(a, b): t for a, b, t in
+               zip(links["stop_uid_a"], links["stop_uid_b"], links["travel_min"])}
+    assert minutes[("feedx:A", "feedx:B")] == 2.0    # 120 s
+    assert minutes[("feedx:B", "feedx:C")] == 3.0    # 180 s
+    assert minutes[("feedx:C", "feedx:A")] == 4.0    # 240 s
 
 
 def test_route_stop_links_dedupes_repeated_trips() -> None:
@@ -176,10 +183,11 @@ def test_same_line_stations_lists_adjacent_stops_in_route_order() -> None:
     # IDs are the sequential file ids (A=1, B=2, C=3 in row order).
     b = out.loc["f:B", "same_line_stations"]
     assert "1, Alfa, L1, dir0" in b and "3, Gamma, L1, dir0" in b
-    # A is an endpoint: only B is adjacent; distance ~1.1 km (0.01 deg lat).
+    # A is an endpoint: only B is adjacent. The fixture links carry no
+    # schedule times, so minutes fall back to ~1.11 km at 25 km/h = 2.7.
     a = out.loc["f:A", "same_line_stations"]
     assert a.count("(") == 1 and "2, Beta, L1, dir0" in a
-    assert "1112.0m" in a or "1111." in a  # ~0.01 deg latitude
+    assert ", 2.7)" in a
     # near_stations (proximity) stays empty - no stop_pairs given.
     assert out.loc["f:A", "near_stations"] == "[]"
 

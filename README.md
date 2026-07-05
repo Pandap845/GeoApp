@@ -173,8 +173,10 @@ CREATE UNIQUE INDEX ux_stops_num_id ON stops (stop_num_id);
 48 bits of `sha256(stop_uid)` as an unsigned integer. It is stable across
 runs and feed sets, unique in practice (collision odds at 100k stops are
 ~1e-5, and the unique index would surface one immediately), and fits both
-`bigint` and JavaScript numbers. Consumers that need integer node ids use
-it; `stop_uid` remains the durable human-readable key.
+`bigint` and JavaScript numbers. It is the database machine key (also on
+the GeoPackage `stops`/`near_links` layers); note that `near_stations.csv`
+uses its own sequential `ID` (1..N) for the node relations instead —
+`stop_uid` remains the durable human-readable key joining everything.
 
 **Reports** in the `--report` directory:
 
@@ -220,7 +222,10 @@ Flags shared by both subcommands:
 | `--window NAME=HH:MM-HH:MM` | Replace the default time windows (repeatable). Hours may exceed 23, e.g. `night=23:00-27:00`. |
 
 `analyze-frequency` only (in addition to `--service-date`, `--proximity-m`,
-`--window`): `--transport-mode MODE` and `--route ROUTE` (both repeatable or
+`--window`): `--network-walk` computes near-station walking times along the
+OSM street network in PostGIS instead of straight lines (pairs without a
+street path within 800 m keep the straight-line value); `--transport-mode
+MODE` and `--route ROUTE` (both repeatable or
 comma-separated) restrict the analysis to certain transport modes and/or
 routes — **default: everything**. Modes accept names (bus, tram, metro,
 rail, ferry, cable_tram, aerial_lift, funicular, trolleybus, monorail) or
@@ -571,36 +576,40 @@ Files in `--report DIR`:
   service date used and whether it was explicit or auto-picked, routes and
   trips analyzed; plus route-pair counts by connection type, graph metrics
   (components, sizes), and **isolated routes** (no connections at all).
-- `near_stations.csv` — one row per stop with `stop_num_id`, `stop_uid`,
-  `feed_id`, `stop_id`, `station` (name), `stop_lat`, `stop_lon`,
-  `stop_line_ids`, and `near_stations`: the stations within the proximity
-  threshold, formatted exactly as
+- `near_stations.csv` — one row per stop with `ID`, `stop_uid`, `station`
+  (name), `system`, `stop_id`, `stop_lat`, `stop_lon`, `stop_line_ids`,
+  and two relation columns:
 
   ```
-  [(ID, station, linea, time to reach), (ID2, station, linea, time to reach)]
+  near_stations      = [(ID, station, linea, minutes), ...]          # walking, any line
+  same_line_stations = [(ID, station, linea, dirD, minutes), ...]    # route order, same line
   ```
 
-  one tuple per (near station, line) combination, sorted by walking time.
-  Conventions: `ID` in the tuples is the near stop's **numeric id**
-  (`stop_num_id`, matching the `stops` table column — node relations join
-  directly against the database); `stop_line_ids` is the row's own set of
-  **combined stop+line ids** `"{stop_num_id}-{line}"` (e.g.
-  `128733941436-L10`), for consumers modelling one node per (station, line)
-  pair; `linea` is the route's `route_short_name` (falling back to
-  `route_id`), restricted to lines active on the analyzed service date — an
-  unserved station node is omitted from neighbour lists; `time to reach` is
-  straight-line distance at a **5 km/h walking speed** (~83 m/min), rounded
-  to whole minutes with a 1-minute floor (no street network is consulted —
-  Phase 3). "Near" reuses `--proximity-m` (default 150 m) and the same
-  distance engine as connectivity (PostGIS geography, or local UTM math on
-  dry runs).
+  Conventions: `ID` is the file's own **sequential node id** (1..N in row
+  order, starts at 1) — the key every relation column references; use
+  `stop_uid` to join against the database. `system` is the serving
+  system(s) (agency names, e.g. `Mi Macro, Sitren`). `stop_line_ids` is
+  the row's own `"{ID}-{line}"` combos (e.g. `17-C98`). `linea` is
+  `route_short_name` (falling back to `route_id`), restricted to lines
+  active on the analyzed service date — an unserved station node is
+  omitted from neighbour lists. All times are bare numbers in **minutes**:
+  `near_stations` uses walking time at ~5 km/h (`max(1, round(m/83))`,
+  straight-line, or along the OSM street network with `--network-walk`);
+  `same_line_stations` uses the **scheduled in-vehicle minutes** between
+  consecutive stations (median over the day's trips; distance at ~25 km/h
+  when a segment has no departure times). "Near" reuses `--proximity-m`
+  (default 150 m); the same-line relation follows `stop_times` order with
+  no distance cap. `dirD` is the GTFS `direction_id` (dir0/dir1).
 - `transit_analysis.gpkg` — **GeoPackage** (open directly in QGIS/GDAL)
-  with two EPSG:4326 layers: `stops` (points; numeric id, uid, feed/stop
-  ids, name, location_type, parent_station, `stop_line_ids`, and the
-  `near_stations` relation string) and `near_links` (one LineString per
-  near pair with both numeric ids, geodesic `distance_m`, and `walk_min`).
-  GeoPackage keeps 64-bit integers intact, so the numeric ids are safe
-  (a shapefile would truncate them). The file is rewritten per run.
+  with four EPSG:4326 layers: `stops` (points; the CSV attributes plus
+  `stop_num_id`, the database join key), `near_links` (one LineString per
+  near pair with both `stop_num_id`s, `distance_m`, `walk_min`),
+  `route_shapes` (real route polylines from shapes.txt per
+  route/direction/shape), and `route_stop_links` (**directed**
+  consecutive-stop segments per route/direction with scheduled
+  `travel_min`). GeoPackage keeps 64-bit integers intact, so the numeric
+  ids are safe (a shapefile would truncate them). The file is rewritten
+  per run.
 
 ## Phase 2 assumptions
 

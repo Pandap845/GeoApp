@@ -40,11 +40,11 @@ log = logging.getLogger(__name__)
 GEOPACKAGE_NAME = "transit_analysis.gpkg"
 
 #: Attribute columns of the stops layer (geometry column excluded).
-#: ``ID`` / ``Modalidad`` mirror near_stations.csv (the relation strings
+#: ``ID`` / ``system`` mirror near_stations.csv (the relation strings
 #: reference ``ID``); ``stop_num_id`` remains the database join key.
 STOPS_LAYER_COLUMNS = [
     "ID", "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
-    "Modalidad", "location_type", "parent_station", "stop_line_ids",
+    "system", "location_type", "parent_station", "stop_line_ids",
     "near_stations", "same_line_stations",
 ]
 
@@ -112,13 +112,13 @@ def _stops_layer(stops: gpd.GeoDataFrame, near: pd.DataFrame) -> gpd.GeoDataFram
         ["stop_num_id", "stop_uid", "feed_id", "stop_id",
          "location_type", "parent_station", "geometry"]
     ].copy()
-    extra_cols = ["stop_uid", "ID", "station", "Modalidad", "stop_line_ids",
+    extra_cols = ["stop_uid", "ID", "station", "system", "stop_line_ids",
                   "near_stations", "same_line_stations"]
     extras = near[extra_cols] if not near.empty else pd.DataFrame(columns=extra_cols)
     layer = layer.merge(extras, on="stop_uid", how="left")
     layer["ID"] = pd.to_numeric(layer["ID"], errors="coerce").fillna(0).astype(int)
     layer["station"] = layer["station"].fillna("")
-    layer["Modalidad"] = layer["Modalidad"].fillna("")
+    layer["system"] = layer["system"].fillna("")
     layer["stop_line_ids"] = layer["stop_line_ids"].fillna("")
     layer["near_stations"] = layer["near_stations"].fillna("[]")
     layer["same_line_stations"] = layer["same_line_stations"].fillna("[]")
@@ -160,14 +160,18 @@ def _route_stop_links_layer(
     skipped silently - the layer shows what can be drawn, the DB tables
     remain the source of truth.
     """
-    columns = ["route_uid", "feed_id", "linea", "direction_id", "stop_uid_a", "stop_uid_b"]
+    columns = ["route_uid", "feed_id", "linea", "direction_id",
+               "stop_uid_a", "stop_uid_b", "travel_min"]
     if stop_links is None or stop_links.empty:
         return gpd.GeoDataFrame(pd.DataFrame(columns=columns),
                                 geometry=gpd.GeoSeries([], crs="EPSG:4326"))
     geom_by_uid = stops.drop_duplicates("stop_uid").set_index("stop_uid")["geometry"]
-    links = stop_links[
-        stop_links["stop_uid_a"].isin(geom_by_uid.index)
-        & stop_links["stop_uid_b"].isin(geom_by_uid.index)
+    links = stop_links.copy()
+    if "travel_min" not in links.columns:
+        links["travel_min"] = None
+    links = links[
+        links["stop_uid_a"].isin(geom_by_uid.index)
+        & links["stop_uid_b"].isin(geom_by_uid.index)
     ].copy()
     lines = [
         LineString([geom_by_uid[a], geom_by_uid[b]])

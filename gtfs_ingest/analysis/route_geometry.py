@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 SHAPE_COLUMNS = ["route_uid", "feed_id", "route_id", "linea", "direction_id", "shape_id"]
 LINK_COLUMNS = ["route_uid", "feed_id", "route_id", "linea", "direction_id",
-                "stop_uid_a", "stop_uid_b"]
+                "stop_uid_a", "stop_uid_b", "travel_min"]
 
 
 def _linea_map(feed: Any) -> pd.DataFrame:
@@ -117,6 +117,11 @@ def route_shapes(feed: Any, feed_id: str) -> gpd.GeoDataFrame:
 def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
     """Distinct consecutive-stop pairs per route/direction (no geometry).
 
+    ``travel_min`` is the SCHEDULED in-vehicle time between the two stops:
+    the median departure-time difference across all trips serving the pair
+    (minutes, 1 decimal). NULL when the segment has no timed stop_times
+    rows (non-timepoints) - consumers fall back to an estimate.
+
     Args:
         feed: typed partridge feed filtered to the analyzed service date.
         feed_id: Phase 1 provenance id.
@@ -133,23 +138,38 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
     ):
         return pd.DataFrame(columns=LINK_COLUMNS)
 
-    ordered = stop_times[["trip_id", "stop_id", "stop_sequence"]].copy()
+    keep = ["trip_id", "stop_id", "stop_sequence"]
+    has_times = "departure_time" in stop_times.columns
+    if has_times:
+        keep.append("departure_time")
+    ordered = stop_times[keep].copy()
     ordered["stop_sequence"] = pd.to_numeric(ordered["stop_sequence"], errors="coerce")
     ordered = ordered.dropna(subset=["stop_sequence"]).sort_values(["trip_id", "stop_sequence"])
     ordered["stop_id"] = ordered["stop_id"].astype(str)
     ordered["next_stop_id"] = ordered.groupby("trip_id")["stop_id"].shift(-1)
-    pairs = ordered.dropna(subset=["next_stop_id"])[["trip_id", "stop_id", "next_stop_id"]]
+    if has_times:
+        ordered["seg_s"] = (
+            ordered.groupby("trip_id")["departure_time"].shift(-1) - ordered["departure_time"]
+        )
+        ordered.loc[ordered["seg_s"] < 0, "seg_s"] = pd.NA  # broken sequences
+    else:
+        ordered["seg_s"] = pd.NA
+    pairs = ordered.dropna(subset=["next_stop_id"])[
+        ["trip_id", "stop_id", "next_stop_id", "seg_s"]
+    ]
 
     trip_meta = trips[["trip_id", "route_id"]].copy()
     trip_meta["route_id"] = trip_meta["route_id"].astype(str)
     trip_meta["direction_id"] = _direction_series(trips)
-    links = (
-        pairs.merge(trip_meta, on="trip_id")
-        .drop_duplicates(["route_id", "direction_id", "stop_id", "next_stop_id"])
-        .copy()
-    )
-    if links.empty:
+    merged = pairs.merge(trip_meta, on="trip_id")
+    if merged.empty:
         return pd.DataFrame(columns=LINK_COLUMNS)
+    merged["seg_s"] = pd.to_numeric(merged["seg_s"], errors="coerce")
+    links = (
+        merged.groupby(["route_id", "direction_id", "stop_id", "next_stop_id"], as_index=False)
+        .agg(seg_s=("seg_s", "median"))
+    )
+    links["travel_min"] = (links["seg_s"] / 60).round(1)
 
     links["feed_id"] = feed_id
     links["route_uid"] = feed_id + ":" + links["route_id"]

@@ -55,7 +55,7 @@ def test_near_stations_numeric_ids_and_format(tmp_path: Path) -> None:
     result = build_near_stations(stops, route_stops, routes, pairs)
 
     assert list(result.columns) == [
-        "ID", "stop_uid", "station", "Modalidad", "feed_id", "stop_id",
+        "ID", "stop_uid", "station", "system", "stop_id",
         "stop_lat", "stop_lon", "stop_line_ids", "near_stations", "same_line_stations",
     ]
     # No stop_links passed -> the same-line relation is empty, not missing.
@@ -63,16 +63,16 @@ def test_near_stations_numeric_ids_and_format(tmp_path: Path) -> None:
     s1 = row_of(result, "f:S1")
     # Sequential node id: 1..N in row order.
     assert s1["ID"] == 1
-    # Node relation tuples use the sequential ID of the near stop.
-    assert s1["near_stations"] == "[(2, Second Stop, 20, 1 min)]"
+    # Node relation tuples use the sequential ID; times are bare minutes.
+    assert s1["near_stations"] == "[(2, Second Stop, 20, 1)]"
     # Combined stop+line id of the row's own stop.
     assert s1["stop_line_ids"] == "1-10"
-    # No modalidad metadata in this fixture -> empty, never missing.
-    assert s1["Modalidad"] == ""
+    # No agency metadata in this fixture -> empty, never missing.
+    assert s1["system"] == ""
 
     s2 = row_of(result, "f:S2")
     assert s2["ID"] == 2
-    assert s2["near_stations"] == "[(1, First Stop, 10, 1 min)]"
+    assert s2["near_stations"] == "[(1, First Stop, 10, 1)]"
     assert s2["stop_line_ids"] == "2-20"
 
     path = write_near_stations(result, tmp_path)
@@ -93,7 +93,7 @@ def test_multiple_lines_yield_one_tuple_and_one_combo_each() -> None:
 
     result = build_near_stations(stops, route_stops, routes, pairs)
     assert row_of(result, "f:S1")["near_stations"] == (
-        "[(2, Side, 20, 1 min), (2, Side, r3, 1 min)]"
+        "[(2, Side, 20, 1), (2, Side, r3, 1)]"
     )
     assert row_of(result, "f:S2")["stop_line_ids"] == "2-20, 2-r3"
 
@@ -124,12 +124,12 @@ def test_unserved_near_stop_is_omitted_from_lists() -> None:
 
     result = build_near_stations(stops, route_stops, routes, pairs)
     assert row_of(result, "f:S1")["near_stations"] == "[]"          # S2 has no line
-    assert row_of(result, "f:S2")["near_stations"] == "[(1, Stop, 10, 1 min)]"
+    assert row_of(result, "f:S2")["near_stations"] == "[(1, Stop, 10, 1)]"
     assert row_of(result, "f:S2")["stop_line_ids"] == ""            # unserved itself
-    assert row_of(result, "f:S2")["Modalidad"] == ""                # unserved -> no system
+    assert row_of(result, "f:S2")["system"] == ""                   # unserved -> no system
 
 
-def test_modalidad_joins_distinct_agency_names() -> None:
+def test_system_joins_distinct_agency_names() -> None:
     stops = make_stops(
         ("f", "S1", "Hub", 40.0, -75.0),
         ("f", "S2", "Side", 40.0009, -75.0),
@@ -140,8 +140,8 @@ def test_modalidad_joins_distinct_agency_names() -> None:
     pairs = connectivity.proximity_pairs_local(stops, threshold_m=150.0)
 
     result = build_near_stations(stops, route_stops, routes, pairs)
-    assert row_of(result, "f:S1")["Modalidad"] == "Mi Macro, Sitren"  # distinct, sorted
-    assert row_of(result, "f:S2")["Modalidad"] == "Mi Macro"
+    assert row_of(result, "f:S1")["system"] == "Mi Macro, Sitren"  # distinct, sorted
+    assert row_of(result, "f:S2")["system"] == "Mi Macro"
 
 
 def test_numeric_ids_are_stable_and_unique() -> None:

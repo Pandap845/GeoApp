@@ -134,7 +134,11 @@ stop_num_id = int(first 6 bytes of sha256(stop_uid))     # 48-bit numeric alias
 
 `stop_num_id` is deterministic, unique in practice (collision odds ≈
 n²/2⁴⁹; a unique DB index would surface one), fits `bigint` and JavaScript
-numbers, and is the machine key used in node relations.
+numbers. It is the **database machine key** (`stops.stop_num_id`, also the
+`num_id_a/b` attributes of the GeoPackage `near_links` layer). Note: the
+node relations in `near_stations.csv` do NOT use it — they reference the
+file's own sequential `ID` column (1..N, see §3.4); `stop_uid` is the key
+to join the CSV against the database.
 
 ### 2.2 Normalization of stops (the common schema)
 
@@ -266,14 +270,14 @@ Per stop, **two complementary relations**:
   service date), sorted by walking time:
 
 ```
-[(ID, station, linea, time to reach), …]
+[(ID, station, linea, minutes), …]              # times are bare numbers, always minutes
 ID            = the near stop's sequential node id (the CSV's first column:
                 1..N in row order — the key all relation columns reference;
                 stop_uid remains the durable cross-run key)
 linea         = route_short_name, falling back to route_id
-time to reach = max(1, round(distance_m / 83))    # minutes; 83 m/min ≈ 5 km/h, straight-line
+minutes       = max(1, round(distance_m / 83))   # walking; 83 m/min ≈ 5 km/h, straight-line
 stop_line_ids = "{ID}-{line}" per line serving the row's own stop
-Modalidad     = distinct agency names of the serving lines ("Mi Macro, Sitren")
+system        = distinct agency names of the serving lines ("Mi Macro, Sitren")
 ```
 
 - **`same_line_stations`** — route topology, same line only: the
@@ -281,12 +285,30 @@ Modalidad     = distinct agency names of the serving lines ("Mi Macro, Sitren")
   direction, from `stop_times` sequence), regardless of distance:
 
 ```
-[(ID, station, linea, dir{d}, {dist}m), …]      dist = haversine between the consecutive stops
+[(ID, station, linea, dir{d}, {minutes}), …]
+minutes = SCHEDULED in-vehicle time of the segment (median departure-time
+          difference across the day's trips, 1 decimal); falls back to the
+          straight-line distance at ~25 km/h when the segment has no
+          departure times in stop_times
 ```
 
 Inclusion criteria differ deliberately: `near_stations` = "what can I walk
 to" (distance only, no route filter); `same_line_stations` = "what comes
 before/after on my line" (sequence only, no distance threshold).
+
+**Optional street-network walking distances** (`--network-walk`,
+`analysis/walk_network.py`): instead of the straight line, each near pair's
+`distance_m` becomes the distance **walked along OSM streets** — walkable
+`planet_osm_line` ways (motorways excluded) inside the stops' buffered hull
+are fetched in one indexed query, built into a vertex graph in the metric
+CRS (vertices merged at 0.1 m), stops are snapped via KD-tree, and a
+bounded Dijkstra (cutoff 800 m) runs per source stop; both snap offsets are
+added and a street path is never allowed to be shorter than the straight
+line. Pairs without a path keep the straight-line value (counted in the
+log). Applied AFTER the connectivity edges — `route_connections.
+min_stop_distance_m` stays geodesic — and BEFORE near-stations/GeoPackage,
+so `near_stations` minutes and `near_links.walk_min` reflect real walking.
+Measured on these feeds: mean detour ≈ 2.2× the straight line.
 
 ### 3.5 Route geometry (Phase 2 exports)
 
@@ -296,7 +318,10 @@ before/after on my line" (sequence only, no distance threshold).
 - **`route_stop_links`** — **directed** consecutive-stop segments per
   `(route, direction)` derived from `stop_times` order and deduplicated
   across trips: each stop chains to the *next stop of its own route*.
-  Distinct from `near_links` (the walking overlay).
+  Each segment carries `travel_min` — the scheduled in-vehicle minutes
+  (median departure-time difference across the day's trips; NULL when the
+  segment has no timed rows). Distinct from `near_links` (the walking
+  overlay).
 
 ### 3.6 Interchange detection (Phase 3A)
 
@@ -425,8 +450,8 @@ file only, never the database).
 | --- | --- | --- |
 | `validation_report.json/.md` | ingest | per feed: status, row counts per file, findings (severity/code/count/samples), optional-file matrix, stops normalized vs loaded |
 | `analysis_report.json/.md` | analyze-frequency | service dates used (+ how picked), transport-mode/route filter applied, per-feed route/trip/headway counts, connectivity summary, isolated routes |
-| `near_stations.csv` | analyze-frequency | one row per stop: `ID` (sequential node id, 1..N — the key of every relation column), `stop_uid`, `station`, `Modalidad` (serving system names), feed/stop ids, lat/lon, `stop_line_ids` (own `ID-line` combos), `near_stations` `[(ID, station, linea, min), …]`, `same_line_stations` `[(ID, station, linea, dir, m), …]` |
-| `transit_analysis.gpkg` | analyze-frequency | 4 EPSG:4326 layers: **`stops`** (points + the CSV attributes), **`near_links`** (walking lines: both num ids, `distance_m`, `walk_min`), **`route_shapes`** (real route polylines: route_uid, linea, direction, shape_id), **`route_stop_links`** (directed consecutive-stop segments: route_uid, linea, direction, both stop_uids) |
+| `near_stations.csv` | analyze-frequency | one row per stop: `ID` (sequential node id, 1..N — the key of every relation column), `stop_uid`, `station`, `system` (serving system names), `stop_id`, lat/lon, `stop_line_ids` (own `ID-line` combos), `near_stations` `[(ID, station, linea, walk minutes), …]`, `same_line_stations` `[(ID, station, linea, dir, scheduled minutes), …]` — all times bare numbers in minutes |
+| `transit_analysis.gpkg` | analyze-frequency | 4 EPSG:4326 layers: **`stops`** (points + the CSV attributes), **`near_links`** (walking lines: both num ids, `distance_m`, `walk_min`), **`route_shapes`** (real route polylines: route_uid, linea, direction, shape_id), **`route_stop_links`** (directed consecutive-stop segments: route_uid, linea, direction, both stop_uids, `travel_min` scheduled minutes) |
 | `route_connectivity.graphml` | analyze-frequency | the undirected route graph: nodes = route_uid (+ short/long name, route_type, feed), edges = connections (+ type, shared stops, min distance) — for Gephi/yEd/networkx |
 | `interchanges_report.json/.md` | detect-interchanges | cluster totals, mode combinations, per-feed notes, transfers.txt agreement (declared vs inferred, with examples) |
 | `conflation_report.json/.md` | conflate-osm | match rate, needs-review count, side distribution, low-confidence count, reverse-coverage summary (gap count by kind) |

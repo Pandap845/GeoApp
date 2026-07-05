@@ -17,13 +17,19 @@ Identifier conventions (documented in the README):
   is a self-contained node/edge list. It is deterministic for identical
   inputs in the same order; the durable cross-run/database key remains
   ``stop_uid`` (second column).
-- ``Modalidad`` is the transport system(s) whose lines serve the stop -
+- ``system`` is the transport system(s) whose lines serve the stop -
   the agency names from ``agency.txt`` (e.g. ``Mi Macro``, ``Sitren``,
   ``Mi Transporte``), comma-joined when several systems share the stop,
   empty for unserved stops.
 - ``stop_line_ids`` is the **combined stop+line identifier** set of the
   row's own stop: ``"{ID}-{line}"`` per line serving it (e.g. ``"17-L10"``),
   for consumers that model a node per (station, line) pair.
+- All times are MINUTES rendered as bare numbers (no unit suffix):
+  ``near_stations`` times are walking estimates (integer, 1-minute floor);
+  ``same_line_stations`` times are the SCHEDULED in-vehicle minutes between
+  consecutive stations (median over the day's trips, 1 decimal), falling
+  back to straight-line distance at ~25 km/h when the segment carries no
+  departure times.
 - ``linea`` is the route's ``route_short_name`` when present, otherwise its
   ``route_id``; only lines active on the analyzed service date appear, so a
   near stop served by no route that day (e.g. a bare parent-station node)
@@ -39,14 +45,14 @@ A second relation, ``same_line_stations``, lists the stop's **adjacent
 stations along each line it serves** - the actual previous/next stop in
 route order (``stop_times`` sequence), per line and direction, rendered as::
 
-    [(ID, station, linea, dir{d}, {dist}m), ...]
+    [(ID, station, linea, dir{d}, {minutes}), ...]
 
 Unlike ``near_stations`` (any line, geographic proximity only), this is the
 route topology: it comes from the consecutive-stop pairs of
 ``route_geometry.route_stop_links`` and includes both the previous and next
 stop of every (line, direction) serving the stop, even when they are farther
-than the proximity threshold. ``dist`` is the straight-line (haversine)
-distance between the two consecutive stops in meters.
+than the proximity threshold. ``minutes`` is the scheduled in-vehicle time
+between the two consecutive stops (see the conventions above).
 """
 
 from __future__ import annotations
@@ -66,15 +72,20 @@ NEAR_STATIONS_NAME = "near_stations.csv"
 
 #: Columns of the exported file. ``ID`` is the file's own sequential node
 #: id (1..N, row order) - the key the relation columns reference;
-#: ``Modalidad`` is the transport system(s) serving the stop (agency names,
-#: e.g. "Mi Macro, Sitren").
+#: ``system`` is the transport system(s) serving the stop (agency names,
+#: e.g. "Mi Macro, Sitren"). ``feed_id`` is not exported - it is the prefix
+#: of ``stop_uid``.
 COLUMNS = [
-    "ID", "stop_uid", "station", "Modalidad", "feed_id", "stop_id",
+    "ID", "stop_uid", "station", "system", "stop_id",
     "stop_lat", "stop_lon", "stop_line_ids", "near_stations", "same_line_stations",
 ]
 
 #: Mean earth radius (meters) for the straight-line inter-stop distance.
 _EARTH_RADIUS_M = 6_371_000.0
+
+#: Fallback vehicle speed for same-line times when the schedule has no
+#: departure times on a segment (~25 km/h).
+VEHICLE_M_PER_MIN = 25_000.0 / 60.0
 
 
 def _line_labels(routes: pd.DataFrame) -> pd.DataFrame:
@@ -93,7 +104,7 @@ def _line_labels(routes: pd.DataFrame) -> pd.DataFrame:
 
 def walk_minutes(distance_m: pd.Series) -> pd.Series:
     """Estimated walking minutes for straight-line distances (>= 1 min)."""
-    return np.maximum(1, (distance_m / WALK_M_PER_MIN).round()).astype(int)
+    return (distance_m / WALK_M_PER_MIN).round().clip(lower=1).astype(int)
 
 
 def build_near_stations(
@@ -129,7 +140,7 @@ def build_near_stations(
         inputs.
     """
     base = stops[
-        ["stop_uid", "feed_id", "stop_id", "stop_name", "stop_lat", "stop_lon"]
+        ["stop_uid", "stop_id", "stop_name", "stop_lat", "stop_lon"]
     ].copy()
     base = base.rename(columns={"stop_name": "station"})
     base["station"] = base["station"].fillna("")
@@ -137,8 +148,8 @@ def build_near_stations(
     base.insert(0, "ID", range(1, len(base) + 1))
 
     lines_at = _lines_at_stops(route_stops, routes)
-    base = base.merge(_modalidades(route_stops, routes), on="stop_uid", how="left")
-    base["Modalidad"] = base["Modalidad"].fillna("")
+    base = base.merge(_systems(route_stops, routes), on="stop_uid", how="left")
+    base["system"] = base["system"].fillna("")
 
     # Combined stop+line ids for the row's own stop.
     own = base[["stop_uid", "ID"]].merge(lines_at, on="stop_uid")
@@ -165,7 +176,7 @@ def build_near_stations(
     entries = entries.sort_values(["stop_uid", "minutes", "near_station", "line"])
     entries["tuple"] = (
         "(" + entries["near_num_id"].astype(str) + ", " + entries["near_station"] + ", "
-        + entries["line"].astype(str) + ", " + entries["minutes"].astype(str) + " min)"
+        + entries["line"].astype(str) + ", " + entries["minutes"].astype(str) + ")"
     )
     rendered = (
         entries.groupby("stop_uid")["tuple"]
@@ -178,13 +189,13 @@ def build_near_stations(
     return result[COLUMNS]
 
 
-def _modalidades(route_stops: pd.DataFrame, routes: pd.DataFrame) -> pd.DataFrame:
-    """``stop_uid -> Modalidad``: distinct system (agency) names, joined.
+def _systems(route_stops: pd.DataFrame, routes: pd.DataFrame) -> pd.DataFrame:
+    """``stop_uid -> system``: distinct system (agency) names, joined.
 
     Empty frame when the route metadata carries no ``modalidad`` column
     (e.g. feeds without agency info) - callers fill with ``""``.
     """
-    columns = ["stop_uid", "Modalidad"]
+    columns = ["stop_uid", "system"]
     if route_stops.empty or routes.empty or "modalidad" not in routes.columns:
         return pd.DataFrame(columns=columns)
     served = (
@@ -200,7 +211,7 @@ def _modalidades(route_stops: pd.DataFrame, routes: pd.DataFrame) -> pd.DataFram
         served.sort_values(["stop_uid", "modalidad"])
         .groupby("stop_uid")["modalidad"]
         .agg(", ".join)
-        .rename("Modalidad")
+        .rename("system")
         .reset_index()
     )
 
@@ -271,15 +282,21 @@ def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> p
 
     Both the next stop (this stop is ``stop_uid_a`` of a link) and the
     previous stop (this stop is ``stop_uid_b``) are collected, so each
-    (line, direction) contributes up to two neighbours. Distance is the
-    straight-line distance between the two consecutive stops.
+    (line, direction) contributes up to two neighbours. ``minutes`` is the
+    scheduled in-vehicle time of the segment (``travel_min``), falling back
+    to the straight-line distance at :data:`VEHICLE_M_PER_MIN` when the
+    schedule carries no times for it.
     """
-    columns = ["stop_uid", "near_num_id", "near_station", "linea", "direction_id", "distance_m"]
+    columns = ["stop_uid", "near_num_id", "near_station", "linea", "direction_id", "minutes"]
     if stop_links is None or stop_links.empty:
         return pd.DataFrame(columns=columns)
     keep = ["stop_uid", "near_uid", "linea", "direction_id"]
-    forward = stop_links.rename(columns={"stop_uid_a": "stop_uid", "stop_uid_b": "near_uid"})[keep]
-    backward = stop_links.rename(columns={"stop_uid_b": "stop_uid", "stop_uid_a": "near_uid"})[keep]
+    links = stop_links.copy()
+    if "travel_min" not in links.columns:
+        links["travel_min"] = pd.NA
+    keep_t = keep + ["travel_min"]
+    forward = links.rename(columns={"stop_uid_a": "stop_uid", "stop_uid_b": "near_uid"})[keep_t]
+    backward = links.rename(columns={"stop_uid_b": "stop_uid", "stop_uid_a": "near_uid"})[keep_t]
     both = pd.concat([forward, backward], ignore_index=True).drop_duplicates(keep)
 
     near_attr = base[["stop_uid", "ID", "station", "stop_lat", "stop_lon"]].rename(
@@ -294,9 +311,11 @@ def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> p
     if entries.empty:
         return pd.DataFrame(columns=columns)
     entries["near_station"] = entries["near_station"].fillna("")
-    entries["distance_m"] = _haversine_m(
-        entries["stop_lat"], entries["stop_lon"], entries["near_lat"], entries["near_lon"]
+    estimate = (
+        _haversine_m(entries["stop_lat"], entries["stop_lon"],
+                     entries["near_lat"], entries["near_lon"]) / VEHICLE_M_PER_MIN
     ).round(1)
+    entries["minutes"] = pd.to_numeric(entries["travel_min"], errors="coerce").fillna(estimate)
     return entries[columns]
 
 
@@ -307,12 +326,12 @@ def _attach_same_line(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> pd
         base["same_line_stations"] = "[]"
         return base
     entries = entries.sort_values(
-        ["stop_uid", "linea", "direction_id", "distance_m", "near_num_id"]
+        ["stop_uid", "linea", "direction_id", "minutes", "near_num_id"]
     )
     entries["tuple"] = (
         "(" + entries["near_num_id"].astype(str) + ", " + entries["near_station"] + ", "
         + entries["linea"].astype(str) + ", dir" + entries["direction_id"].astype(str) + ", "
-        + entries["distance_m"].astype(str) + "m)"
+        + entries["minutes"].astype(str) + ")"
     )
     rendered = (
         entries.groupby("stop_uid")["tuple"]

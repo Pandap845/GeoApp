@@ -144,6 +144,13 @@ def build_parser() -> argparse.ArgumentParser:
         "route_type codes, basic or extended (3, 700, ...). Default: all modes.",
     )
     analyze.add_argument(
+        "--network-walk",
+        action="store_true",
+        help="Compute near-station walking times along the OSM street network "
+        "(planet_osm_line in PostGIS) instead of straight lines. Slower; "
+        "pairs without a street path keep the straight-line value.",
+    )
+    analyze.add_argument(
         "--route",
         action="append",
         default=None,
@@ -361,6 +368,9 @@ def _run_analyze(args: argparse.Namespace) -> int:
             windows=windows,
             mode_codes=mode_codes,
             route_specs=route_specs,
+            network_walk=args.network_walk,
+            osm_line_table=settings.osm_line_table,
+            osm_geom_column=settings.osm_geom_column,
             dry_run=settings.dry_run,
         )
     except ValueError as exc:

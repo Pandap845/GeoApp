@@ -70,6 +70,9 @@ class AnalysisConfig(BaseModel):
     windows: list[TimeWindow] = Field(default_factory=lambda: list(DEFAULT_WINDOWS))
     mode_codes: Optional[frozenset[int]] = None
     route_specs: Optional[frozenset[str]] = None
+    network_walk: bool = False
+    osm_line_table: str = "planet_osm_line"
+    osm_geom_column: str = "way"
     dry_run: bool = False
 
 
@@ -275,6 +278,22 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
     else:
         stop_pairs = connectivity.proximity_pairs_local(all_stops, config.proximity_m)
     edges = connectivity.build_edges(route_stops, stations, stop_pairs)
+
+    # Optional OSM street-network walking distances (--network-walk): applied
+    # AFTER the connectivity edges (min_stop_distance_m stays geodesic) and
+    # BEFORE near-stations/GeoPackage, whose walking minutes they refine.
+    if config.network_walk and engine is not None and not stop_pairs.empty:
+        from . import walk_network
+
+        try:
+            stop_pairs = walk_network.network_distances(
+                engine, all_stops, stop_pairs, analyzed_feed_ids,
+                metric_crs=None,
+                line_table=config.osm_line_table,
+                geom_column=config.osm_geom_column,
+            )
+        except Exception:  # noqa: BLE001 - refinement only, never fatal
+            log.exception("Network walk distances failed; keeping straight-line values")
 
     shape_frames = [d.route_shapes for d in feed_data if not d.route_shapes.empty]
     all_shapes = gpd.GeoDataFrame(

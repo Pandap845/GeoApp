@@ -169,20 +169,29 @@ Dos feeds del Area Metropolitana de Guadalajara, Jalisco, Mexico:
   near_stations.csv            UNA FILA POR PARADA. Columnas:
     ID                 id secuencial de nodo (1..N, orden de fila). ES LA
                        CLAVE que usan todas las columnas de relacion.
-    stop_uid           clave durable (para cruzar con la base de datos)
+    stop_uid           clave durable (para cruzar con la base de datos;
+                       su prefijo es el feed_id)
     station            nombre de la parada
-    Modalidad          sistema(s) que la sirven — nombres de agencia:
+    system             sistema(s) que la sirven — nombres de agencia:
                        "Mi Macro", "Mi Tren", "Sitren", "Mi Transporte",
                        "Mi Transporte Electrico"; unidos por coma si varios
-    feed_id, stop_id   procedencia
+    stop_id            id original del feed
     stop_lat/stop_lon  coordenadas WGS84
     stop_line_ids      combinaciones "{ID}-{linea}" de la propia parada
     near_stations      relacion por CERCANIA GEOGRAFICA (<= 150 m, cualquier
-                       linea): [(ID, estacion, linea, minutos a pie), ...]
-                       minutos = max(1, round(distancia_m / 83))  (~5 km/h)
+                       linea): [(ID, estacion, linea, minutos), ...]
+                       minutos A PIE = max(1, round(distancia_m / 83));
+                       con --network-walk la distancia se camina por la RED
+                       DE CALLES de OSM (Dijkstra acotado sobre
+                       planet_osm_line; sin ruta -> linea recta)
     same_line_stations relacion por TOPOLOGIA DE RUTA (misma linea):
                        estaciones adyacentes en orden de recorrido, por linea
-                       y direccion: [(ID, estacion, linea, dirD, metros), ...]
+                       y direccion: [(ID, estacion, linea, dirD, minutos), ...]
+                       minutos EN VEHICULO segun el horario (mediana de la
+                       diferencia de salidas en stop_times, 1 decimal);
+                       si el tramo no tiene horarios, estimacion en linea
+                       recta a ~25 km/h.
+    NOTA: todos los tiempos son numeros sin sufijo y SIEMPRE en minutos.
 
   transit_analysis.gpkg        GeoPackage EPSG:4326, 4 capas:
     stops              puntos + todos los atributos del CSV (ID, Modalidad,

@@ -168,7 +168,7 @@ def test_analyze_frequency_cli_dry_run(tmp_path: Path) -> None:
     s3_id = int(near.loc[near["stop_uid"] == "metro:S3", "ID"].item())
     s2 = near.loc[near["stop_uid"] == "metro:S2", "near_stations"].item()
     assert s2.startswith(f"[({s3_id}, Central Platform, ")
-    assert ", 1 min)" in s2
+    assert ", 1)" in s2
     # S2 is an unserved station node, so it appears in no one's list.
     s3 = near.loc[near["stop_uid"] == "metro:S3", "near_stations"].item()
     assert s3 == "[]"
