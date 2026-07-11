@@ -1,0 +1,117 @@
+name: Tests
+
+# Testing pipeline for gtfs-ingest.
+#
+# Three jobs:
+#   * lint        - advisory style/lint pass (never blocks a merge).
+#   * unit        - fast pytest run with no database, across an OS/Python
+#                   matrix. DB-backed tests self-skip when
+#                   GTFS_TEST_DATABASE_URL is unset (see tests/test_db.py,
+#                   tests/test_conflation_live.py).
+#   * integration - full pytest run against a live PostGIS service container,
+#                   exercising the live DB / OSM-conflation tests too.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  lint:
+    name: Lint (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # Advisory only: surfaces issues as GitHub annotations but does not fail
+      # the pipeline. Drop `continue-on-error` once the codebase is ruff-clean.
+      - name: ruff check
+        continue-on-error: true
+        run: ruff check --output-format=github .
+
+      - name: ruff format --check
+        continue-on-error: true
+        run: ruff format --check .
+
+  unit:
+    name: Unit (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + test deps
+        run: python -m pip install -e ".[dev]"
+
+      # No GTFS_TEST_DATABASE_URL here, so the live PostGIS / conflation tests
+      # skip and only the pure-unit suite runs.
+      - name: Run pytest
+        run: pytest -v --durations=10
+
+  integration:
+    name: Integration (PostGIS)
+    runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: gtfs_test
+        ports:
+          - 5432:5432
+        # Wait until the server accepts connections before the job starts.
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gtfs_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GTFS_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gtfs_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + test deps
+        run: python -m pip install -e ".[dev]"
+
+      # ensure_schema() runs `CREATE EXTENSION IF NOT EXISTS postgis` itself as
+      # the superuser, so no manual extension bootstrap is needed here.
+      - name: Run full test suite (incl. live DB tests)
+        run: pytest -v --durations=10
