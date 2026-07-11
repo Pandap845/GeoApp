@@ -6,12 +6,30 @@ __pycache__/
 .pytest_cache/
 transitland-lib/
 gtfs_ingest.egg-info/
+
 # Pipeline outputs & local config
 out/
+out1/
+out2/
 .env
+
+# Markdown docs (keep only README.md and WORKFLOW.md)
+*.md
+!README.md
+!WORKFLOW.md
+
+# LaTeX presentation & build artifacts
+*.tex
+presentacion.pdf
+*.aux
+*.log
+*.nav
+*.snm
+*.toc
+*.vrb
+*.fls
+*.fdb_latexmk
+*.synctex.gz
 
 # IDE
 .idea/
-
-
-

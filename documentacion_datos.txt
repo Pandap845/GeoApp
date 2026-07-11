@@ -84,25 +84,85 @@ Dos feeds del Area Metropolitana de Guadalajara, Jalisco, Mexico:
 
 2.1 Entradas GTFS (columnas minimas exigidas por el pipeline)
 --------------------------------------------------------------------------------
-  agency.txt          agency_id, agency_name (=> "Modalidad"), agency_url,
-                      agency_timezone
-  stops.txt           stop_id, stop_name, stop_lat, stop_lon, location_type
-                      (0 parada/anden, 1 estacion, 2 entrada, 3 nodo,
-                      4 area de abordaje), parent_station
-  routes.txt          route_id, agency_id, route_short_name, route_long_name,
-                      route_type (0 tranvia, 1 metro, 2 tren, 3 autobus,
-                      4 ferry, 11 trolebus, 12 monorriel; codigos extendidos
-                      100-1499 se normalizan al basico)
-  trips.txt           route_id, service_id, trip_id, direction_id (0/1),
-                      shape_id
-  stop_times.txt      trip_id, stop_id, stop_sequence (orden de recorrido),
-                      departure_time (puede exceder 24:00)
-  calendar.txt        service_id, lunes..domingo, start_date, end_date
-  calendar_dates.txt  service_id, date, exception_type (1 agrega, 2 quita)
-  shapes.txt          shape_id, shape_pt_lat/lon, shape_pt_sequence
-  transfers.txt       from_stop_id, to_stop_id (opcional; cruce declarado)
-  frequencies.txt     servicio por intervalos (limitacion documentada: no se
-                      expande en el calculo de headways)
+  agency.txt — operadores / sistemas
+    agency_id         identificador unico del operador dentro del feed;
+                      las rutas lo referencian via routes.agency_id
+    agency_name       nombre del sistema (Mi Macro, Mi Tren, Sitren,
+                      Mi Transporte...). ORIGEN DE LA COLUMNA "system"
+    agency_url        sitio web oficial del operador
+    agency_timezone   zona horaria de todos los horarios del feed
+
+  stops.txt — paradas y estaciones
+    stop_id           identificador unico de la parada en el feed; clave a
+                      la que apuntan stop_times y parent_station
+    stop_name         nombre publico de la parada/estacion
+    stop_lat/lon      coordenadas WGS84 (lat [-90,90], lon [-180,180]);
+                      de aqui nace toda la geometria del proyecto
+    location_type     0 = parada/anden donde se aborda (default),
+                      1 = estacion (contenedor de andenes), 2 = entrada,
+                      3 = nodo generico, 4 = area de abordaje
+                      (3/4 pueden omitir coordenadas)
+    parent_station    stop_id de la estacion (tipo 1) a la que pertenece
+                      este anden; agrupa andenes de una misma estacion
+
+  routes.txt — lineas
+    route_id          identificador unico de la linea en el feed
+    agency_id         operador de la linea (enlace a agency.txt)
+    route_short_name  nombre corto publico ("C98", "L1"). ES LA "linea" DE
+                      LOS EXPORTES; si falta se usa route_id
+    route_long_name   nombre descriptivo ("Troncal C01 - 39A Poniente")
+    route_type        modo: 0 tranvia/tren ligero, 1 metro, 2 tren,
+                      3 autobus, 4 ferry, 11 trolebus, 12 monorriel;
+                      codigos extendidos 100-1499 -> basico (700 -> 3)
+
+  trips.txt — viajes (una corrida concreta de una linea)
+    trip_id           identificador del viaje
+    route_id          linea a la que pertenece
+    service_id        calendario que decide QUE DIAS corre el viaje
+    direction_id      sentido: 0 = ida, 1 = vuelta (la asignacion la define
+                      el operador); vacio -> centinela -1. Es el dir0/dir1
+                      de same_line_stations
+    shape_id          trazado geometrico del viaje (enlace a shapes.txt)
+
+  stop_times.txt — horario de cada viaje
+    trip_id           viaje al que pertenece la fila
+    stop_id           parada visitada
+    stop_sequence     POSICION de la parada dentro del recorrido (1a, 2a...);
+                      define la direccion de route_stop_links y la
+                      adyacencia de same_line_stations
+    departure_time    hora programada de salida; puede exceder 24:00
+                      (25:10 = servicio buho del mismo dia de servicio).
+                      Origen de los headways y de travel_min
+
+  calendar.txt — patron semanal de servicio
+    service_id        identificador del calendario
+    monday..sunday    1/0: si el servicio opera ese dia de la semana
+    start_date        inicio de vigencia (YYYYMMDD)
+    end_date          fin de vigencia (YYYYMMDD)
+
+  calendar_dates.txt — excepciones puntuales
+    service_id        calendario que se modifica
+    date              fecha de la excepcion (YYYYMMDD)
+    exception_type    1 = ese dia SI hay servicio (agregado);
+                      2 = ese dia NO hay servicio (quitado)
+
+  shapes.txt — trazados reales
+    shape_id            identificador del trazado
+    shape_pt_lat/lon    coordenadas de cada vertice del recorrido
+    shape_pt_sequence   orden de los vertices; hilados forman la polilinea
+                        de la capa route_shapes
+
+  transfers.txt — transbordos declarados (opcional)
+    from_stop_id      parada de origen del transbordo declarado
+    to_stop_id        parada de destino; el par se contrasta con los
+                      intercambiadores inferidos (estos feeds no lo traen)
+
+  frequencies.txt — servicio por intervalos
+    trip_id           viaje plantilla que se repite
+    start_time        inicio de la ventana de repeticion
+    end_time          fin de la ventana
+    headway_secs      segundos entre salidas consecutivas (limitacion
+                      documentada: NO se expande en el calculo de headways)
 
 2.2 Tablas producidas en PostGIS
 --------------------------------------------------------------------------------
