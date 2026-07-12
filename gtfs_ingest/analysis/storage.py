@@ -25,6 +25,8 @@ import pandas as pd
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from ..bulk import bulk_insert
+
 log = logging.getLogger(__name__)
 
 #: Columns fetched from the Phase 3 ``stop_osm_matches`` table for the
@@ -104,9 +106,6 @@ _TABLES: dict[str, bool] = {
     "stop_equivalences": False,
 }
 
-_CHUNK_SIZE = 1000
-
-
 def ensure_analysis_schema(engine: Engine) -> None:
     """Create the four analysis tables and their indexes (idempotent).
 
@@ -126,22 +125,9 @@ def ensure_analysis_schema(engine: Engine) -> None:
     )
 
 
-def _to_records(df: pd.DataFrame) -> list[dict]:
-    """NaN/NA -> None so psycopg writes SQL NULLs."""
-    cleaned = df.astype(object).where(pd.notna(df), None)
-    return cleaned.to_dict("records")
-
-
 def _insert(conn, table: str, df: pd.DataFrame) -> None:
-    if df.empty:
-        return
-    cols = list(df.columns)
-    sql = text(
-        f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(':' + c for c in cols)})"
-    )
-    records = _to_records(df)
-    for start in range(0, len(records), _CHUNK_SIZE):
-        conn.execute(sql, records[start : start + _CHUNK_SIZE])
+    """psycopg3 COPY with executemany fallback (``bulk.bulk_insert``)."""
+    bulk_insert(conn, table, df)
 
 
 def replace_feed_rows(engine: Engine, table: str, feed_id: str, df: pd.DataFrame) -> int:

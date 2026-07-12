@@ -230,8 +230,26 @@ mean/median/min/max_headway_s = statistics over gaps      # seconds
 - `N < 2` → headway **undefined**: row kept with `trip_count` and NULL
   statistics; zero departures → no row.
 - Blank `direction_id` → sentinel `-1`; opposite directions never merged.
-- Non-timepoints (no `departure_time`) excluded; `frequencies.txt` service
-  is **not** expanded (documented limitation).
+- Non-timepoints (no `departure_time`) excluded.
+- **`frequencies.txt` IS expanded** (`headways.expand_frequencies`): each
+  frequency row generates one synthetic run per `headway_secs` interval,
+  starting at `start_time + k·headway` while strictly before `end_time`;
+  each run replays the trip's per-stop offsets relative to its first
+  departure. The template's own absolute times are **replaced** (GTFS
+  `exact_times=0`: they are a travel-time pattern, not real departures), so
+  `trip_count` counts real vehicle passages including synthetic runs — on
+  these frequency-dominated feeds (improved: 181/184 trips; mdb: 970/989)
+  this is where the headway numbers become meaningful at all. Guards:
+  unusable rows skipped, ≤1000 runs per row. `route_stop_links.travel_min`
+  deliberately stays on the UN-expanded template (the pattern already
+  encodes the correct segment times).
+- **Calendar honesty**: Phase 1 emits a `feed_expired` WARNING when the
+  feed's declared service (calendar + added calendar_dates) ends before
+  today; Phase 2 records `calendar_end`/`calendar_status` per feed and
+  notes expired calendars, out-of-validity analysis dates, and auto-picked
+  "busiest" dates more than 30 days in the past. Nothing blocks — the
+  analysis is valid *for its date*; the reader just learns how old that
+  date is.
 
 **Route rollup** per `(route, direction, window)`:
 
@@ -354,14 +372,32 @@ before/after on my line" (sequence only, no distance threshold).
 `distance_m` becomes the distance **walked along OSM streets** — walkable
 `planet_osm_line` ways (motorways excluded) inside the stops' buffered hull
 are fetched in one indexed query, built into a vertex graph in the metric
-CRS (vertices merged at 0.1 m), stops are snapped via KD-tree, and a
-bounded Dijkstra (cutoff 800 m) runs per source stop; both snap offsets are
-added and a street path is never allowed to be shorter than the straight
-line. Pairs without a path keep the straight-line value (counted in the
-log). Applied AFTER the connectivity edges — `route_connections.
+CRS (vertices merged at 0.1 m), stops are snapped via KD-tree, and routed
+with **scipy's C Dijkstra** (`csgraph.dijkstra`, cutoff 800 m, sources
+batched 16 per call to bound the dense distance-matrix memory); both snap
+offsets are added and a street path is never allowed to be shorter than the
+straight line. Pairs without a path keep the straight-line value (counted
+in the log). Applied AFTER the connectivity edges — `route_connections.
 min_stop_distance_m` stays geodesic — and BEFORE near-stations/GeoPackage,
 so `near_stations` minutes and `near_links.walk_min` reflect real walking.
 Measured on these feeds: mean detour ≈ 2.2× the straight line.
+
+**Walk-graph cache** (`analysis/graph_cache.py`, on by default): the built
+graph arrays are persisted as a compressed `.npz` in `.gtfs_cache/`
+(`--walk-cache-dir` to relocate, `--no-walk-cache` to bypass). The cache
+key hashes every input that shapes the graph — sorted feed ids, hull
+buffer, OSM table/geometry column, excluded highways, metric CRS — plus
+two DB-state probes (`count(*)`/`max(osm_id)` of the line table, and the
+feeds' `stops max(loaded_at)`), so an OSM reimport or stop reload
+invalidates automatically. Corrupt cache files are treated as misses.
+
+**Bulk loading** (`gtfs_ingest/bulk.py`): all plain-scalar tables (stops
+via a temp-table stage that builds `geom` in SQL, both headway tables,
+`route_connections`, `stop_equivalences`, `stop_osm_matches`,
+`stop_side_of_street`) load via psycopg3 `COPY`, falling back to the
+chunked executemany path (with a logged warning) if COPY ever fails —
+inside the same transaction either way. `interchanges` (array + geometry
+expression columns) deliberately stays on executemany.
 
 **Estimate provenance is auditable per stop**: every run writes
 `near_stations_quality.csv` beside the main CSV (same rows, same `ID` key)

@@ -38,6 +38,7 @@ from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
 from ..models import FeedSource
+from ..validators import calendar_range
 from . import connectivity, dedupe, geopackage, graph_export, near_stations, route_filter, route_geometry, storage
 from .dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD
 from .headways import DEFAULT_WINDOWS, TimeWindow, compute_stop_headways, route_rollup, stop_departures
@@ -48,6 +49,10 @@ log = logging.getLogger(__name__)
 GRAPHML_NAME = "route_connectivity.graphml"
 JSON_NAME = "analysis_report.json"
 MARKDOWN_NAME = "analysis_report.md"
+
+#: A "busiest" auto-selected date older than this gets a staleness note
+#: (a healthy current feed's busiest date sits near today).
+STALE_BUSIEST_DAYS = 30
 
 
 class AnalysisConfig(BaseModel):
@@ -83,6 +88,8 @@ class AnalysisConfig(BaseModel):
     mode_codes: Optional[frozenset[int]] = None
     route_specs: Optional[frozenset[str]] = None
     network_walk: bool = False
+    walk_cache: bool = True
+    walk_cache_dir: Path = Path(".gtfs_cache")
     osm_line_table: str = "planet_osm_line"
     osm_geom_column: str = "way"
     dedupe: bool = True
@@ -102,6 +109,9 @@ class FeedAnalysis(BaseModel):
     routes_analyzed: int = 0
     trips_analyzed: int = 0
     stop_headway_rows: int = 0
+    frequency_trips_expanded: int = 0     # trips from frequencies.txt
+    calendar_end: Optional[str] = None    # ISO date, latest declared service
+    calendar_status: str = "unknown"      # "current" | "expired" | "unknown"
     notes: list[str] = Field(default_factory=list)
 
 
@@ -208,10 +218,50 @@ def _analyze_feed(
         feed, selection = load_service_feed(source, config.service_date, route_ids=allowed)
         result.service_date = selection.service_date.isoformat()
         result.service_date_source = selection.source
+
+        # Calendar honesty: expired feeds and stale busiest dates must be
+        # visible - the analysis is valid FOR its date, but the reader has
+        # to know how old that date is.
+        cal_start, cal_end = calendar_range(
+            raw.table("calendar.txt"), raw.table("calendar_dates.txt")
+        )
+        today = date.today()
+        if cal_end is not None:
+            result.calendar_end = cal_end.isoformat()
+            result.calendar_status = "expired" if cal_end < today else "current"
+            if cal_end < today:
+                result.notes.append(
+                    f"feed calendar ended {cal_end.isoformat()} "
+                    f"({(today - cal_end).days} day(s) before today)"
+                )
+            if cal_start is not None and not (
+                cal_start <= selection.service_date <= cal_end
+            ):
+                result.notes.append(
+                    f"analyzed service date {selection.service_date} is outside "
+                    f"the feed's calendar validity"
+                )
+        if (
+            selection.source == "busiest"
+            and (today - selection.service_date).days > STALE_BUSIEST_DAYS
+        ):
+            result.notes.append(
+                f"busiest service date {selection.service_date} is "
+                f"{(today - selection.service_date).days} day(s) in the past"
+            )
+
         if not selection.service_ids:
             result.status = "no_service"
             result.notes.append(f"no service runs on {selection.service_date}")
             return result, data
+
+        frequencies = getattr(feed, "frequencies", None)
+        if frequencies is not None and not frequencies.empty:
+            result.frequency_trips_expanded = int(frequencies["trip_id"].nunique())
+            result.notes.append(
+                f"frequencies.txt: {result.frequency_trips_expanded} trip(s) "
+                "expanded into timetable runs"
+            )
 
         departures = stop_departures(feed)
         result.trips_analyzed = int(feed.trips["trip_id"].nunique()) if not feed.trips.empty else 0
@@ -328,6 +378,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
                 metric_crs=None,
                 line_table=config.osm_line_table,
                 geom_column=config.osm_geom_column,
+                cache_dir=config.walk_cache_dir if config.walk_cache else None,
             )
         except Exception:  # noqa: BLE001 - refinement only, never fatal
             log.exception("Network walk distances failed; keeping straight-line values")

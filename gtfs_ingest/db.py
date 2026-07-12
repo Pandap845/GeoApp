@@ -6,11 +6,14 @@ Basic PostGIS schema for normalized stops, plus idempotent load of one feed's st
 from __future__ import annotations
 
 import logging
+import time
 
 import pandas as pd
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
+
+from .bulk import copy_rows
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +55,41 @@ _INSERT_SQL = text(
 
 #: Rows per executemany batch (keeps memory bounded on huge feeds).
 _CHUNK_SIZE = 1000
+
+#: Scalar columns staged through the COPY temp table (geom is built in SQL).
+_STOP_COLUMNS = [
+    "stop_uid", "stop_num_id", "feed_id", "stop_id", "stop_name",
+    "stop_lat", "stop_lon", "location_type", "parent_station",
+]
+
+_TEMP_TABLE_SQL = text(
+    """
+    CREATE TEMP TABLE tmp_stops (
+        stop_uid       text,
+        stop_num_id    bigint,
+        feed_id        text,
+        stop_id        text,
+        stop_name      text,
+        stop_lat       double precision,
+        stop_lon       double precision,
+        location_type  integer,
+        parent_station text
+    ) ON COMMIT DROP
+    """
+)
+
+_INSERT_FROM_TEMP_SQL = text(
+    """
+    INSERT INTO stops (
+        stop_uid, stop_num_id, feed_id, stop_id, stop_name,
+        stop_lat, stop_lon, location_type, parent_station, geom
+    )
+    SELECT stop_uid, stop_num_id, feed_id, stop_id, stop_name,
+           stop_lat, stop_lon, location_type, parent_station,
+           ST_SetSRID(ST_MakePoint(stop_lon, stop_lat), 4326)
+    FROM tmp_stops
+    """
+)
 
 
 def make_engine(db_url: str) -> Engine:
@@ -134,10 +172,28 @@ def load_feed_stops(engine: Engine, feed_id: str, stops: pd.DataFrame) -> int:
             rolls back, leaving the previously loaded data intact. The
             pipeline catches this per feed and records it as a finding.
     """
-    records = _records(stops)
+    started = time.perf_counter()
+    frame = stops.drop(columns="geometry", errors="ignore")
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM stops WHERE feed_id = :feed_id"), {"feed_id": feed_id})
-        for start in range(0, len(records), _CHUNK_SIZE):
-            conn.execute(_INSERT_SQL, records[start : start + _CHUNK_SIZE])
-    log.info("Feed %s: loaded %d stops into PostGIS", feed_id, len(records))
-    return len(records)
+        if len(frame):
+            try:
+                # Fast path: COPY into a temp table, build geom in one INSERT.
+                # SAVEPOINT keeps the transaction usable if COPY fails.
+                with conn.begin_nested():
+                    conn.execute(_TEMP_TABLE_SQL)
+                    copy_rows(conn, "tmp_stops", frame[_STOP_COLUMNS])
+                    conn.execute(_INSERT_FROM_TEMP_SQL)
+            except Exception as exc:  # noqa: BLE001 - performance path, never a gate
+                log.warning(
+                    "stops: COPY load failed (%s: %s); falling back to executemany",
+                    type(exc).__name__, exc,
+                )
+                records = _records(stops)
+                for start in range(0, len(records), _CHUNK_SIZE):
+                    conn.execute(_INSERT_SQL, records[start : start + _CHUNK_SIZE])
+    log.info(
+        "Feed %s: loaded %d stops into PostGIS in %.1fs",
+        feed_id, len(frame), time.perf_counter() - started,
+    )
+    return len(frame)

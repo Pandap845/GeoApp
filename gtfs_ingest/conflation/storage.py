@@ -13,6 +13,8 @@ import logging
 import pandas as pd
 from sqlalchemy import Engine, text
 
+from ..bulk import bulk_insert
+
 log = logging.getLogger(__name__)
 
 _DDL_STATEMENTS: tuple[str, ...] = (
@@ -126,18 +128,12 @@ def load_interchanges(engine: Engine, clusters: pd.DataFrame) -> int:
 
 
 def _reload_plain(engine: Engine, table: str, df: pd.DataFrame) -> int:
-    """DELETE + INSERT a plain-columned frame into a fixed-name table."""
-    records = _to_records(df)
-    cols = list(df.columns)
-    sql = text(
-        f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(':' + c for c in cols)})"
-    )
+    """DELETE + bulk INSERT a plain-columned frame into a fixed-name table."""
     with engine.begin() as conn:
         conn.execute(text(f"DELETE FROM {table}"))
-        for start in range(0, len(records), _CHUNK_SIZE):
-            conn.execute(sql, records[start : start + _CHUNK_SIZE])
-    log.info("%s: reloaded %d rows", table, len(records))
-    return len(records)
+        bulk_insert(conn, table, df)
+    log.info("%s: reloaded %d rows", table, len(df))
+    return len(df)
 
 
 def load_osm_matches(engine: Engine, matches: pd.DataFrame) -> int:

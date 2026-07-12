@@ -180,6 +180,20 @@ def build_parser() -> argparse.ArgumentParser:
         "pairs without a street path keep the straight-line value.",
     )
     analyze.add_argument(
+        "--walk-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cache the OSM walk graph on disk keyed by feeds + OSM state "
+        "(only used with --network-walk). --no-walk-cache forces a rebuild.",
+    )
+    analyze.add_argument(
+        "--walk-cache-dir",
+        type=Path,
+        default=Path(".gtfs_cache"),
+        metavar="DIR",
+        help="Directory for the walk-graph cache (default: ./.gtfs_cache).",
+    )
+    analyze.add_argument(
         "--route",
         action="append",
         default=None,
@@ -400,6 +414,8 @@ def _run_analyze(args: argparse.Namespace) -> int:
             mode_codes=mode_codes,
             route_specs=route_specs,
             network_walk=args.network_walk,
+            walk_cache=args.walk_cache,
+            walk_cache_dir=args.walk_cache_dir,
             osm_line_table=settings.osm_line_table,
             osm_geom_column=settings.osm_geom_column,
             dedupe=args.dedupe,

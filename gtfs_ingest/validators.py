@@ -13,6 +13,8 @@ Checks performed (see README for the full documented list):
     duplicate stop_id detection, parent_station referential integrity
   * cross-file referential integrity: trips.route_id -> routes.route_id,
     stop_times.trip_id -> trips.trip_id, stop_times.stop_id -> stops.stop_id
+  * calendar expiry: WARNING when the feed's declared service (calendar +
+    added calendar_dates) has entirely ended before today
   * inventory of optional files (INFO)
 
 Severity policy:
@@ -27,6 +29,7 @@ Severity policy:
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Callable, Optional
 
 import pandas as pd
@@ -85,6 +88,7 @@ def validate_feed(loaded: LoadedFeed) -> list[Finding]:
         _check_required_columns,
         _check_stops,
         _check_referential_integrity,
+        _check_calendar_expiry,
         _report_optional_files,
     ]
     for check in checks:
@@ -310,6 +314,73 @@ def _check_referential_integrity(loaded: LoadedFeed, findings: list[Finding]) ->
     _ref_check(findings, trips, "trips.txt", "route_id", routes, "routes.txt", "route_id")
     _ref_check(findings, stop_times, "stop_times.txt", "trip_id", trips, "trips.txt", "trip_id")
     _ref_check(findings, stop_times, "stop_times.txt", "stop_id", stops, "stops.txt", "stop_id")
+
+
+def calendar_range(
+    calendar: Optional[pd.DataFrame],
+    calendar_dates: Optional[pd.DataFrame],
+) -> tuple[Optional[date], Optional[date]]:
+    """(earliest service start, latest service end) declared by a feed.
+
+    Combines ``calendar.txt`` ``start_date``/``end_date`` with
+    ``calendar_dates.txt`` ADDED dates (``exception_type`` 1 - type-2
+    removals never extend service; a missing exception_type column counts
+    every date, tolerant). Unparseable YYYYMMDD values are skipped.
+
+    Also used by Phase 2 for the per-feed expiry note.
+
+    Args:
+        calendar: raw calendar.txt frame (or ``None``).
+        calendar_dates: raw calendar_dates.txt frame (or ``None``).
+
+    Returns:
+        ``(start, end)`` as dates; ``(None, None)`` when nothing parses.
+    """
+    def _dates(frame: Optional[pd.DataFrame], column: str) -> pd.Series:
+        if frame is None or frame.empty or column not in frame.columns:
+            return pd.Series(dtype="datetime64[ns]")
+        return pd.to_datetime(
+            frame[column].astype("string").str.strip(), format="%Y%m%d", errors="coerce"
+        ).dropna()
+
+    starts = [_dates(calendar, "start_date")]
+    ends = [_dates(calendar, "end_date")]
+    added = calendar_dates
+    if added is not None and not added.empty and "exception_type" in added.columns:
+        kind = added["exception_type"].astype("string").str.strip()
+        added = added[kind == "1"]
+    starts.append(_dates(added, "date"))
+    ends.append(_dates(added, "date"))
+
+    all_starts = pd.concat(starts) if starts else pd.Series(dtype="datetime64[ns]")
+    all_ends = pd.concat(ends) if ends else pd.Series(dtype="datetime64[ns]")
+    start = all_starts.min().date() if not all_starts.empty else None
+    end = all_ends.max().date() if not all_ends.empty else None
+    return start, end
+
+
+def _check_calendar_expiry(loaded: LoadedFeed, findings: list[Finding]) -> None:
+    """WARNING when the feed's declared service has entirely ended."""
+    _, end = calendar_range(
+        loaded.table("calendar.txt"), loaded.table("calendar_dates.txt")
+    )
+    if end is None:
+        return  # missing/unreadable calendars have their own findings
+    today = date.today()
+    if end < today:
+        findings.append(
+            Finding(
+                severity=Severity.WARNING,
+                code="feed_expired",
+                message=(
+                    f"Feed's service ends {end.isoformat()} - "
+                    f"{(today - end).days} day(s) before today; any analysis "
+                    "runs on formally expired service"
+                ),
+                file="calendar.txt",
+                sample=[end.isoformat()],
+            )
+        )
 
 
 def _report_optional_files(loaded: LoadedFeed, findings: list[Finding]) -> None:

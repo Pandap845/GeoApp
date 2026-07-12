@@ -71,3 +71,41 @@ def test_live_load_is_idempotent(valid_feed) -> None:
     assert count == 3
     assert srid == 4326
     engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GTFS_TEST_DATABASE_URL"),
+    reason="GTFS_TEST_DATABASE_URL not set; skipping live PostGIS test",
+)
+def test_live_bulk_copy_nan_becomes_null() -> None:
+    """COPY path writes SQL NULLs for NaN stats (route_stop_headways)."""
+    from sqlalchemy import text
+
+    from gtfs_ingest.analysis.storage import ensure_analysis_schema, replace_feed_rows
+
+    engine = make_engine(os.environ["GTFS_TEST_DATABASE_URL"])
+    ensure_analysis_schema(engine)
+    frame = pd.DataFrame(
+        {
+            "feed_id": ["copytest"],
+            "service_date": ["2026-01-06"],
+            "route_id": ["R1"],
+            "direction_id": [0],
+            "stop_id": ["S1"],
+            "time_window": ["am_peak"],
+            "trip_count": [1],
+            "mean_headway_s": [float("nan")],     # single departure: undefined
+            "median_headway_s": [float("nan")],
+            "min_headway_s": [float("nan")],
+            "max_headway_s": [float("nan")],
+        }
+    )
+    assert replace_feed_rows(engine, "route_stop_headways", "copytest", frame) == 1
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT trip_count, mean_headway_s FROM route_stop_headways "
+                 "WHERE feed_id = 'copytest'")
+        ).one()
+    assert row.trip_count == 1
+    assert row.mean_headway_s is None            # NaN arrived as NULL
+    engine.dispose()

@@ -224,7 +224,10 @@ Flags shared by both subcommands:
 `analyze-frequency` only (in addition to `--service-date`, `--proximity-m`,
 `--window`): `--network-walk` computes near-station walking times along the
 OSM street network in PostGIS instead of straight lines (pairs without a
-street path within 800 m keep the straight-line value); `--transport-mode
+street path within 800 m keep the straight-line value). The built walk
+graph is cached on disk in `.gtfs_cache/` keyed by feeds + OSM state
+(`--walk-cache-dir DIR` to relocate, `--no-walk-cache` to force a rebuild —
+an OSM reimport or stop reload invalidates automatically); `--transport-mode
 MODE` and `--route ROUTE` (both repeatable or
 comma-separated) restrict the analysis to certain transport modes and/or
 routes — **default: everything**. Modes accept names (bus, tram, metro,
@@ -407,6 +410,7 @@ All checks run for every feed; nothing stops at the first problem.
 | `trips.route_id` → `routes.route_id` broken | `dangling_reference` | ERROR |
 | `stop_times.trip_id` → `trips.trip_id` broken | `dangling_reference` | ERROR |
 | `stop_times.stop_id` → `stops.stop_id` broken | `dangling_reference` | ERROR |
+| Feed's declared service (calendar + added calendar_dates) ended before today | `feed_expired` | WARNING |
 | Inventory of optional files present/absent | `optional_files` | INFO |
 | A validator itself crashed on pathological input | `validator_crash` | ERROR |
 
@@ -526,6 +530,14 @@ headway **in seconds** plus `trip_count` (departures in the window):
   not negative.
 - `direction_id` is optional in GTFS; blank values become `-1` ("unknown")
   so they group separately rather than merging opposite directions.
+- **`frequencies.txt` is expanded**: each frequency row generates one
+  synthetic run per `headway_secs` interval (start times
+  `start_time + k·headway`, strictly before `end_time`), replaying the
+  trip's per-stop time offsets. The template's own absolute times are
+  replaced, never doubled (GTFS `exact_times=0`: they are a travel-time
+  pattern). `trip_count` therefore counts real vehicle passages — on
+  frequency-dominated feeds this changes headway numbers massively, by
+  design. Same-line `travel_min` stays on the un-expanded pattern.
 
 Default windows: `am_peak 06:00–09:00`, `midday 09:00–15:00`,
 `pm_peak 15:00–19:00`, `evening 19:00–23:00` (all overridable with
@@ -655,8 +667,12 @@ Files in `--report DIR`:
 
 - Headways are schedule-based (`stop_times.departure_time`); rows without a
   departure time (non-timepoints) are excluded.
-- `frequencies.txt`-based (headway-defined) service is **not** expanded in
-  this phase; such trips contribute only their template `stop_times` rows.
+- `frequencies.txt` service **is expanded** into synthetic runs (see the
+  headway definition above); `route_stop_links.travel_min` deliberately
+  reads the un-expanded template pattern.
+- Expired calendars don't block analysis: the report carries
+  `calendar_status`/`calendar_end` per feed plus notes for expired feeds
+  and stale auto-picked busiest dates (> 30 days old).
 - The route rollup is unweighted across stops (each stop counts equally).
 - A feed that fails anywhere in analysis is recorded `failed` with the
   exception message in its notes; the run continues (same isolation

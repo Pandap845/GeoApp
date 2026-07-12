@@ -105,6 +105,35 @@ def test_finalize_pairs_labels_walk_source() -> None:
     assert "network_m" not in out.columns
 
 
+def test_two_stops_sharing_a_snap_vertex_both_route() -> None:
+    # A and C snap to the same vertex (0,0); both their pairs must route.
+    node_xy, indptr, indices, weights = graph_from(LineString([(0, 0), (100, 0)]))
+    stop_xy = pd.DataFrame(
+        {"x": [0.0, 1.0, 100.0], "y": [0.0, 0.0, 0.0]}, index=["f:A", "f:C", "f:B"]
+    )
+    pairs = pd.DataFrame(
+        {
+            "stop_uid_a": ["f:A", "f:C"],
+            "stop_uid_b": ["f:B", "f:B"],
+            "distance_m": [100.0, 99.0],
+        }
+    )
+    out = pair_network_distances(node_xy, indptr, indices, weights, stop_xy, pairs)
+    assert out["network_m"].iloc[0] == pytest.approx(100.0, abs=0.5)
+    assert out["network_m"].iloc[1] == pytest.approx(101.0, abs=0.5)  # +1 m snap
+
+
+def test_pair_at_exact_cutoff_is_found() -> None:
+    node_xy, indptr, indices, weights = graph_from(LineString([(0, 0), (800, 0)]))
+    stop_xy = pd.DataFrame({"x": [0.0, 800.0], "y": [0.0, 0.0]}, index=["f:A", "f:B"])
+    pairs = pd.DataFrame(
+        {"stop_uid_a": ["f:A"], "stop_uid_b": ["f:B"], "distance_m": [800.0]}
+    )
+    out = pair_network_distances(node_xy, indptr, indices, weights, stop_xy, pairs,
+                                 cutoff_m=800.0)
+    assert out["network_m"].iloc[0] == pytest.approx(800.0, abs=0.5)
+
+
 def test_cli_accepts_network_walk_flag() -> None:
     from gtfs_ingest.cli import build_parser
 
@@ -112,3 +141,11 @@ def test_cli_accepts_network_walk_flag() -> None:
         ["analyze-frequency", "--feeds", "x.zip", "--network-walk"]
     )
     assert args.network_walk is True
+    assert args.walk_cache is True                      # cache on by default
+
+    args = build_parser().parse_args(
+        ["analyze-frequency", "--feeds", "x.zip", "--network-walk",
+         "--no-walk-cache", "--walk-cache-dir", "mycache"]
+    )
+    assert args.walk_cache is False
+    assert str(args.walk_cache_dir) == "mycache"

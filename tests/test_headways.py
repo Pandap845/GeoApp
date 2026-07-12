@@ -12,6 +12,7 @@ from gtfs_ingest.analysis.headways import (
     DEFAULT_WINDOWS,
     TimeWindow,
     compute_stop_headways,
+    expand_frequencies,
     parse_hhmm,
     route_rollup,
     stop_departures,
@@ -193,3 +194,108 @@ def test_direction_id_blank_becomes_sentinel(tmp_path: Path) -> None:
     feed, _ = load_service_feed(source, date(2026, 1, 3))  # T2, blank direction
     dep = stop_departures(feed)
     assert set(dep["direction_id"]) == {-1}
+
+
+# --------------------------------------------------------------------------
+# frequencies.txt expansion
+# --------------------------------------------------------------------------
+
+def _template(*rows: tuple[str, str, float]) -> pd.DataFrame:
+    """stop_times rows of (trip_id, stop_id, departure_s)."""
+    return pd.DataFrame(list(rows), columns=["trip_id", "stop_id", "departure_time"])
+
+
+def test_expand_frequencies_basic_runs_and_offsets() -> None:
+    st = _template(("T1", "A", 28800.0), ("T1", "B", 29400.0))    # 08:00, 08:10
+    freq = pd.DataFrame(
+        {"trip_id": ["T1"], "start_time": [28800.0], "end_time": [32400.0],
+         "headway_secs": [1200.0]}                                # 08:00-09:00 @ 20 min
+    )
+    out = expand_frequencies(st, freq)
+
+    assert len(out) == 6                                          # 3 runs x 2 stops
+    a = out[out["stop_id"] == "A"]["departure_time"].tolist()
+    b = out[out["stop_id"] == "B"]["departure_time"].tolist()
+    assert a == [28800.0, 30000.0, 31200.0]                       # per-run starts
+    assert b == [29400.0, 30600.0, 31800.0]                       # +10 min offset
+
+
+def test_expand_frequencies_end_time_is_exclusive() -> None:
+    # end - start divisible by headway: no run departs AT end_time.
+    st = _template(("T1", "A", 0.0))
+    freq = pd.DataFrame(
+        {"trip_id": ["T1"], "start_time": [0.0], "end_time": [3600.0],
+         "headway_secs": [1800.0]}
+    )
+    out = expand_frequencies(st, freq)
+    assert out["departure_time"].tolist() == [0.0, 1800.0]        # not 3600.0
+
+
+def test_expand_frequencies_skips_bad_rows() -> None:
+    st = _template(("T1", "A", 0.0))
+    freq = pd.DataFrame(
+        {
+            "trip_id": ["T1", "T1", "T1", "T1"],
+            "start_time": [0.0, 0.0, None, 3600.0],
+            "end_time": [3600.0, 3600.0, 3600.0, 3600.0],          # last: end == start
+            "headway_secs": [0.0, None, 600.0, 600.0],
+        }
+    )
+    assert expand_frequencies(st, freq).empty
+
+
+def test_expand_frequencies_caps_runaway_rows() -> None:
+    st = _template(("T1", "A", 0.0))
+    freq = pd.DataFrame(
+        {"trip_id": ["T1"], "start_time": [0.0], "end_time": [86400.0],
+         "headway_secs": [1.0]}                                   # 86400 runs!
+    )
+    out = expand_frequencies(st, freq, max_runs=10)
+    assert len(out) == 10
+
+
+def test_expand_frequencies_deterministic() -> None:
+    st = _template(("T1", "A", 0.0), ("T1", "B", 60.0), ("T2", "A", 0.0))
+    freq = pd.DataFrame(
+        {"trip_id": ["T1", "T2"], "start_time": [0.0, 0.0],
+         "end_time": [1800.0, 1800.0], "headway_secs": [600.0, 900.0]}
+    )
+    pd.testing.assert_frame_equal(expand_frequencies(st, freq), expand_frequencies(st, freq))
+
+
+#: ANALYSIS_FEED plus a frequencies.txt turning T1 into 3 runs 08:00-09:00.
+FREQUENCY_FEED = {
+    **ANALYSIS_FEED,
+    "frequencies.txt": (
+        "trip_id,start_time,end_time,headway_secs\n"
+        "T1,08:00:00,09:00:00,1200\n"
+    ),
+}
+
+
+def test_stop_departures_replaces_template_for_frequency_trips(tmp_path: Path) -> None:
+    path = write_feed_dir(tmp_path, "freq_feed", FREQUENCY_FEED)
+    (source,) = discover_feeds([path])
+    feed, _ = load_service_feed(source, date(2026, 1, 6))         # Tuesday: T1 + T3
+    dep = stop_departures(feed)
+
+    # T1's template departure at S1 (08:00) is replaced by the 3 runs.
+    s1_r1 = sorted(dep[(dep["stop_id"] == "S1") & (dep["route_id"] == "R1")]["departure_s"])
+    assert s1_r1 == [28800.0, 30000.0, 31200.0]
+    # Non-frequency trip T3 (route R2) keeps its single real departure.
+    s1_r2 = dep[(dep["stop_id"] == "S1") & (dep["route_id"] == "R2")]["departure_s"].tolist()
+    assert s1_r2 == [9.5 * 3600]                                  # 09:30
+
+
+def test_frequency_expansion_raises_window_trip_count(tmp_path: Path) -> None:
+    path = write_feed_dir(tmp_path, "freq_feed", FREQUENCY_FEED)
+    (source,) = discover_feeds([path])
+    feed, _ = load_service_feed(source, date(2026, 1, 6))
+    stats = compute_stop_headways(stop_departures(feed), DEFAULT_WINDOWS)
+
+    (row,) = stats[
+        (stats["route_id"] == "R1") & (stats["stop_id"] == "S1")
+        & (stats["time_window"] == "am_peak")
+    ].to_dict("records")
+    assert row["trip_count"] == 3                                 # was 1 pre-expansion
+    assert row["mean_headway_s"] == 1200.0                        # the defined headway

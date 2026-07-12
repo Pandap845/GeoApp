@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 
+import pandas as pd
+
 from gtfs_ingest.models import Finding, Severity
-from gtfs_ingest.validators import optional_file_matrix, validate_feed
+from gtfs_ingest.validators import calendar_range, optional_file_matrix, validate_feed
 
 from conftest import feed_files, load_dir_feed
 
@@ -169,3 +172,93 @@ def test_optional_file_matrix(valid_feed) -> None:
     assert matrix["calendar.txt"] is True
     assert matrix["shapes.txt"] is False
     assert matrix["transfers.txt"] is False
+
+
+# --------------------------------------------------------------------------
+# Calendar expiry (feed_expired) + calendar_range helper
+# --------------------------------------------------------------------------
+
+def _ymd(d: date) -> str:
+    return d.strftime("%Y%m%d")
+
+
+def _calendar(start: date, end: date) -> str:
+    return (
+        "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+        f"WK,1,1,1,1,1,0,0,{_ymd(start)},{_ymd(end)}\n"
+    )
+
+
+def test_feed_expired_warning_for_past_calendar(tmp_path: Path) -> None:
+    files = feed_files(replace={"calendar.txt": _calendar(date(2020, 1, 1), date(2022, 12, 31))})
+    loaded = load_dir_feed(tmp_path, "expired", files)
+    (finding,) = by_code(validate_feed(loaded), "feed_expired")
+    assert finding.severity == Severity.WARNING
+    assert "2022-12-31" in finding.message
+    assert finding.sample == ["2022-12-31"]
+
+
+def test_no_feed_expired_for_current_calendar(tmp_path: Path) -> None:
+    # Today-relative dates: this test must never become a time bomb.
+    today = date.today()
+    files = feed_files(
+        replace={"calendar.txt": _calendar(today - timedelta(days=30), today + timedelta(days=365))}
+    )
+    loaded = load_dir_feed(tmp_path, "current", files)
+    assert not by_code(validate_feed(loaded), "feed_expired")
+
+
+def test_added_calendar_date_extends_validity(tmp_path: Path) -> None:
+    # calendar ends in the past, but a type-1 exception adds a future date.
+    today = date.today()
+    files = feed_files(
+        replace={
+            "calendar.txt": _calendar(date(2020, 1, 1), date(2022, 12, 31)),
+            "calendar_dates.txt": (
+                "service_id,date,exception_type\n"
+                f"WK,{_ymd(today + timedelta(days=10))},1\n"
+            ),
+        }
+    )
+    loaded = load_dir_feed(tmp_path, "extended", files)
+    assert not by_code(validate_feed(loaded), "feed_expired")
+
+
+def test_removed_calendar_date_does_not_extend_validity(tmp_path: Path) -> None:
+    today = date.today()
+    files = feed_files(
+        replace={
+            "calendar.txt": _calendar(date(2020, 1, 1), date(2022, 12, 31)),
+            "calendar_dates.txt": (
+                "service_id,date,exception_type\n"
+                f"WK,{_ymd(today + timedelta(days=10))},2\n"     # removal
+            ),
+        }
+    )
+    loaded = load_dir_feed(tmp_path, "removed_only", files)
+    assert by_code(validate_feed(loaded), "feed_expired")
+
+
+def test_junk_calendar_dates_tolerated(tmp_path: Path) -> None:
+    files = feed_files(
+        replace={"calendar.txt": (
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            "WK,1,1,1,1,1,0,0,not-a-date,also-junk\n"
+        )}
+    )
+    loaded = load_dir_feed(tmp_path, "junk_dates", files)
+    # Nothing parses -> no expiry verdict, and no validator crash either.
+    findings = validate_feed(loaded)
+    assert not by_code(findings, "feed_expired")
+    assert not by_code(findings, "validator_crash")
+
+
+def test_calendar_range_pure_helper() -> None:
+    cal = pd.DataFrame({"start_date": ["20200101"], "end_date": ["20221231"]})
+    added = pd.DataFrame({"date": ["20230115"], "exception_type": ["1"]})
+    start, end = calendar_range(cal, added)
+    assert (start, end) == (date(2020, 1, 1), date(2023, 1, 15))
+    assert calendar_range(None, None) == (None, None)
+    # Missing exception_type column: every date counts (tolerant).
+    no_type = pd.DataFrame({"date": ["20240601"]})
+    assert calendar_range(cal, no_type)[1] == date(2024, 6, 1)
