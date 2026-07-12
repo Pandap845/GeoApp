@@ -53,6 +53,15 @@ route topology: it comes from the consecutive-stop pairs of
 stop of every (line, direction) serving the stop, even when they are farther
 than the proximity threshold. ``minutes`` is the scheduled in-vehicle time
 between the two consecutive stops (see the conventions above).
+
+A provenance sidecar, ``near_stations_quality.csv`` (:func:`build_quality`),
+is written beside the main file with the same rows and ``ID`` key. It makes
+the estimate-fallback ladder auditable per stop: ``walk_source`` (network /
+straight_line / mixed / unsnapped / none), ``travel_source`` (observed /
+estimated / mixed / none), ``travel_n_obs`` (worst-case trips behind the
+scheduled medians), ``coord_confidence`` (Phase 3 OSM conflation verdict or
+``unavailable``) and ``station_dedup`` (cross-feed canonical station id).
+The main file's format never changes because of the sidecar.
 """
 
 from __future__ import annotations
@@ -63,12 +72,26 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .walk_network import MAX_SNAP_M
+
 log = logging.getLogger(__name__)
 
 #: ~5 km/h walking speed.
 WALK_M_PER_MIN = 83.0
 
 NEAR_STATIONS_NAME = "near_stations.csv"
+QUALITY_NAME = "near_stations_quality.csv"
+
+#: Columns of the quality sidecar - one row per stop, same ``ID`` key and
+#: row order as :data:`COLUMNS`. Vocabularies:
+#: ``walk_source``   network / straight_line / mixed / unsnapped / none
+#: ``travel_source`` observed / estimated / mixed / none
+#: ``coord_confidence`` "0.812"-style score / needs_review / no_match /
+#:                      unavailable
+QUALITY_COLUMNS = [
+    "ID", "stop_uid", "walk_source", "travel_source", "travel_n_obs",
+    "coord_confidence", "station_dedup",
+]
 
 #: Columns of the exported file. ``ID`` is the file's own sequential node
 #: id (1..N, row order) - the key the relation columns reference;
@@ -235,8 +258,13 @@ def _near_entries(
     lines_at: pd.DataFrame,
     stop_pairs: pd.DataFrame,
 ) -> pd.DataFrame:
-    """One row per (stop, near stop, line): the tuples before rendering."""
-    columns = ["stop_uid", "near_num_id", "near_station", "line", "minutes"]
+    """One row per (stop, near stop, line): the tuples before rendering.
+
+    ``walk_source`` (quality-sidecar provenance) is carried per row:
+    taken from *stop_pairs* when the network walk annotated it, otherwise
+    defaulted to ``straight_line``. It never reaches the rendered tuples.
+    """
+    columns = ["stop_uid", "near_num_id", "near_station", "line", "minutes", "walk_source"]
     if stop_pairs.empty or lines_at.empty:
         return pd.DataFrame(columns=columns)
 
@@ -248,6 +276,8 @@ def _near_entries(
         ],
         ignore_index=True,
     )
+    if "walk_source" not in both.columns:
+        both["walk_source"] = "straight_line"
     entries = both.merge(
         lines_at.rename(columns={"stop_uid": "near_uid", "combo_line": "line"}), on="near_uid"
     )
@@ -285,16 +315,20 @@ def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> p
     (line, direction) contributes up to two neighbours. ``minutes`` is the
     scheduled in-vehicle time of the segment (``travel_min``), falling back
     to the straight-line distance at :data:`VEHICLE_M_PER_MIN` when the
-    schedule carries no times for it.
+    schedule carries no times for it. ``travel_min`` and ``n_obs`` are
+    carried through per row (quality-sidecar provenance; never rendered).
     """
-    columns = ["stop_uid", "near_num_id", "near_station", "linea", "direction_id", "minutes"]
+    columns = ["stop_uid", "near_num_id", "near_station", "linea", "direction_id",
+               "minutes", "travel_min", "n_obs"]
     if stop_links is None or stop_links.empty:
         return pd.DataFrame(columns=columns)
     keep = ["stop_uid", "near_uid", "linea", "direction_id"]
     links = stop_links.copy()
     if "travel_min" not in links.columns:
         links["travel_min"] = pd.NA
-    keep_t = keep + ["travel_min"]
+    if "n_obs" not in links.columns:
+        links["n_obs"] = 0
+    keep_t = keep + ["travel_min", "n_obs"]
     forward = links.rename(columns={"stop_uid_a": "stop_uid", "stop_uid_b": "near_uid"})[keep_t]
     backward = links.rename(columns={"stop_uid_b": "stop_uid", "stop_uid_a": "near_uid"})[keep_t]
     both = pd.concat([forward, backward], ignore_index=True).drop_duplicates(keep)
@@ -361,4 +395,154 @@ def write_near_stations(near: pd.DataFrame, out_dir: Path) -> Path:
     path = out_dir / NEAR_STATIONS_NAME
     near.to_csv(path, index=False, encoding="utf-8")
     log.info("Near-stations export written: %s (%d stops)", path, len(near))
+    return path
+
+
+def _stop_snap_m(stop_pairs: pd.DataFrame) -> pd.Series:
+    """Per-stop snap distance to the walk graph (``stop_uid`` -> meters).
+
+    Built from the ``snap_m_a``/``snap_m_b`` pair columns the network walk
+    attaches; a stop's snap distance is constant across its pairs. Empty
+    Series when the columns are absent (network walk never ran).
+    """
+    if stop_pairs.empty or "snap_m_a" not in stop_pairs.columns:
+        return pd.Series(dtype=float)
+    snaps = pd.concat(
+        [
+            stop_pairs[["stop_uid_a", "snap_m_a"]].rename(
+                columns={"stop_uid_a": "stop_uid", "snap_m_a": "snap_m"}),
+            stop_pairs[["stop_uid_b", "snap_m_b"]].rename(
+                columns={"stop_uid_b": "stop_uid", "snap_m_b": "snap_m"}),
+        ],
+        ignore_index=True,
+    ).dropna(subset=["snap_m"])
+    if snaps.empty:
+        return pd.Series(dtype=float)
+    return snaps.groupby("stop_uid")["snap_m"].first()
+
+
+def _summarize_source(entries: pd.DataFrame, column: str) -> pd.Series:
+    """Per-stop label: the unique source value, or ``mixed`` on disagreement."""
+    if entries.empty:
+        return pd.Series(dtype=object)
+    return entries.groupby("stop_uid")[column].agg(
+        lambda s: s.iloc[0] if s.nunique() == 1 else "mixed"
+    )
+
+
+def build_quality(
+    near: pd.DataFrame,
+    route_stops: pd.DataFrame,
+    routes: pd.DataFrame,
+    stop_pairs: pd.DataFrame,
+    stop_links: pd.DataFrame | None = None,
+    osm_matches: pd.DataFrame | None = None,
+    canonical: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Per-stop provenance sidecar for the near-stations export.
+
+    Makes the estimate-fallback ladder visible: which stops' walking
+    minutes were routed on OSM streets vs straight lines, which same-line
+    minutes come from real stop_times vs the 25 km/h estimate, how well
+    each stop's coordinates matched OSM, and which stops are cross-feed
+    aliases. Reuses the exact entry builders that render the tuples, so
+    the classification always describes what the CSV actually shows.
+
+    Args:
+        near: :func:`build_near_stations` output (same run) - provides the
+            ``ID``/``stop_uid`` keys; the sidecar has the same rows/order.
+        route_stops / routes: the same frames given to
+            :func:`build_near_stations`.
+        stop_pairs: the same proximity pairs (optionally annotated by the
+            network walk with ``walk_source``/``snap_m_a``/``snap_m_b``).
+        stop_links: the same consecutive-stop links (optionally with
+            ``n_obs``).
+        osm_matches: ``stop_osm_matches`` rows (``storage.fetch_osm_matches``)
+            or ``None`` when conflation data is unavailable.
+        canonical: cross-feed dedupe membership map; ``None``/empty ->
+            ``station_dedup`` empty.
+
+    Returns:
+        :data:`QUALITY_COLUMNS`, sorted by ``ID``. Empty *near* yields an
+        empty frame with the columns.
+    """
+    if near.empty:
+        return pd.DataFrame(columns=QUALITY_COLUMNS)
+    out = near[["ID", "stop_uid"]].copy()
+
+    # -- walk_source: provenance of the rendered near_stations minutes ------
+    entries = _near_entries(near, _lines_at_stops(route_stops, routes), stop_pairs)
+    walk = _summarize_source(entries, "walk_source")
+    out["walk_source"] = out["stop_uid"].map(walk).fillna("none")
+    snap_m = _stop_snap_m(stop_pairs)
+    if not snap_m.empty:
+        far = out["stop_uid"].map(snap_m) > MAX_SNAP_M
+        out.loc[far & (out["walk_source"] != "none"), "walk_source"] = "unsnapped"
+
+    # -- travel_source / travel_n_obs: provenance of same_line_stations -----
+    sl = _same_line_entries(near, stop_links)
+    if not sl.empty:
+        sl = sl.copy()
+        sl["travel_source"] = np.where(
+            pd.to_numeric(sl["travel_min"], errors="coerce").notna(), "observed", "estimated"
+        )
+        # Estimated rows carry no observations - the worst case must see 0.
+        sl["n_obs"] = pd.to_numeric(sl["n_obs"], errors="coerce").fillna(0).astype(int)
+        sl.loc[sl["travel_source"] == "estimated", "n_obs"] = 0
+        travel = _summarize_source(sl, "travel_source")
+        n_obs = sl.groupby("stop_uid")["n_obs"].min()
+    else:
+        travel, n_obs = pd.Series(dtype=object), pd.Series(dtype=int)
+    out["travel_source"] = out["stop_uid"].map(travel).fillna("none")
+    out["travel_n_obs"] = out["stop_uid"].map(n_obs).fillna(0).astype(int)
+
+    # -- coord_confidence: Phase 3 OSM conflation verdict --------------------
+    if osm_matches is None or osm_matches.empty:
+        out["coord_confidence"] = "unavailable"
+    else:
+        m = osm_matches.set_index("stop_uid")
+        conf = pd.Series("unavailable", index=out.index)
+        matched = out["stop_uid"].isin(m.index)
+        sub = m.reindex(out.loc[matched, "stop_uid"])
+        verdict = np.where(
+            sub["osm_id"].isna(), "no_match",
+            np.where(sub["needs_review"], "needs_review",
+                     sub["match_confidence"].map(lambda c: f"{c:.3f}")),
+        )
+        conf.loc[matched] = verdict
+        out["coord_confidence"] = conf
+
+    # -- station_dedup: cross-feed alias membership ---------------------------
+    if canonical is not None and not canonical.empty:
+        canon = canonical.set_index("stop_uid")["canonical_uid"]
+        out["station_dedup"] = out["stop_uid"].map(canon).fillna("")
+    else:
+        out["station_dedup"] = ""
+
+    result = out.sort_values("ID", kind="mergesort")[QUALITY_COLUMNS].reset_index(drop=True)
+    log.info(
+        "Quality sidecar: walk %s | travel %s",
+        result["walk_source"].value_counts().to_dict(),
+        result["travel_source"].value_counts().to_dict(),
+    )
+    return result
+
+
+def write_quality(quality: pd.DataFrame, out_dir: Path) -> Path:
+    """Write the sidecar as ``near_stations_quality.csv`` in *out_dir*.
+
+    Args:
+        quality: frame from :func:`build_quality`.
+        out_dir: report directory (created if needed).
+
+    Returns:
+        The written path.
+
+    Raises:
+        OSError: if the file cannot be written (run-level problem).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / QUALITY_NAME
+    quality.to_csv(path, index=False, encoding="utf-8")
+    log.info("Quality sidecar written: %s (%d stops)", path, len(quality))
     return path

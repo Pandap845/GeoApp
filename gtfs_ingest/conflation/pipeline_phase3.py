@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
+from ..analysis import dedupe
+from ..analysis.dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD
 from ..analysis.connectivity import route_stop_map
 from . import clustering, coverage, osm_match, side_of_street, storage
 from .transfers_check import TransferCheck, check_transfers
@@ -54,6 +56,9 @@ class InterchangeConfig(BaseModel):
     eps_m: float = Field(default=120.0, gt=0)
     min_samples: int = Field(default=2, ge=1)
     metric_crs: Optional[str] = None
+    dedupe: bool = True
+    dedupe_distance_m: float = Field(default=DEDUPE_DISTANCE_M, gt=0)
+    dedupe_name_threshold: float = Field(default=NAME_SIM_THRESHOLD, ge=0.0, le=1.0)
     dry_run: bool = False
 
 
@@ -96,6 +101,10 @@ class InterchangeReport(BaseModel):
     dry_run: bool
     eps_m: float
     min_samples: int
+    dedupe: bool = True
+    equivalence_groups: int = 0       # cross-feed alias groups found
+    stops_deduplicated: int = 0       # stops belonging to some alias group
+    single_physical_station_clusters: int = 0  # clusters that are one station's aliases
     feeds: list[FeedNote]
     clusters_total: int = 0
     multimodal_count: int = 0
@@ -149,7 +158,11 @@ def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]
             if "route_type" not in routes.columns:
                 routes["route_type"] = None
                 note.notes.append("routes.txt lacks route_type; modes unknown")
-            data["routes"] = routes[["route_uid", "route_type"]]
+            # route_short_name feeds the dedupe shared-route evidence.
+            keep = ["route_uid", "route_type"]
+            if "route_short_name" in routes.columns:
+                keep.append("route_short_name")
+            data["routes"] = routes[keep]
 
         transfers = loaded.table("transfers.txt")
         data["transfers"] = transfers if "transfers.txt" in loaded.files_present else None
@@ -193,9 +206,23 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
     route_stops = _concat("route_stops", ["feed_id", "route_id", "route_uid", "stop_id", "stop_uid"])
     routes = _concat("routes", ["route_uid", "route_type"])
 
-    labels = clustering.cluster_stops(stops, config.eps_m, config.min_samples, config.metric_crs) \
-        if len(stops) else pd.Series(dtype=int).to_numpy()
-    clusters = clustering.build_interchanges(stops, labels, route_stops, routes)
+    # Cross-feed station dedupe: recomputed here (not read from the Phase 2
+    # table) so the pipelines stay independently runnable; distance + name
+    # evidence is schedule-independent, so results match Phase 2 except for
+    # pairs rescued only by shared routes (full feed here vs service-day
+    # filtered there).
+    canonical = pd.DataFrame(columns=dedupe.CANONICAL_COLUMNS)
+    if config.dedupe and len(stops):
+        accepted = dedupe.find_equivalences(
+            stops, route_stops, routes,
+            config.dedupe_distance_m, config.dedupe_name_threshold,
+        )
+        canonical = dedupe.canonical_map(accepted)
+
+    labels = clustering.cluster_stops(
+        stops, config.eps_m, config.min_samples, config.metric_crs, canonical
+    ) if len(stops) else pd.Series(dtype=int).to_numpy()
+    clusters = clustering.build_interchanges(stops, labels, route_stops, routes, canonical)
 
     transfers_by_feed = {
         note.feed_id: data["transfers"] for note, data in zip(notes, all_data) if note.status == "ok"
@@ -214,6 +241,12 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
         dry_run=config.dry_run,
         eps_m=config.eps_m,
         min_samples=config.min_samples,
+        dedupe=config.dedupe,
+        equivalence_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
+        stops_deduplicated=int(len(canonical)),
+        single_physical_station_clusters=(
+            int((clusters["physical_stop_count"] == 1).sum()) if not clusters.empty else 0
+        ),
         feeds=notes,
         clusters_total=int(len(clusters)),
         multimodal_count=int(clusters["is_multimodal"].sum()) if not clusters.empty else 0,
@@ -326,7 +359,14 @@ def _interchange_markdown(report: InterchangeReport) -> str:
         f"Generated: {report.generated_at}  ",
         f"Mode: {'dry run (no DB writes)' if report.dry_run else 'full run'}  ",
         f"DBSCAN: eps = {report.eps_m:g} m, min_samples = {report.min_samples} "
-        "(parent_station groups always merged)",
+        "(parent_station groups always merged)  ",
+        "Station deduplication: "
+        + (
+            f"on - {report.equivalence_groups} cross-feed group(s), "
+            f"{report.stops_deduplicated} stop(s) merged"
+            if report.dedupe
+            else "off (--no-dedupe)"
+        ),
         "",
         "## Feeds",
         "",
@@ -341,7 +381,8 @@ def _interchange_markdown(report: InterchangeReport) -> str:
         "## Clusters",
         "",
         f"Total: {report.clusters_total} · Multimodal: {report.multimodal_count} · "
-        f"Single-mode: {report.single_mode_count}",
+        f"Single-mode: {report.single_mode_count} · "
+        f"Single physical station (alias-only): {report.single_physical_station_clusters}",
         "",
         "| Mode combination | Clusters |",
         "| --- | ---: |",

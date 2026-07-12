@@ -11,16 +11,25 @@ Idempotency strategies (documented in the README):
 - ``route_connections``: **full truncate-and-reload per run**. Proximity
   edges can span feeds, so rows aren't attributable to a single feed;
   the table is cheap derived data recomputed from the analyzed feed set.
+- ``stop_equivalences``: **full truncate-and-reload per run**, for the same
+  reason - every row pairs stops of two different feeds (cross-feed station
+  deduplication, ``analysis.dedupe``).
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import pandas as pd
 from sqlalchemy import Engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 log = logging.getLogger(__name__)
+
+#: Columns fetched from the Phase 3 ``stop_osm_matches`` table for the
+#: quality sidecar's ``coord_confidence``.
+OSM_MATCH_COLUMNS = ["stop_uid", "osm_id", "distance_m", "match_confidence", "needs_review"]
 
 _DDL_STATEMENTS: tuple[str, ...] = (
     """
@@ -68,8 +77,23 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY (route_a, route_b)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS stop_equivalences (
+        group_id      integer NOT NULL,
+        canonical_uid text NOT NULL,
+        stop_uid_a    text NOT NULL,
+        stop_uid_b    text NOT NULL,
+        distance_m    double precision NOT NULL,
+        name_score    double precision NOT NULL,
+        shared_routes integer NOT NULL,
+        score         double precision NOT NULL,
+        loaded_at     timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (stop_uid_a, stop_uid_b)
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS ix_rsh_feed ON route_stop_headways (feed_id)",
     "CREATE INDEX IF NOT EXISTS ix_rh_feed ON route_headways (feed_id)",
+    "CREATE INDEX IF NOT EXISTS ix_stop_equiv_group ON stop_equivalences (group_id)",
 )
 
 #: Whitelist: table name -> has a feed_id column usable for per-feed replace.
@@ -77,13 +101,14 @@ _TABLES: dict[str, bool] = {
     "route_stop_headways": True,
     "route_headways": True,
     "route_connections": False,
+    "stop_equivalences": False,
 }
 
 _CHUNK_SIZE = 1000
 
 
 def ensure_analysis_schema(engine: Engine) -> None:
-    """Create the three analysis tables and their indexes (idempotent).
+    """Create the four analysis tables and their indexes (idempotent).
 
     Args:
         engine: engine from Phase 1 ``db.make_engine``.
@@ -95,7 +120,10 @@ def ensure_analysis_schema(engine: Engine) -> None:
     with engine.begin() as conn:
         for stmt in _DDL_STATEMENTS:
             conn.execute(text(stmt))
-    log.info("Analysis schema ensured (route_stop_headways, route_headways, route_connections)")
+    log.info(
+        "Analysis schema ensured (route_stop_headways, route_headways, "
+        "route_connections, stop_equivalences)"
+    )
 
 
 def _to_records(df: pd.DataFrame) -> list[dict]:
@@ -143,10 +171,43 @@ def replace_feed_rows(engine: Engine, table: str, feed_id: str, df: pd.DataFrame
     return len(df)
 
 
+def fetch_osm_matches(engine: Engine, feed_ids: list[str]) -> Optional[pd.DataFrame]:
+    """Read the Phase 3 ``stop_osm_matches`` rows for these feeds.
+
+    Never raises: the table exists only after ``conflate-osm`` has run
+    against the same database, so any failure (missing table, connection
+    problem) degrades to ``None`` - the sidecar then reports
+    ``coord_confidence = unavailable``.
+
+    Args:
+        engine: database engine.
+        feed_ids: restrict to these feeds' stops.
+
+    Returns:
+        :data:`OSM_MATCH_COLUMNS` frame (possibly empty), or ``None`` when
+        the data cannot be read.
+    """
+    sql = text(
+        "SELECT stop_uid, osm_id, distance_m, match_confidence, needs_review "
+        "FROM stop_osm_matches WHERE feed_id = ANY(:feeds)"
+    )
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sql, {"feeds": feed_ids}).mappings().all()
+    except SQLAlchemyError as exc:
+        log.info(
+            "stop_osm_matches unavailable (%s); coord_confidence = unavailable",
+            type(exc).__name__,
+        )
+        return None
+    return pd.DataFrame(rows, columns=OSM_MATCH_COLUMNS)
+
+
 def replace_all_rows(engine: Engine, table: str, df: pd.DataFrame) -> int:
     """Idempotently replace the full contents of a run-scoped table.
 
-    Used for ``route_connections`` (see module docstring for why).
+    Used for ``route_connections`` and ``stop_equivalences`` (see module
+    docstring for why).
 
     Args:
         engine: database engine.

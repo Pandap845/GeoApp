@@ -251,15 +251,68 @@ Two routes connect when (precedence order, strongest wins as
    `min_stop_distance_m = 0`.
 2. **`same_parent_station`** — stops sharing a `parent_station` (a stop
    that *is* the parent belongs to its own station).
-3. **`proximity`** — stops within `--proximity-m` (default 150 m).
+3. **`same_station_dedup`** — stops merged into one canonical physical
+   station by cross-feed deduplication (§3.3b). Inferred evidence, kept
+   distinguishable from the GTFS-declared `same_parent_station`;
+   `min_stop_distance_m` stays NULL.
+4. **`proximity`** — stops within `--proximity-m` (default 150 m).
    Geodesic distance: PostGIS `ST_DWithin/ST_Distance` on `geography`, or
-   local UTM projection without a DB. The only cross-feed connection type.
+   local UTM projection without a DB. Proximity and `same_station_dedup`
+   are the only cross-feed connection types.
 
 Edges are **undirected**, normalized to `route_a < route_b`, one row per
 pair. The same edges feed a networkx graph (isolated routes included as
 nodes) exported as GraphML. The specific stops that created an edge are
 aggregated away (count + min distance survive); the physical *places* where
 routes meet are the Phase 3 interchanges.
+
+### 3.3b Cross-feed station deduplication (`analysis/dedupe.py`)
+
+Different feeds describe the same physical station under different stop ids
+(`improved:SITEUR_x` vs `mdb:TL_x` …). Without deduplication those aliases
+inflate the outputs: a station is listed as "near" its own alias in
+`near_stations.csv`, and one physical place looks like several. On by
+default in `analyze-frequency` and `detect-interchanges`; disable with
+`--no-dedupe`.
+
+**Match rule** (per candidate pair):
+
+- candidates: stops of **different feeds** within `--dedupe-distance-m`
+  (default 30 m; computed locally in the estimated UTM CRS — no DB needed);
+- accept when `name_score >= --dedupe-name-threshold` (default 0.75) **or**
+  the two stops share at least one normalized `route_short_name`;
+- `name_score` = `difflib.SequenceMatcher` ratio of the **normalized**
+  names: NFKD accent-strip → casefold → non-alphanumerics to spaces →
+  tokens sorted ("Estación Juárez" ≡ "JUAREZ, Estacion"). Missing/empty
+  names score 0.0 — they can only match through shared routes.
+
+**Groups**: connected components (networkx) over the accepted pairs, sorted
+by each group's smallest `stop_uid` (deterministic `group_id`), which is
+also the group's `canonical_uid`. Transitivity is deliberate: two same-feed
+platforms can merge via a cross-feed bridge — they are one physical station
+by transitivity.
+
+**Effects** (all outputs, one canonical map):
+
+- alias pairs are removed from the proximity stop pairs **before**
+  `--network-walk`, near-stations, GeoPackage `near_links` and the
+  connectivity edges — `near_stations.csv` keeps its exact row set, `ID`
+  sequence and format either way; only the alias tuples disappear;
+- routes serving aliased stops connect as `same_station_dedup` (§3.3);
+- Phase 3A clustering treats each canonical group as unsplittable (like
+  parent_station) and reports `physical_stop_count` per cluster —
+  a cluster with `physical_stop_count = 1` is a *phantom* made of one
+  station's aliases;
+- the full audit trail lands in `stop_equivalences.csv` + the
+  `stop_equivalences` table (§4).
+
+Phase 3 **recomputes** equivalences rather than reading the Phase 2 table,
+so the pipelines stay independently runnable (dry runs included). Distance
+and name evidence are schedule-independent; only pairs rescued exclusively
+by shared routes can differ (full feed in Phase 3 vs service-day filtered
+in Phase 2). A pair holding both parent-station and dedupe evidence keeps
+the `same_parent_station` label, so report counts undercount total alias
+evidence — the CSV is the complete audit.
 
 ### 3.4 Near stations & same-line stations (node relations)
 
@@ -309,6 +362,14 @@ log). Applied AFTER the connectivity edges — `route_connections.
 min_stop_distance_m` stays geodesic — and BEFORE near-stations/GeoPackage,
 so `near_stations` minutes and `near_links.walk_min` reflect real walking.
 Measured on these feeds: mean detour ≈ 2.2× the straight line.
+
+**Estimate provenance is auditable per stop**: every run writes
+`near_stations_quality.csv` beside the main CSV (same rows, same `ID` key)
+flagging which walking minutes were network-routed vs straight-line, which
+same-line minutes are scheduled observations vs the 25 km/h estimate (and
+how many trips back each median), the Phase 3 OSM coordinate confidence,
+and the dedupe canonical id — see §4.2. A measured 4 and a guessed 4 look
+identical in the main file; the sidecar is where they differ.
 
 ### 3.5 Route geometry (Phase 2 exports)
 
@@ -431,7 +492,8 @@ consecutive travel times via Distance Matrix (`real`) or Haversine at
 | `route_stop_headways` | analyze-frequency / per-feed replace | headway stats per (feed, route, direction, stop, window): `trip_count`, mean/median/min/max headway seconds, `service_date` |
 | `route_headways` | analyze-frequency / per-feed replace | the rollup per (feed, route, direction, window): mean headway, `stop_count`, `stops_with_headway`, `trip_count` |
 | `route_connections` | analyze-frequency / full reload | one undirected route pair: `route_a < route_b`, feed ids, `connection_type`, `shared_stop_count`, `min_stop_distance_m` |
-| `interchanges` | detect-interchanges / full reload | one cluster: `cluster_id`, `is_multimodal`, `stop_count`, `modes` int[], `mode_names` text[], `member_stop_uids` text[], `routes` text[], `feed_ids` text[], `centroid` + `hull` geometry |
+| `stop_equivalences` | analyze-frequency / full reload | one accepted cross-feed alias pair (§3.3b): `group_id`, `canonical_uid`, `stop_uid_a < stop_uid_b` PK, `distance_m`, `name_score`, `shared_routes`, `score` (empty after a `--no-dedupe` run) |
+| `interchanges` | detect-interchanges / full reload | one cluster: `cluster_id`, `is_multimodal`, `stop_count`, `physical_stop_count` (distinct stations after dedupe), `modes` int[], `mode_names` text[], `member_stop_uids` text[], `routes` text[], `feed_ids` text[], `centroid` + `hull` geometry |
 | `stop_osm_matches` | conflate-osm / full reload | per stop: matched `osm_id`/`osm_kind`/`osm_name`, `distance_m`, `match_confidence`, `needs_review` |
 | `stop_side_of_street` | conflate-osm / full reload | per stop: `osm_way_id`, `highway`, `oneway`, `perpendicular_distance_m`, `side` (left/right/on), `side_confidence`, `near_endpoint` |
 | `google_qa_interchange` | google-qa / per-row upsert | `interchange_cluster_id` PK, `verdict`, `mode_agreement`, `google_place_id`, `checked_at` |
@@ -450,7 +512,9 @@ file only, never the database).
 | --- | --- | --- |
 | `validation_report.json/.md` | ingest | per feed: status, row counts per file, findings (severity/code/count/samples), optional-file matrix, stops normalized vs loaded |
 | `analysis_report.json/.md` | analyze-frequency | service dates used (+ how picked), transport-mode/route filter applied, per-feed route/trip/headway counts, connectivity summary, isolated routes |
-| `near_stations.csv` | analyze-frequency | one row per stop: `ID` (sequential node id, 1..N — the key of every relation column), `stop_uid`, `station`, `system` (serving system names), `stop_id`, lat/lon, `stop_line_ids` (own `ID-line` combos), `near_stations` `[(ID, station, linea, walk minutes), …]`, `same_line_stations` `[(ID, station, linea, dir, scheduled minutes), …]` — all times bare numbers in minutes |
+| `near_stations.csv` | analyze-frequency | one row per stop: `ID` (sequential node id, 1..N — the key of every relation column), `stop_uid`, `station`, `system` (serving system names), `stop_id`, lat/lon, `stop_line_ids` (own `ID-line` combos), `near_stations` `[(ID, station, linea, walk minutes), …]`, `same_line_stations` `[(ID, station, linea, dir, scheduled minutes), …]` — all times bare numbers in minutes. Cross-feed aliases of one physical station are excluded from each other's lists by default (§3.3b; `--no-dedupe` restores them) |
+| `stop_equivalences.csv` | analyze-frequency | the dedupe audit (§3.3b): one row per accepted alias pair — `group_id`, `canonical_uid`, both `stop_uid`s, `distance_m`, `name_score`, `shared_routes`, `score`. Only written when dedupe is on |
+| `near_stations_quality.csv` | analyze-frequency | provenance sidecar, always written: same rows and `ID` key as `near_stations.csv`. Per stop: `walk_source` (network / straight_line / mixed / unsnapped >200 m snap / none), `travel_source` (observed / estimated / mixed / none), `travel_n_obs` (worst-case trips behind the scheduled medians), `coord_confidence` (numeric score / needs_review / no_match from Phase 3 `stop_osm_matches`; `unavailable` in dry runs or before conflate-osm), `station_dedup` (dedupe `canonical_uid`, empty when unaliased). The main CSV's format never changes because of it |
 | `transit_analysis.gpkg` | analyze-frequency | 4 EPSG:4326 layers: **`stops`** (points + the CSV attributes), **`near_links`** (walking lines: both num ids, `distance_m`, `walk_min`), **`route_shapes`** (real route polylines: route_uid, linea, direction, shape_id), **`route_stop_links`** (directed consecutive-stop segments: route_uid, linea, direction, both stop_uids, `travel_min` scheduled minutes) |
 | `route_connectivity.graphml` | analyze-frequency | the undirected route graph: nodes = route_uid (+ short/long name, route_type, feed), edges = connections (+ type, shared stops, min distance) — for Gephi/yEd/networkx |
 | `interchanges_report.json/.md` | detect-interchanges | cluster totals, mode combinations, per-feed notes, transfers.txt agreement (declared vs inferred, with examples) |

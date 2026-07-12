@@ -236,6 +236,21 @@ connectivity, near/same-line stations, route shapes/links); the stop
 inventory itself stays complete. Feeds with no matching route are reported
 as `filtered_out`.
 
+`analyze-frequency` and `detect-interchanges` (**cross-feed station
+deduplication**, on by default):
+
+| Flag | Description |
+| --- | --- |
+| `--dedupe` / `--no-dedupe` | Merge cross-feed duplicate stations (the same physical stop under different stop_ids, e.g. `improved:SITEUR_x` vs `mdb:TL_x`) before connectivity/near-stations/clustering. Default **on**; `--no-dedupe` restores the raw behavior. |
+| `--dedupe-distance-m METERS` | Alias candidate radius (stops of *different* feeds only). Default `30`. |
+| `--dedupe-name-threshold RATIO` | Minimum normalized-name similarity (0–1) to accept a pair on names alone; pairs sharing a `route_short_name` match regardless. Default `0.75`. |
+
+Aliases stop appearing in each other's `near_stations` lists (row set and
+`ID` sequence of the CSV are unchanged), their links vanish from the
+GeoPackage, their routes connect as `same_station_dedup`, and interchange
+clusters report `physical_stop_count`. The audit trail is
+`stop_equivalences.csv` + the `stop_equivalences` table.
+
 `detect-interchanges` only: `--eps METERS` (DBSCAN radius, default 120),
 `--min-samples N` (default 2), `--crs EPSG:XXXXX` (metric CRS override).
 
@@ -531,12 +546,13 @@ are connected when (precedence order — strongest wins as `connection_type`):
 | --- | --- | --- |
 | 1 | `same_stop` | serve at least one identical stop (same `stop_uid`, so always same feed) |
 | 2 | `same_parent_station` | serve stops sharing a `parent_station`; a stop that *is* the parent counts as part of its own station |
-| 3 | `proximity` | serve stops within `--proximity-m` meters (default **150 m**) |
+| 3 | `same_station_dedup` | serve stops merged into one canonical physical station by cross-feed deduplication (`--dedupe`, on by default) — inferred, so kept distinct from the GTFS-declared type above |
+| 4 | `proximity` | serve stops within `--proximity-m` meters (default **150 m**) |
 
 Each undirected pair appears once (`route_a < route_b`) with
 `shared_stop_count` (identical stops, 0 if none) and `min_stop_distance_m`
 (0.0 for same-stop pairs; smallest inter-stop distance for proximity pairs;
-NULL for parent-only pairs farther apart than the threshold).
+NULL for parent-only and dedup-only pairs farther apart than the threshold).
 
 Distances are **geodesic meters**: computed in **PostGIS on `geography`**
 (the authoritative path; the pipeline refreshes the Phase 1 `stops` table
@@ -545,8 +561,8 @@ for the analyzed feeds first, so queries match the analyzed data). In
 zone — accurate to well under a meter at these scales within one region.
 
 Connectivity is computed from the stops **actually served on the analyzed
-service date**. Proximity is the only connection type that can cross feeds
-(ids never match across feeds, geography does).
+service date**. Proximity and `same_station_dedup` are the only connection
+types that can cross feeds (ids never match across feeds, geography does).
 
 ## Phase 2 outputs
 
@@ -560,12 +576,15 @@ Tables (created automatically, idempotent):
   `stops_with_headway`, `trip_count`.
 - `route_connections` — PK `(route_a, route_b)`; `feed_id_a`, `feed_id_b`,
   `connection_type`, `shared_stop_count`, `min_stop_distance_m`.
+- `stop_equivalences` — PK `(stop_uid_a, stop_uid_b)`; `group_id`,
+  `canonical_uid`, `distance_m`, `name_score`, `shared_routes`, `score` —
+  the cross-feed dedupe audit (empty after a `--no-dedupe` run).
 
 Idempotency: the headway tables use **per-feed delete-and-reload** in one
 transaction (same strategy and rationale as Phase 1 stops).
-`route_connections` uses **full truncate-and-reload per run** because
-proximity edges can span feeds, so rows aren't attributable to a single
-feed — the table is cheap derived data recomputed from the analyzed set.
+`route_connections` and `stop_equivalences` use **full truncate-and-reload
+per run** because their rows pair feeds, so they aren't attributable to a
+single feed — both are cheap derived data recomputed from the analyzed set.
 
 Files in `--report DIR`:
 
@@ -600,6 +619,27 @@ Files in `--report DIR`:
   when a segment has no departure times). "Near" reuses `--proximity-m`
   (default 150 m); the same-line relation follows `stop_times` order with
   no distance cap. `dirD` is the GTFS `direction_id` (dir0/dir1).
+  Cross-feed **aliases** of one physical station are excluded from each
+  other's `near_stations` lists by default (`--no-dedupe` restores them);
+  the row set and `ID` sequence are identical either way.
+- `stop_equivalences.csv` — the dedupe audit (only written when dedupe is
+  on): one row per accepted cross-feed alias pair with `group_id`,
+  `canonical_uid` (the group's smallest `stop_uid`), both `stop_uid`s,
+  `distance_m`, `name_score` (0–1 normalized-name similarity),
+  `shared_routes` (shared `route_short_name` count) and `score`.
+- `near_stations_quality.csv` — **provenance sidecar**, always written:
+  one row per stop with the same `ID` key and row order as
+  `near_stations.csv` (the main file's format never changes because of it).
+
+  | column | values |
+  | --- | --- |
+  | `walk_source` | `network` (OSM street routing) / `straight_line` / `mixed` / `unsnapped` (stop snaps >200 m from any walkable way) / `none` (no rendered near tuples) |
+  | `travel_source` | `observed` (scheduled stop_times medians) / `estimated` (25 km/h fallback) / `mixed` / `none` |
+  | `travel_n_obs` | worst-case (minimum) number of trips behind the stop's `travel_min` medians; 0 when estimated/none |
+  | `coord_confidence` | numeric match score (`"0.812"`), `needs_review`, `no_match` — from Phase 3 `stop_osm_matches`; `unavailable` in dry runs or when `conflate-osm` hasn't run |
+  | `station_dedup` | the dedupe `canonical_uid` when the stop is a cross-feed alias; empty otherwise |
+
+  `analysis_report.json` carries the per-run totals as `quality_summary`.
 - `transit_analysis.gpkg` — **GeoPackage** (open directly in QGIS/GDAL)
   with four EPSG:4326 layers: `stops` (points; the CSV attributes plus
   `stop_num_id`, the database join key), `near_links` (one LineString per

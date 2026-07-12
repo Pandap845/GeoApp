@@ -13,10 +13,11 @@ out1/
 out2/
 .env
 
-# Markdown docs (keep only README.md and WORKFLOW.md)
+# Markdown docs (keep only README.md, WORKFLOW.md and Plans/)
 *.md
 !README.md
 !WORKFLOW.md
+!Plans/*.md
 
 # LaTeX presentation & build artifacts
 *.tex

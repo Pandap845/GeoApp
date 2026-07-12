@@ -31,8 +31,10 @@ from shapely.geometry import LineString
 log = logging.getLogger(__name__)
 
 SHAPE_COLUMNS = ["route_uid", "feed_id", "route_id", "linea", "direction_id", "shape_id"]
+#: ``n_obs`` = trips with a timed gap behind the ``travel_min`` median
+#: (0 exactly when ``travel_min`` is NULL) - quality-sidecar provenance.
 LINK_COLUMNS = ["route_uid", "feed_id", "route_id", "linea", "direction_id",
-                "stop_uid_a", "stop_uid_b", "travel_min"]
+                "stop_uid_a", "stop_uid_b", "travel_min", "n_obs"]
 
 
 def _linea_map(feed: Any) -> pd.DataFrame:
@@ -120,7 +122,9 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
     ``travel_min`` is the SCHEDULED in-vehicle time between the two stops:
     the median departure-time difference across all trips serving the pair
     (minutes, 1 decimal). NULL when the segment has no timed stop_times
-    rows (non-timepoints) - consumers fall back to an estimate.
+    rows (non-timepoints) - consumers fall back to an estimate. ``n_obs``
+    counts the trips with a timed gap behind that median (0 exactly when
+    ``travel_min`` is NULL) - the quality sidecar's observation count.
 
     Args:
         feed: typed partridge feed filtered to the analyzed service date.
@@ -167,9 +171,10 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
     merged["seg_s"] = pd.to_numeric(merged["seg_s"], errors="coerce")
     links = (
         merged.groupby(["route_id", "direction_id", "stop_id", "next_stop_id"], as_index=False)
-        .agg(seg_s=("seg_s", "median"))
+        .agg(seg_s=("seg_s", "median"), n_obs=("seg_s", "count"))
     )
     links["travel_min"] = (links["seg_s"] / 60).round(1)
+    links["n_obs"] = links["n_obs"].astype(int)
 
     links["feed_id"] = feed_id
     links["route_uid"] = feed_id + ":" + links["route_id"]

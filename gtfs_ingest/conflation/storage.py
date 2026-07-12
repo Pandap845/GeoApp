@@ -18,19 +18,23 @@ log = logging.getLogger(__name__)
 _DDL_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS interchanges (
-        cluster_id       integer PRIMARY KEY,
-        is_multimodal    boolean NOT NULL,
-        stop_count       integer NOT NULL,
-        modes            integer[] NOT NULL,
-        mode_names       text[] NOT NULL,
-        member_stop_uids text[] NOT NULL,
-        routes           text[] NOT NULL,
-        feed_ids         text[] NOT NULL,
-        centroid         geometry(Point, 4326) NOT NULL,
-        hull             geometry(Geometry, 4326) NOT NULL,
-        loaded_at        timestamptz NOT NULL DEFAULT now()
+        cluster_id          integer PRIMARY KEY,
+        is_multimodal       boolean NOT NULL,
+        stop_count          integer NOT NULL,
+        physical_stop_count integer NOT NULL DEFAULT 0,
+        modes               integer[] NOT NULL,
+        mode_names          text[] NOT NULL,
+        member_stop_uids    text[] NOT NULL,
+        routes              text[] NOT NULL,
+        feed_ids            text[] NOT NULL,
+        centroid            geometry(Point, 4326) NOT NULL,
+        hull                geometry(Geometry, 4326) NOT NULL,
+        loaded_at           timestamptz NOT NULL DEFAULT now()
     )
     """,
+    # Upgrade path for databases created before cross-feed dedupe existed
+    # (CREATE TABLE IF NOT EXISTS alone would silently miss the new column).
+    "ALTER TABLE interchanges ADD COLUMN IF NOT EXISTS physical_stop_count integer NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS ix_interchanges_centroid ON interchanges USING GIST (centroid)",
     """
     CREATE TABLE IF NOT EXISTS stop_osm_matches (
@@ -101,10 +105,12 @@ def load_interchanges(engine: Engine, clusters: pd.DataFrame) -> int:
     sql = text(
         """
         INSERT INTO interchanges (
-            cluster_id, is_multimodal, stop_count, modes, mode_names,
+            cluster_id, is_multimodal, stop_count, physical_stop_count,
+            modes, mode_names,
             member_stop_uids, routes, feed_ids, centroid, hull
         ) VALUES (
-            :cluster_id, :is_multimodal, :stop_count, :modes, :mode_names,
+            :cluster_id, :is_multimodal, :stop_count, :physical_stop_count,
+            :modes, :mode_names,
             :member_stop_uids, :routes, :feed_ids,
             ST_GeomFromText(:centroid_wkt, 4326), ST_GeomFromText(:hull_wkt, 4326)
         )

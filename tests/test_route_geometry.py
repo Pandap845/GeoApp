@@ -88,6 +88,9 @@ def test_route_stop_links_follow_stop_sequence_not_proximity() -> None:
     assert minutes[("feedx:A", "feedx:B")] == 2.0    # 120 s
     assert minutes[("feedx:B", "feedx:C")] == 3.0    # 180 s
     assert minutes[("feedx:C", "feedx:A")] == 4.0    # 240 s
+    # n_obs = trips with a timed gap behind each median (sidecar provenance).
+    assert "n_obs" in links.columns
+    assert set(links["n_obs"]) == {1}                # one timed trip per segment
 
 
 def test_route_stop_links_dedupes_repeated_trips() -> None:
@@ -104,6 +107,9 @@ def test_route_stop_links_dedupes_repeated_trips() -> None:
     links = route_stop_links(fake_feed(None, trips, stop_times), "feedx")
     assert len(links) == 1  # same segment served by many trips appears once
     assert links["linea"].iloc[0] == "R1"  # no routes.txt -> route_id fallback
+    # No departure_time at all: travel_min NULL and zero observations.
+    assert pd.isna(links["travel_min"].iloc[0])
+    assert links["n_obs"].iloc[0] == 0
 
 
 def test_geopackage_gets_route_layers(tmp_path: Path) -> None:

@@ -21,6 +21,12 @@ cutoff (disconnected islands, snapping misses) - the fallback count is
 reported. Opt-in via ``analyze-frequency --network-walk``: the computation
 covers ~40k pairs against a metro-area street graph, which costs minutes,
 not seconds.
+
+Provenance for the quality sidecar (``near_stations_quality.csv``): the
+returned pairs carry ``walk_source`` (``network``/``straight_line``),
+``line_m`` and per-endpoint snap distances ``snap_m_a``/``snap_m_b``;
+stops snapping farther than :data:`MAX_SNAP_M` are classified
+``unsnapped`` downstream (classification only - routing is unchanged).
 """
 
 from __future__ import annotations
@@ -44,6 +50,11 @@ EXCLUDED_HIGHWAYS: tuple[str, ...] = ("motorway", "motorway_link", "proposed", "
 #: Vertex merge tolerance (meters) - OSM shared endpoints coincide exactly;
 #: the rounding just guards float noise.
 _MERGE_M = 0.1
+
+#: Classification-only threshold for the quality sidecar: a stop farther
+#: than this from any walkable way is labeled ``unsnapped``. Routing
+#: behavior is unchanged (snapping itself has no upper bound).
+MAX_SNAP_M = 200.0
 
 
 def fetch_walk_lines(
@@ -180,17 +191,24 @@ def pair_network_distances(
 
     Returns:
         ``stop_pairs`` plus ``network_m`` (NaN = no path found; callers keep
-        the straight-line value) - snap offsets of both stops included.
+        the straight-line value) - snap offsets of both stops included -
+        and ``snap_m_a``/``snap_m_b`` (each endpoint's distance to its
+        nearest graph vertex; NaN when the graph is empty). The snap
+        columns feed the quality sidecar's ``unsnapped`` classification.
     """
     result = stop_pairs.copy()
     result["network_m"] = np.nan
     if len(node_xy) == 0 or stop_pairs.empty:
+        result["snap_m_a"] = np.nan
+        result["snap_m_b"] = np.nan
         return result
 
     tree = cKDTree(node_xy)
     snap_d, snap_i = tree.query(stop_xy[["x", "y"]].to_numpy())
     node_of = dict(zip(stop_xy.index, snap_i.astype(int)))
     snap_of = dict(zip(stop_xy.index, snap_d))
+    result["snap_m_a"] = result["stop_uid_a"].map(snap_of)
+    result["snap_m_b"] = result["stop_uid_b"].map(snap_of)
 
     by_source: dict[str, list[int]] = {}
     for row_idx, (a, b) in enumerate(zip(result["stop_uid_a"], result["stop_uid_b"])):
@@ -210,6 +228,36 @@ def pair_network_distances(
     return result
 
 
+def _finalize_pairs(pairs: pd.DataFrame) -> pd.DataFrame:
+    """Fold ``network_m`` into ``distance_m`` and label each pair's source.
+
+    Args:
+        pairs: :func:`pair_network_distances` output (has ``network_m``).
+
+    Returns:
+        The frame with ``distance_m`` network-refined where a path exists
+        (never shorter than the straight line), ``line_m`` preserving the
+        original straight-line value, and ``walk_source``
+        (``"network"``/``"straight_line"``); ``network_m`` dropped.
+    """
+    pairs["line_m"] = pairs["distance_m"]
+    # A street path can never beat the straight line; clip guards snap noise.
+    routed = pairs["network_m"].notna()
+    pairs.loc[routed, "distance_m"] = np.maximum(
+        pairs.loc[routed, "network_m"], pairs.loc[routed, "line_m"]
+    )
+    pairs["walk_source"] = np.where(routed, "network", "straight_line")
+    measurable = routed & (pairs["line_m"] > 0)  # co-located stops have no ratio
+    log.info(
+        "Walk network: %d/%d near pair(s) routed on streets (%d fell back to "
+        "straight line); mean detour %.0f%%",
+        int(routed.sum()), len(pairs), int((~routed).sum()),
+        ((pairs.loc[measurable, "distance_m"] / pairs.loc[measurable, "line_m"]).mean() - 1) * 100
+        if measurable.any() else 0.0,
+    )
+    return pairs.drop(columns=["network_m"])
+
+
 def network_distances(
     engine: Engine,
     stops: gpd.GeoDataFrame,
@@ -225,7 +273,11 @@ def network_distances(
     Returns:
         ``stop_pairs`` with ``distance_m`` replaced by the network distance
         where a path exists (never shorter than the straight line), plus
-        ``line_m`` preserving the original straight-line value.
+        provenance columns for the quality sidecar: ``line_m`` (original
+        straight-line value), ``walk_source`` (``network``/``straight_line``
+        per pair), and ``snap_m_a``/``snap_m_b`` (endpoint snap distances).
+        When *stop_pairs* is empty it is returned unchanged (no columns
+        added) - consumers treat the missing columns as "never ran".
     """
     if stop_pairs.empty:
         return stop_pairs
@@ -237,19 +289,4 @@ def network_distances(
     stop_xy = pd.DataFrame({"x": projected.x, "y": projected.y})
     pairs = pair_network_distances(node_xy, indptr, indices, weights,
                                    stop_xy, stop_pairs, cutoff_m)
-
-    pairs["line_m"] = pairs["distance_m"]
-    # A street path can never beat the straight line; clip guards snap noise.
-    routed = pairs["network_m"].notna()
-    pairs.loc[routed, "distance_m"] = np.maximum(
-        pairs.loc[routed, "network_m"], pairs.loc[routed, "line_m"]
-    )
-    measurable = routed & (pairs["line_m"] > 0)  # co-located stops have no ratio
-    log.info(
-        "Walk network: %d/%d near pair(s) routed on streets (%d fell back to "
-        "straight line); mean detour %.0f%%",
-        int(routed.sum()), len(pairs), int((~routed).sum()),
-        ((pairs.loc[measurable, "distance_m"] / pairs.loc[measurable, "line_m"]).mean() - 1) * 100
-        if measurable.any() else 0.0,
-    )
-    return pairs.drop(columns=["network_m"])
+    return _finalize_pairs(pairs)

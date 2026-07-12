@@ -8,7 +8,9 @@ Method (documented in the README):
 2. DBSCAN clusters are then **merged with parent_station groupings** via
    connected components: stops sharing a station (and the station stop
    itself) always land in the same cluster, so a declared station is never
-   split - even when its platforms are farther apart than ``eps``.
+   split - even when its platforms are farther apart than ``eps``. When
+   cross-feed dedupe is on (``analysis.dedupe``), its canonical groups are
+   a third merge source: aliases of one physical station are never split.
 3. Components with >= 2 stops become interchange clusters; the rest are
    noise. Cluster ids are deterministic (assigned in order of each
    cluster's lexicographically smallest stop_uid).
@@ -16,7 +18,10 @@ Method (documented in the README):
    member stops. Extended route types (Google extension, e.g. 700-series
    bus) are normalized to the basic 0-12 codes first. A cluster with more
    than one distinct mode is a **multimodal interchange**; single-mode
-   clusters are kept and labeled ``is_multimodal = false``.
+   clusters are kept and labeled ``is_multimodal = false``. Each cluster
+   also reports ``physical_stop_count`` - members counted after dedupe -
+   so a cluster made of one station's aliases is visible
+   (``physical_stop_count = 1``).
 """
 
 from __future__ import annotations
@@ -64,9 +69,12 @@ _EXTENDED_RANGES: tuple[tuple[int, int, int], ...] = (
     (1400, 1499, 7),  # funicular
 )
 
-#: Columns of the interchange cluster frame.
+#: Columns of the interchange cluster frame. ``physical_stop_count`` is the
+#: number of distinct physical stations among the members after cross-feed
+#: dedupe (equals ``stop_count`` when dedupe is off or found no aliases).
 CLUSTER_COLUMNS = [
-    "cluster_id", "is_multimodal", "stop_count", "modes", "mode_names",
+    "cluster_id", "is_multimodal", "stop_count", "physical_stop_count",
+    "modes", "mode_names",
     "member_stop_uids", "routes", "feed_ids", "centroid_wkt", "hull_wkt",
 ]
 
@@ -103,11 +111,13 @@ def cluster_stops(
     eps_m: float = 120.0,
     min_samples: int = 2,
     metric_crs: Optional[str] = None,
+    canonical: Optional[pd.DataFrame] = None,
 ) -> np.ndarray:
     """Assign a cluster label to every stop (``-1`` = not in any cluster).
 
-    DBSCAN in a metric CRS, then merged with parent_station groups (see
-    module docstring). Deterministic for identical input.
+    DBSCAN in a metric CRS, then merged with parent_station groups and -
+    when *canonical* is given - with cross-feed dedupe groups (see module
+    docstring). Deterministic for identical input.
 
     Args:
         stops: normalized stops (all feeds; EPSG:4326 geometry, needs
@@ -116,6 +126,10 @@ def cluster_stops(
         min_samples: DBSCAN core-point threshold.
         metric_crs: metric CRS override (e.g. ``"EPSG:32618"``); default
             estimates a UTM zone from the stop extent.
+        canonical: cross-feed dedupe membership map
+            (``analysis.dedupe.canonical_map`` output: ``stop_uid``,
+            ``canonical_uid``); aliases of one physical station are never
+            split across clusters. ``None``/empty -> no dedup merging.
 
     Returns:
         Integer labels aligned with ``stops`` rows; clusters are numbered
@@ -143,6 +157,12 @@ def cluster_stops(
         members = [pos_by_uid[u] for u in group["stop_uid"] if u in pos_by_uid]
         for prev, cur in zip(members, members[1:]):
             graph.add_edge(prev, cur)
+    # Chain members of each cross-feed dedupe group (aliases never split).
+    if canonical is not None and not canonical.empty:
+        for _, group in canonical.groupby("canonical_uid"):
+            members = [pos_by_uid[u] for u in sorted(group["stop_uid"]) if u in pos_by_uid]
+            for prev, cur in zip(members, members[1:]):
+                graph.add_edge(prev, cur)
 
     labels = np.full(n, -1, dtype=int)
     components = [c for c in nx.connected_components(graph) if len(c) >= 2]
@@ -162,6 +182,7 @@ def build_interchanges(
     labels: np.ndarray,
     route_stops: pd.DataFrame,
     routes: pd.DataFrame,
+    canonical: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Aggregate clustered stops into interchange records.
 
@@ -171,6 +192,8 @@ def build_interchanges(
         route_stops: (route_uid, stop_uid) service pairs, all feeds
             (``analysis.connectivity.route_stop_map`` output).
         routes: route metadata with ``route_uid`` and ``route_type``.
+        canonical: cross-feed dedupe membership map; used only to compute
+            ``physical_stop_count`` (``None``/empty -> equals stop_count).
 
     Returns:
         One row per cluster with :data:`CLUSTER_COLUMNS`: mode codes/names
@@ -178,6 +201,8 @@ def build_interchanges(
         (> 1 distinct mode), member/route/feed lists, and centroid + convex
         hull WKT in EPSG:4326. Clusters whose stops are served by no known
         route get empty mode lists and ``is_multimodal = false``.
+        ``is_multimodal`` is deliberately untouched by dedupe: physical
+        counts expose phantom clusters, they don't reclassify modes.
     """
     route_types: dict[str, Optional[int]] = {}
     if not routes.empty and "route_type" in routes.columns:
@@ -187,6 +212,9 @@ def build_interchanges(
         }
     routes_by_stop = route_stops.groupby("stop_uid")["route_uid"].agg(set) if not route_stops.empty \
         else pd.Series(dtype=object)
+    canon_of: dict[str, str] = {}
+    if canonical is not None and not canonical.empty:
+        canon_of = dict(zip(canonical["stop_uid"], canonical["canonical_uid"]))
 
     records: list[dict] = []
     for cluster_id in sorted(set(labels) - {-1}):
@@ -202,6 +230,7 @@ def build_interchanges(
                 "cluster_id": int(cluster_id),
                 "is_multimodal": len(modes) > 1,
                 "stop_count": len(uids),
+                "physical_stop_count": len({canon_of.get(u, u) for u in uids}),
                 "modes": modes,
                 "mode_names": [mode_name(m) for m in modes],
                 "member_stop_uids": uids,

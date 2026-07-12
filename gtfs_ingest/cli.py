@@ -88,6 +88,35 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dedupe_args(parser: argparse.ArgumentParser) -> None:
+    """Cross-feed station deduplication flags (analyze + detect-interchanges)."""
+    parser.add_argument(
+        "--dedupe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Merge cross-feed duplicate stations (same physical stop under "
+        "different stop_ids) before connectivity/near-stations analysis. "
+        "On by default; --no-dedupe disables.",
+    )
+    parser.add_argument(
+        "--dedupe-distance-m",
+        type=float,
+        default=30.0,
+        metavar="METERS",
+        help="Max separation for two stops of different feeds to be alias "
+        "candidates (default: 30).",
+    )
+    parser.add_argument(
+        "--dedupe-name-threshold",
+        type=float,
+        default=0.75,
+        metavar="RATIO",
+        help="Minimum normalized-name similarity (0-1) to accept an alias pair "
+        "on names alone; pairs sharing a route short name match regardless "
+        "(default: 0.75).",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser (separate for testability)."""
     parser = argparse.ArgumentParser(
@@ -159,6 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
         "route_short_name (repeatable or comma-separated). Combines with "
         "--transport-mode: a route passes if it matches either. Default: all routes.",
     )
+    _add_dedupe_args(analyze)
 
     detect = subparsers.add_parser(
         "detect-interchanges",
@@ -185,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="EPSG:XXXXX",
         help="Metric CRS for distance math (default: auto-detect a UTM zone).",
     )
+    _add_dedupe_args(detect)
 
     conflate = subparsers.add_parser(
         "conflate-osm",
@@ -371,6 +402,9 @@ def _run_analyze(args: argparse.Namespace) -> int:
             network_walk=args.network_walk,
             osm_line_table=settings.osm_line_table,
             osm_geom_column=settings.osm_geom_column,
+            dedupe=args.dedupe,
+            dedupe_distance_m=args.dedupe_distance_m,
+            dedupe_name_threshold=args.dedupe_name_threshold,
             dry_run=settings.dry_run,
         )
     except ValueError as exc:
@@ -402,6 +436,9 @@ def _run_detect_interchanges(args: argparse.Namespace) -> int:
         eps_m=args.eps,
         min_samples=args.min_samples,
         metric_crs=args.crs or settings.metric_crs,
+        dedupe=args.dedupe,
+        dedupe_distance_m=args.dedupe_distance_m,
+        dedupe_name_threshold=args.dedupe_name_threshold,
         dry_run=settings.dry_run,
     )
     try:

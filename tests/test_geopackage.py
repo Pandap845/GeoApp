@@ -52,6 +52,42 @@ def test_geopackage_two_layers_roundtrip(tmp_path: Path) -> None:
     assert int(link["walk_min"]) == 1
 
 
+def test_geopackage_layer_schemas_ignore_provenance_columns(tmp_path: Path) -> None:
+    """Quality-sidecar columns on the input frames never reach the layers."""
+    import pandas as pd
+
+    stops = make_stops(
+        ("f", "S1", "First Stop", 40.0, -75.0),
+        ("f", "S2", "Second Stop", 40.0009, -75.0),
+    )
+    stops["location_type"] = 0
+    stops["parent_station"] = None
+    route_stops = rs(("f", "r1", "S1"), ("f", "r2", "S2"))
+    routes = routes_meta(("f", "r1", "10"), ("f", "r2", "20"))
+    pairs = connectivity.proximity_pairs_local(stops, threshold_m=150.0)
+    near = build_near_stations(stops, route_stops, routes, pairs)
+
+    plain_path = write_geopackage(stops, near, pairs, tmp_path / "plain")
+    plain_links = gpd.read_file(plain_path, layer="near_links")
+
+    annotated = pairs.assign(walk_source="network", snap_m_a=5.0, snap_m_b=5.0,
+                             line_m=pairs["distance_m"])
+    stop_links = pd.DataFrame(
+        {"route_uid": ["f:r1"], "feed_id": ["f"], "route_id": ["r1"],
+         "linea": ["10"], "direction_id": [0],
+         "stop_uid_a": ["f:S1"], "stop_uid_b": ["f:S2"],
+         "travel_min": [4.0], "n_obs": [7]}
+    )
+    path = write_geopackage(stops, near, annotated, tmp_path / "annotated",
+                            stop_links=stop_links)
+
+    links = gpd.read_file(path, layer="near_links")
+    assert list(links.columns) == list(plain_links.columns)     # schema unchanged
+    route_links = gpd.read_file(path, layer="route_stop_links")
+    assert "n_obs" not in route_links.columns
+    assert "walk_source" not in links.columns
+
+
 def test_geopackage_rewrites_cleanly(tmp_path: Path) -> None:
     """A second run replaces the file instead of accumulating stale layers."""
     stops = make_stops(("f", "S1", "Solo", 40.0, -75.0))

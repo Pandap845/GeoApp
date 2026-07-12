@@ -9,6 +9,7 @@ import pytest
 from shapely.geometry import LineString
 
 from gtfs_ingest.analysis.walk_network import (
+    _finalize_pairs,
     build_walk_graph,
     pair_network_distances,
 )
@@ -69,6 +70,9 @@ def test_snap_offsets_are_added() -> None:
     )
     out = pair_network_distances(node_xy, indptr, indices, weights, stop_xy, pairs)
     assert out["network_m"].iloc[0] == pytest.approx(110.0, abs=0.5)  # 100 + 10 snap
+    # Per-endpoint snap distances are exposed for the quality sidecar.
+    assert out["snap_m_a"].iloc[0] == pytest.approx(10.0, abs=0.1)
+    assert out["snap_m_b"].iloc[0] == pytest.approx(0.0, abs=0.1)
 
 
 def test_empty_graph_returns_all_nan() -> None:
@@ -81,6 +85,24 @@ def test_empty_graph_returns_all_nan() -> None:
     stop_xy = pd.DataFrame({"x": [0.0], "y": [0.0]}, index=["f:A"])
     out = pair_network_distances(node_xy, indptr, indices, weights, stop_xy, pairs)
     assert out["network_m"].isna().all()
+    assert out["snap_m_a"].isna().all() and out["snap_m_b"].isna().all()
+
+
+def test_finalize_pairs_labels_walk_source() -> None:
+    # One routed pair (network wins, clipped to >= line) and one fallback.
+    pairs = pd.DataFrame(
+        {
+            "stop_uid_a": ["f:A", "f:C"],
+            "stop_uid_b": ["f:B", "f:D"],
+            "distance_m": [100.0, 60.0],
+            "network_m": [95.0, np.nan],   # 95 < line -> clipped up to 100
+        }
+    )
+    out = _finalize_pairs(pairs)
+    assert list(out["walk_source"]) == ["network", "straight_line"]
+    assert list(out["line_m"]) == [100.0, 60.0]
+    assert list(out["distance_m"]) == [100.0, 60.0]   # clip + fallback kept
+    assert "network_m" not in out.columns
 
 
 def test_cli_accepts_network_walk_flag() -> None:

@@ -92,6 +92,52 @@ def test_parent_station_merges_stops_beyond_eps() -> None:
     assert labels[0] == labels[1] != -1
 
 
+def test_canonical_group_merges_stops_beyond_eps() -> None:
+    # 400 m apart across feeds: only the dedupe canonical group joins them.
+    stops = stops_gdf(
+        ("fa", "P1", 40.0, -75.0, None),
+        ("fb", "P2", 40.0036, -75.0, None),
+    )
+    assert list(cluster_stops(stops, eps_m=120, min_samples=2)) == [-1, -1]
+
+    canonical = pd.DataFrame(
+        {
+            "stop_uid": ["fa:P1", "fb:P2"],
+            "canonical_uid": ["fa:P1", "fa:P1"],
+            "group_id": [0, 0],
+        }
+    )
+    labels = cluster_stops(stops, eps_m=120, min_samples=2, canonical=canonical)
+    assert labels[0] == labels[1] != -1
+
+
+def test_physical_stop_count_counts_canonical_stations() -> None:
+    # Three stops in one cluster; two of them are aliases of one station.
+    stops = stops_gdf(
+        ("fa", "A", 40.0, -75.0, None),
+        ("fb", "B", 40.00009, -75.0, None),     # ~10 m: alias of A
+        ("fa", "C", 40.0005, -75.0, None),
+    )
+    route_stops, routes = rs_routes(
+        ("fa", "R1", "A", 3), ("fb", "RX", "B", 3), ("fa", "R2", "C", 3)
+    )
+    labels = cluster_stops(stops, eps_m=120, min_samples=2)
+    canonical = pd.DataFrame(
+        {
+            "stop_uid": ["fa:A", "fb:B"],
+            "canonical_uid": ["fa:A", "fa:A"],
+            "group_id": [0, 0],
+        }
+    )
+    (cluster,) = build_interchanges(stops, labels, route_stops, routes, canonical).to_dict("records")
+    assert cluster["stop_count"] == 3
+    assert cluster["physical_stop_count"] == 2
+
+    # Without a canonical map the two counts coincide.
+    (plain,) = build_interchanges(stops, labels, route_stops, routes).to_dict("records")
+    assert plain["physical_stop_count"] == plain["stop_count"] == 3
+
+
 def test_unclustered_stops_get_minus_one() -> None:
     stops = stops_gdf(
         ("f", "A", 40.0, -75.0, None),
@@ -131,6 +177,64 @@ def test_transfers_check_agreement_and_misses() -> None:
     assert result.clusters_with_declared == 1
     assert result.clusters_without_declared == 1
     assert result.not_inferred_examples == ["f:BUS1 <-> f:FARAWAY"]
+
+
+def test_detect_interchanges_cli_dedupe_flags_phantom_cluster(tmp_path: Path) -> None:
+    """Two feeds, one physical station: dedupe exposes the phantom cluster."""
+    from gtfs_ingest import cli
+
+    feed_a = feed_files(
+        replace={
+            "stops.txt": (
+                "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
+                "S1,Central Stop,40.0,-75.0,0,\n"
+            ),
+            "trips.txt": "route_id,service_id,trip_id\nR1,WK,T1\n",
+            "stop_times.txt": (
+                "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+                "T1,08:00:00,08:00:00,S1,1\n"
+            ),
+        }
+    )
+    feed_b = feed_files(
+        replace={
+            "stops.txt": (
+                "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
+                "Z1,Central Stop,40.00005,-75.0,0,\n"     # ~5 m: same station
+            ),
+            "trips.txt": "route_id,service_id,trip_id\nR1,WK,T9\n",
+            "stop_times.txt": (
+                "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+                "T9,08:00:00,08:00:00,Z1,1\n"
+            ),
+        }
+    )
+    write_feed_dir(tmp_path / "feeds", "alpha", feed_a)
+    write_feed_dir(tmp_path / "feeds", "beta", feed_b)
+
+    def run(out_name: str, *extra: str) -> dict:
+        out = tmp_path / out_name
+        assert cli.main(
+            ["detect-interchanges", "--feeds", str(tmp_path / "feeds"),
+             "--report", str(out), "--dry-run", *extra]
+        ) == 0
+        return json.loads((out / "interchanges_report.json").read_text(encoding="utf-8"))
+
+    report = run("out_dedupe")
+    assert report["dedupe"] is True
+    assert report["equivalence_groups"] == 1
+    assert report["stops_deduplicated"] == 2
+    assert report["clusters_total"] == 1
+    # The cluster is two stops but ONE physical station - a phantom.
+    assert report["single_physical_station_clusters"] == 1
+
+    report_off = run("out_nodedupe", "--no-dedupe")
+    assert report_off["dedupe"] is False
+    assert report_off["equivalence_groups"] == 0
+    # Without dedupe the phantom is invisible: 2 stops look like 2 stations.
+    assert report_off["single_physical_station_clusters"] == 0
+    md = (tmp_path / "out_nodedupe" / "interchanges_report.md").read_text(encoding="utf-8")
+    assert "off (--no-dedupe)" in md
 
 
 def test_detect_interchanges_cli_dry_run(tmp_path: Path) -> None:

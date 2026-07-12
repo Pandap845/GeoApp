@@ -8,15 +8,20 @@ wins as the edge's ``connection_type``):
 2. ``same_parent_station``  - they serve stops sharing a ``parent_station``
                               (a stop that *is* the parent counts as part of
                               its own station); feed-scoped, like stop ids.
-3. ``proximity``            - they serve stops within a configurable
+3. ``same_station_dedup``   - they serve stops that cross-feed station
+                              deduplication (``analysis.dedupe``) merged into
+                              one canonical physical station. Inferred, so it
+                              is kept distinguishable from the GTFS-declared
+                              ``same_parent_station``.
+4. ``proximity``            - they serve stops within a configurable
                               threshold (default 150 m). Distances are
                               geodesic: computed in PostGIS on ``geography``
                               (authoritative path) or locally in a projected
                               metric CRS (UTM estimate) when no database is
-                              available (dry runs, tests). Proximity is the
-                              only connection type that can cross feeds -
-                              ids never match across feeds, but geography
-                              does.
+                              available (dry runs, tests). Proximity and
+                              same_station_dedup are the only connection
+                              types that can cross feeds - ids never match
+                              across feeds, but geography does.
 
 Routes are identified by ``route_uid = "{feed_id}:{route_id}"`` so edges are
 unambiguous across feeds. Edges are undirected and normalized to
@@ -209,6 +214,20 @@ def _parent_station_pairs(route_stops: pd.DataFrame, stations: pd.DataFrame) -> 
     return pairs[PAIR_KEY].drop_duplicates().reset_index(drop=True)
 
 
+def _dedup_station_pairs(route_stops: pd.DataFrame, canonical: pd.DataFrame) -> pd.DataFrame:
+    """Pairs serving stops merged into one canonical station by dedupe."""
+    if canonical.empty:
+        return pd.DataFrame(columns=PAIR_KEY)
+    with_canon = route_stops.merge(
+        canonical[["stop_uid", "canonical_uid"]], on="stop_uid"
+    )
+    joined = with_canon.merge(with_canon, on="canonical_uid", suffixes=("_a", "_b"))
+    pairs = _normalize_pairs(
+        joined.rename(columns={"route_uid_a": "route_a", "route_uid_b": "route_b"})
+    )
+    return pairs[PAIR_KEY].drop_duplicates().reset_index(drop=True)
+
+
 def _proximity_pairs(route_stops: pd.DataFrame, stop_pairs: pd.DataFrame) -> pd.DataFrame:
     """Pairs serving stops within threshold, with the minimum distance."""
     if stop_pairs.empty:
@@ -230,6 +249,7 @@ def build_edges(
     route_stops: pd.DataFrame,
     stations: pd.DataFrame,
     stop_pairs: Optional[pd.DataFrame] = None,
+    canonical: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Combine all connection evidence into the final undirected edge list.
 
@@ -238,6 +258,8 @@ def build_edges(
         stations: concatenated :func:`station_map` frames.
         stop_pairs: proximity stop pairs from one of the
             ``proximity_pairs_*`` functions (``None`` -> no proximity edges).
+        canonical: cross-feed dedupe membership map
+            (``dedupe.canonical_map``); ``None``/empty -> no dedup edges.
 
     Returns:
         One row per connected route pair with :data:`EDGE_COLUMNS`;
@@ -249,10 +271,14 @@ def build_edges(
 
     same = _same_stop_pairs(route_stops)
     parent = _parent_station_pairs(route_stops, stations).assign(via_station=True)
+    dedup = _dedup_station_pairs(
+        route_stops, canonical if canonical is not None else pd.DataFrame()
+    ).assign(via_dedup=True)
     prox = _proximity_pairs(route_stops, stop_pairs if stop_pairs is not None else pd.DataFrame())
 
     edges = (
         same.merge(parent, on=PAIR_KEY, how="outer")
+        .merge(dedup, on=PAIR_KEY, how="outer")
         .merge(prox, on=PAIR_KEY, how="outer")
     )
     if edges.empty:
@@ -262,10 +288,13 @@ def build_edges(
     edges["shared_stop_count"] = edges["shared_stop_count"].fillna(0).astype(int)
     edges["via_station"] = edges.get("via_station", False)
     edges["via_station"] = edges["via_station"].fillna(False)
+    edges["via_dedup"] = edges.get("via_dedup", False)
+    edges["via_dedup"] = edges["via_dedup"].fillna(False)
     if "min_stop_distance_m" not in edges.columns:
         edges["min_stop_distance_m"] = pd.NA
 
     edges["connection_type"] = "proximity"
+    edges.loc[edges["via_dedup"], "connection_type"] = "same_station_dedup"
     edges.loc[edges["via_station"], "connection_type"] = "same_parent_station"
     edges.loc[edges["shared_stop_count"] > 0, "connection_type"] = "same_stop"
     # Sharing a stop means zero distance by definition.

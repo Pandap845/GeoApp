@@ -10,9 +10,15 @@ Flow per run:
    d. Phase 1 raw load + normalize of stops (parent_station links, local
       proximity fallback, and — on non-dry runs — a refresh of the PostGIS
       ``stops`` table so proximity queries match the analyzed feeds).
-3. Cross-feed connectivity edges (PostGIS geography when a DB is available,
+3. Cross-feed station deduplication (``dedupe``, on by default): aliases of
+   one physical station across feeds are merged, removed from the proximity
+   pairs, and connected as ``same_station_dedup`` edges.
+4. Cross-feed connectivity edges (PostGIS geography when a DB is available,
    local UTM math otherwise), networkx graph, GraphML export.
-4. Idempotent DB loads (skipped with --dry-run) and JSON + Markdown report.
+5. Near-stations export + its provenance sidecar
+   (``near_stations_quality.csv``: walk/travel sources, observation counts,
+   OSM coord confidence, dedupe canonical ids).
+6. Idempotent DB loads (skipped with --dry-run) and JSON + Markdown report.
 
 Feeds are never mixed in headway math; ``feed_id`` is carried through every
 table. Only run-level problems (bad DB, unwritable report dir) abort.
@@ -32,7 +38,8 @@ from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
 from ..models import FeedSource
-from . import connectivity, geopackage, graph_export, near_stations, route_filter, route_geometry, storage
+from . import connectivity, dedupe, geopackage, graph_export, near_stations, route_filter, route_geometry, storage
+from .dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD
 from .headways import DEFAULT_WINDOWS, TimeWindow, compute_stop_headways, route_rollup, stop_departures
 from .service_filter import load_service_feed
 
@@ -59,6 +66,11 @@ class AnalysisConfig(BaseModel):
         route_specs: restrict to these route_id/route_short_name values;
             ``None`` = all routes. A route passes when it matches either
             filter (union with ``mode_codes``).
+        dedupe: merge cross-feed duplicate stations (``analysis.dedupe``)
+            before connectivity / near-stations; on by default.
+        dedupe_distance_m: alias candidate radius in meters.
+        dedupe_name_threshold: minimum name similarity (0-1) to accept an
+            alias pair on names alone.
         dry_run: skip all database writes (and use local proximity math).
     """
 
@@ -73,6 +85,9 @@ class AnalysisConfig(BaseModel):
     network_walk: bool = False
     osm_line_table: str = "planet_osm_line"
     osm_geom_column: str = "way"
+    dedupe: bool = True
+    dedupe_distance_m: float = Field(default=DEDUPE_DISTANCE_M, gt=0)
+    dedupe_name_threshold: float = Field(default=NAME_SIM_THRESHOLD, ge=0.0, le=1.0)
     dry_run: bool = False
 
 
@@ -98,11 +113,18 @@ class AnalysisReport(BaseModel):
     proximity_m: float
     mode_filter: list[str] = Field(default_factory=list)   # mode names; [] = all
     route_filter: list[str] = Field(default_factory=list)  # route specs; [] = all
+    dedupe: bool = True
+    dedupe_distance_m: float = DEDUPE_DISTANCE_M
+    station_groups: int = 0        # cross-feed alias groups found
+    stops_deduplicated: int = 0    # stops belonging to some alias group
     windows: dict[str, str]  # name -> "HH:MM-HH:MM"
     feeds: list[FeedAnalysis]
     connections_by_type: dict[str, int]
     isolated_routes: list[str]
     graph: dict[str, Any]  # n_routes / n_edges / n_components / component_sizes
+    # Stop counts by provenance label (near_stations_quality.csv):
+    # {"walk_source": {...}, "travel_source": {...}}
+    quality_summary: dict[str, dict[str, int]] = Field(default_factory=dict)
 
 
 class _FeedData:
@@ -277,7 +299,22 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         stop_pairs = connectivity.proximity_pairs_postgis(engine, analyzed_feed_ids, config.proximity_m)
     else:
         stop_pairs = connectivity.proximity_pairs_local(all_stops, config.proximity_m)
-    edges = connectivity.build_edges(route_stops, stations, stop_pairs)
+
+    # Cross-feed station deduplication: aliases of one physical station must
+    # not count as "near" each other, and their routes connect via the
+    # canonical station rather than mere proximity.
+    equivalences = pd.DataFrame(columns=dedupe.EQUIVALENCE_COLUMNS)
+    canonical = pd.DataFrame(columns=dedupe.CANONICAL_COLUMNS)
+    if config.dedupe:
+        accepted = dedupe.find_equivalences(
+            all_stops, route_stops, routes,
+            config.dedupe_distance_m, config.dedupe_name_threshold,
+        )
+        canonical = dedupe.canonical_map(accepted)
+        equivalences = dedupe.attach_groups(accepted, canonical)
+        stop_pairs = dedupe.filter_stop_pairs(stop_pairs, canonical)
+
+    edges = connectivity.build_edges(route_stops, stations, stop_pairs, canonical)
 
     # Optional OSM street-network walking distances (--network-walk): applied
     # AFTER the connectivity edges (min_stop_distance_m stays geodesic) and
@@ -306,6 +343,19 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         all_stops, route_stops, routes, stop_pairs, stop_links=all_links
     )
     near_stations.write_near_stations(near, config.report_dir)
+
+    # Quality sidecar: same rows/IDs as near_stations.csv, provenance only.
+    osm_matches = None
+    if engine is not None and analyzed_feed_ids:
+        osm_matches = storage.fetch_osm_matches(engine, analyzed_feed_ids)
+    quality = near_stations.build_quality(
+        near, route_stops, routes, stop_pairs,
+        stop_links=all_links, osm_matches=osm_matches, canonical=canonical,
+    )
+    near_stations.write_quality(quality, config.report_dir)
+
+    if config.dedupe:
+        dedupe.write_equivalences(equivalences, config.report_dir)
     geopackage.write_geopackage(all_stops, near, stop_pairs, config.report_dir,
                                 route_shapes=all_shapes, stop_links=all_links)
 
@@ -315,6 +365,11 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
 
     if engine is not None:
         storage.replace_all_rows(engine, "route_connections", edges)
+        # With --no-dedupe the table is reloaded to empty so it always
+        # reflects the last run.
+        storage.replace_all_rows(
+            engine, "stop_equivalences", equivalences[dedupe.EQUIVALENCE_COLUMNS]
+        )
 
     # ---- report ------------------------------------------------------------
     by_type = edges["connection_type"].value_counts().to_dict() if not edges.empty else {}
@@ -324,11 +379,19 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         proximity_m=config.proximity_m,
         mode_filter=route_filter.mode_labels(config.mode_codes),
         route_filter=sorted(config.route_specs) if config.route_specs else [],
+        dedupe=config.dedupe,
+        dedupe_distance_m=config.dedupe_distance_m,
+        station_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
+        stops_deduplicated=int(len(canonical)),
         windows={w.name: w.label for w in config.windows},
         feeds=feed_results,
         connections_by_type={k: int(v) for k, v in by_type.items()},
         isolated_routes=metrics["isolated_routes"],
         graph={k: metrics[k] for k in ("n_routes", "n_edges", "n_components", "component_sizes")},
+        quality_summary={
+            col: {k: int(v) for k, v in quality[col].value_counts().items()}
+            for col in ("walk_source", "travel_source")
+        } if not quality.empty else {},
     )
     _write_reports(report, config.report_dir)
     log.info(
@@ -358,7 +421,15 @@ def _render_markdown(report: AnalysisReport) -> str:
         + (", ".join(report.mode_filter) if report.mode_filter else "all (no filter)")
         + "  ",
         "Routes: "
-        + (", ".join(report.route_filter) if report.route_filter else "all (no filter)"),
+        + (", ".join(report.route_filter) if report.route_filter else "all (no filter)")
+        + "  ",
+        "Station deduplication: "
+        + (
+            f"on ({report.dedupe_distance_m:g} m) - {report.station_groups} group(s), "
+            f"{report.stops_deduplicated} stop(s) merged; see `{dedupe.EQUIVALENCES_NAME}`"
+            if report.dedupe
+            else "off (--no-dedupe)"
+        ),
         "",
         "## Time windows",
         "",
@@ -389,8 +460,28 @@ def _render_markdown(report: AnalysisReport) -> str:
         "| Connection type | Route pairs |",
         "| --- | ---: |",
     ]
-    for kind in ("same_stop", "same_parent_station", "proximity"):
+    for kind in ("same_stop", "same_parent_station", "same_station_dedup", "proximity"):
         lines.append(f"| {kind} | {report.connections_by_type.get(kind, 0)} |")
+
+    if report.quality_summary:
+        walk = report.quality_summary.get("walk_source", {})
+        travel = report.quality_summary.get("travel_source", {})
+        lines += [
+            "",
+            "## Estimate provenance (near_stations_quality.csv)",
+            "",
+            "| walk_source | stops | | travel_source | stops |",
+            "| --- | ---: | --- | --- | ---: |",
+        ]
+        walk_kinds = ("network", "straight_line", "mixed", "unsnapped", "none")
+        travel_kinds = ("observed", "estimated", "mixed", "none")
+        for i in range(max(len(walk_kinds), len(travel_kinds))):
+            w = walk_kinds[i] if i < len(walk_kinds) else ""
+            t = travel_kinds[i] if i < len(travel_kinds) else ""
+            lines.append(
+                f"| {w} | {walk.get(w, 0) if w else ''} | "
+                f"| {t} | {travel.get(t, 0) if t else ''} |"
+            )
 
     lines += ["", "### Isolated routes (no connections)", ""]
     if report.isolated_routes:
@@ -403,6 +494,12 @@ def _render_markdown(report: AnalysisReport) -> str:
         f"Near-stations export: `{near_stations.NEAR_STATIONS_NAME}` "
         "(per stop: numeric ID, name, lat, lon, combined stop+line ids, and "
         "nearby stations as `[(ID, station, linea, time to reach), ...]`).  ",
+        f"Stop equivalences export: `{dedupe.EQUIVALENCES_NAME}` "
+        "(cross-feed alias pairs merged by station deduplication; only "
+        "written when dedupe is on).  ",
+        f"Quality sidecar: `{near_stations.QUALITY_NAME}` "
+        "(per stop, same ID key: walk/travel provenance, worst-case "
+        "observation count, OSM coord confidence, dedupe canonical id).  ",
         f"GeoPackage export: `{geopackage.GEOPACKAGE_NAME}` "
         "(layers: `stops` points, `near_links` walking lines, `route_shapes` "
         "real route paths, `route_stop_links` consecutive-stop segments - open in QGIS).",
