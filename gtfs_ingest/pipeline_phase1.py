@@ -18,6 +18,7 @@ defect. Feeds whose stops.txt is unusable simply contribute zero rows.
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Optional
 
 from sqlalchemy import Engine
@@ -29,12 +30,18 @@ from .models import FeedReport, FeedSource, Finding, RunReport, Severity
 log = logging.getLogger(__name__)
 
 
-def process_feed(source: FeedSource, engine: Optional[Engine]) -> FeedReport:
+def process_feed(
+    source: FeedSource,
+    engine: Optional[Engine],
+    analysis_date: Optional[date] = None,
+) -> FeedReport:
     """Run the full load/validate/normalize/store flow for one feed.
 
     Args:
         source: discovered feed.
         engine: database engine, or ``None`` for dry runs (skip DB writes).
+        analysis_date: the run's reference date for expiry judgments
+            (injectable clock); ``None`` uses today.
 
     Returns:
         The feed's report entry. Never raises: any unexpected failure is
@@ -43,7 +50,7 @@ def process_feed(source: FeedSource, engine: Optional[Engine]) -> FeedReport:
     findings: list[Finding] = []
     try:
         loaded = loader.load_feed(source)
-        findings.extend(validators.validate_feed(loaded))
+        findings.extend(validators.validate_feed(loaded, analysis_date=analysis_date))
         stops, norm_findings = normalizer.normalize_stops(loaded)
         findings.extend(norm_findings)
 
@@ -118,9 +125,16 @@ def run_pipeline(settings: Settings) -> RunReport:
         engine = db.make_engine(settings.database_url)
         db.ensure_schema(engine)
 
-    feed_reports = [process_feed(source, engine) for source in sources]
+    # One resolved analysis date per run: expiry judgments become
+    # reproducible facts instead of moving wall-clock targets.
+    analysis_date = settings.analysis_date or date.today()
+    feed_reports = [
+        process_feed(source, engine, analysis_date=analysis_date) for source in sources
+    ]
 
-    run_report = report.build_run_report(feed_reports, dry_run=settings.dry_run)
+    run_report = report.build_run_report(
+        feed_reports, dry_run=settings.dry_run, analysis_date=analysis_date.isoformat()
+    )
     report.write_reports(run_report, settings.report_dir)
 
     errors = sum(f.count(Severity.ERROR) for f in feed_reports)

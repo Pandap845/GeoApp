@@ -60,11 +60,13 @@ def _clean_ids(series: pd.Series) -> pd.Series:
     return series.astype("string").str.strip()
 
 
-def validate_feed(loaded: LoadedFeed) -> list[Finding]:
+def validate_feed(loaded: LoadedFeed, analysis_date: Optional[date] = None) -> list[Finding]:
     """Run every integrity check against one feed.
 
     Args:
         loaded: feed as returned by ``loader.load_feed``.
+        analysis_date: reference date for the expiry check (the run's
+            injectable "analysis clock"); ``None`` uses today.
 
     Returns:
         All findings, in check order. Empty list means a fully clean feed.
@@ -82,13 +84,18 @@ def validate_feed(loaded: LoadedFeed) -> list[Finding]:
             )
         )
 
+    def _calendar_expiry(inner: LoadedFeed, out: list[Finding]) -> None:
+        _check_calendar_expiry(inner, out, analysis_date)
+
+    _calendar_expiry.__name__ = "_check_calendar_expiry"  # keep crash logs readable
+
     checks: list[Callable[[LoadedFeed, list[Finding]], None]] = [
         _check_required_files,
         _check_table_readability,
         _check_required_columns,
         _check_stops,
         _check_referential_integrity,
-        _check_calendar_expiry,
+        _calendar_expiry,
         _report_optional_files,
     ]
     for check in checks:
@@ -359,14 +366,21 @@ def calendar_range(
     return start, end
 
 
-def _check_calendar_expiry(loaded: LoadedFeed, findings: list[Finding]) -> None:
-    """WARNING when the feed's declared service has entirely ended."""
+def _check_calendar_expiry(
+    loaded: LoadedFeed, findings: list[Finding], today: Optional[date] = None
+) -> None:
+    """WARNING when the feed's declared service has entirely ended.
+
+    Args:
+        today: the run's analysis date (injectable clock); ``None`` falls
+            back to the wall clock.
+    """
     _, end = calendar_range(
         loaded.table("calendar.txt"), loaded.table("calendar_dates.txt")
     )
     if end is None:
         return  # missing/unreadable calendars have their own findings
-    today = date.today()
+    today = today or date.today()
     if end < today:
         findings.append(
             Finding(

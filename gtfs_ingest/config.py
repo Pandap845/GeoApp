@@ -9,6 +9,7 @@ exclusively from ``--db-url`` or the ``DATABASE_URL`` env var.
 from __future__ import annotations
 
 import logging
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -52,6 +53,12 @@ class Settings(BaseSettings):
     log_level: str = Field(
         default="INFO",
         validation_alias=AliasChoices("log_level", "GTFS_LOG_LEVEL"),
+    )
+    analysis_date: Optional[date] = Field(
+        default=None,
+        validation_alias=AliasChoices("analysis_date", "GTFS_ANALYSIS_DATE"),
+        description="Reference date for expiry/staleness judgments (the "
+        "'analysis clock'); default: today, resolved once per run.",
     )
     dry_run: bool = False
 

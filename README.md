@@ -218,8 +218,16 @@ Flags shared by both subcommands:
 | Flag | Description |
 | --- | --- |
 | `--service-date YYYY-MM-DD` | Service date to analyze (calendar + calendar_dates honored). Default: each feed's **busiest** date. |
+| `--service-date-range START..END` | Analyze every served day in the window (max 31 days). Headways get **one row per day** (the DB PKs include `service_date`; existing databases are migrated automatically and idempotently on the next run); connectivity/near-stations use the union of days. The report shows `service_date` as `START..END` with `days_analyzed`. |
+| `--common-date` | Resolve ONE service date shared by ALL feeds (the latest date every feed has active service) — coherent cross-feed outputs by construction. Exits 1 when the calendars share no such date. |
+| `--analysis-date YYYY-MM-DD` | Reference date for expiry/staleness notes (also `GTFS_ANALYSIS_DATE`; default today, resolved once per run). Makes reports reproducible — also accepted by `ingest` for the `feed_expired` check. |
 | `--proximity-m METERS` | Stop proximity threshold for connectivity. Default `150`. |
 | `--window NAME=HH:MM-HH:MM` | Replace the default time windows (repeatable). Hours may exceed 23, e.g. `night=23:00-27:00`. |
+
+The three date-selection flags are mutually exclusive. Whenever analyzed
+feeds resolve to **different** service dates, the report sets
+`service_dates_coherent: false` and warns prominently — cross-feed
+connectivity and near-stations would mix non-contemporaneous schedules.
 
 `analyze-frequency` only (in addition to `--service-date`, `--proximity-m`,
 `--window`): `--network-walk` computes near-station walking times along the
@@ -652,6 +660,26 @@ Files in `--report DIR`:
   | `station_dedup` | the dedupe `canonical_uid` when the stop is a cross-feed alias; empty otherwise |
 
   `analysis_report.json` carries the per-run totals as `quality_summary`.
+- `station_network.graphml` + `station_network_nodes.csv` +
+  `station_network_edges.csv` + the `station_network` GeoPackage layer —
+  the **routable stop-level network** (a `networkx.MultiDiGraph`): one node
+  per stop (`stop_uid` key; attributes `near_id` = the CSV `ID`, `name`,
+  `feed`, `canonical_uid`, `lat`, `lon`) and typed, time-weighted edges:
+
+  | edge_type | direction | `time_min` |
+  | --- | --- | --- |
+  | `in_vehicle` | directed, per route/direction | scheduled `travel_min` (absent when the segment is untimed) |
+  | `walk` | reciprocal arcs | walking minutes from the (dedupe-filtered, optionally network-walked) proximity pairs |
+  | `same_station` | reciprocal arcs | `0.0` — cross-feed alias links from the dedupe stage, so routing crosses feeds |
+
+  `nx.shortest_path(g, a, b, weight="time_min")` works out of the box.
+  Gephi merges parallel edges unless "parallel edges" is enabled on import;
+  yEd/igraph/networkx read the multigraph natively. The CSVs are the same
+  graph flattened (reciprocal arcs deduped to one row per pair).
+- `route_stop_headways.csv` / `route_headways.csv` — the headway tables
+  written to the report directory on **every** run (previously DB-only, so
+  dry runs produced no headway output). Same columns as the DB tables
+  including `service_date`; range runs produce one row set per served day.
 - `transit_analysis.gpkg` — **GeoPackage** (open directly in QGIS/GDAL)
   with four EPSG:4326 layers: `stops` (points; the CSV attributes plus
   `stop_num_id`, the database join key), `near_links` (one LineString per
@@ -677,6 +705,58 @@ Files in `--report DIR`:
 - A feed that fails anywhere in analysis is recorded `failed` with the
   exception message in its notes; the run continues (same isolation
   contract as Phase 1).
+
+---
+
+# Export to Neo4j (`export-neo4j`)
+
+```bash
+# after analyze-frequency wrote its outputs:
+python -m gtfs_ingest.cli export-neo4j --report ./out          # -> ./out/neo4j/
+```
+
+Builds an **offline Neo4j load package** from an existing report directory —
+no new dependency, no running instance required. The package contains data
+CSVs with `neo4j-admin` inline headers plus generated scripts, so ONE file
+set serves both load paths:
+
+- **Any running instance**: copy the CSVs into the DBMS *import* directory
+  and run `cypher-shell -f load.cypher` (Browser: prefix the LOAD CSV blocks
+  with `:auto`). Idempotent — constraints `IF NOT EXISTS`, `MERGE`
+  throughout, batched `IN TRANSACTIONS`.
+- **Bulk import**: `neo4j-admin database import full` (see
+  `admin_import.txt`), then `cypher-shell -f post_import.cypher` for the
+  constraints and the `location` point property.
+
+Graph model: `(:Stop {stop_uid, name, feed, canonical_uid, lat, lon,
+location})`, `(:Route {route_uid, route_short_name, route_type,
+modalidad, …})` (metadata read from `route_connectivity.graphml`),
+`(:Station {canonical_uid, n_stops})` (one per multi-member dedupe group);
+relationships `[:IN_VEHICLE {time_min, linea, direction_id, route_uid}]`
+(directed), `[:WALK {time_min, distance_m}]` and `[:SAME_STATION]` (stored
+once — query undirected: `-[:WALK]-`), `(:Route)-[:SERVES]->(:Stop)` and
+`(:Stop)-[:PART_OF]->(:Station)`.
+
+Example queries once loaded:
+
+```cypher
+// fastest route between two stops, mixing vehicle + walking + transfers
+MATCH (a:Stop {stop_uid: 'improved_gtfs_mimacro_mitren_sitren:SITEUR_001'}),
+      (b:Stop {name: 'Periférico Sur'})
+CALL apoc.algo.dijkstra(a, b, 'IN_VEHICLE>|WALK|SAME_STATION', 'time_min')
+YIELD path, weight RETURN path, weight;
+
+// which physical stations mix systems? (routes of 2+ modalidades)
+MATCH (r:Route)-[:SERVES]->(:Stop)-[:PART_OF]->(st:Station)
+WITH st, collect(DISTINCT r.modalidad) AS sistemas
+WHERE size(sistemas) > 1 RETURN st.name, sistemas ORDER BY size(sistemas) DESC;
+```
+
+Notes: routes with no timed consecutive stop pair produce no `SERVES`
+(none in the current feeds); a missing `route_connectivity.graphml`
+degrades `(:Route)` nodes to uid-only with a warning; missing
+`station_network_*.csv` inputs exit 1 with a "run analyze-frequency first"
+message.
 
 ---
 

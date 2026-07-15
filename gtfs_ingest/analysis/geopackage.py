@@ -56,6 +56,7 @@ def write_geopackage(
     out_dir: Path,
     route_shapes: Optional[gpd.GeoDataFrame] = None,
     stop_links: Optional[pd.DataFrame] = None,
+    station_edges: Optional[gpd.GeoDataFrame] = None,
 ) -> Path:
     """Write the analysis GeoPackage.
 
@@ -70,6 +71,9 @@ def write_geopackage(
             concatenated); the layer is skipped when None/empty.
         stop_links: ``route_geometry.route_stop_links`` output (all feeds
             concatenated); the layer is skipped when None/empty.
+        station_edges: routable station-network edges
+            (``station_network.station_edges_layer``); skipped when
+            None/empty.
 
     Returns:
         The written path.
@@ -89,7 +93,7 @@ def write_geopackage(
     links_layer = _near_links_layer(stops, stop_pairs)
     links_layer.to_file(path, layer="near_links", driver="GPKG", mode="a")
 
-    n_shapes = n_route_links = 0
+    n_shapes = n_route_links = n_station_edges = 0
     if route_shapes is not None and not route_shapes.empty:
         route_shapes.to_file(path, layer="route_shapes", driver="GPKG", mode="a")
         n_shapes = len(route_shapes)
@@ -97,11 +101,14 @@ def write_geopackage(
     if not route_links_layer.empty:
         route_links_layer.to_file(path, layer="route_stop_links", driver="GPKG", mode="a")
         n_route_links = len(route_links_layer)
+    if station_edges is not None and not station_edges.empty:
+        station_edges.to_file(path, layer="station_network", driver="GPKG", mode="a")
+        n_station_edges = len(station_edges)
 
     log.info(
         "GeoPackage written: %s (stops: %d, near_links: %d, route_shapes: %d, "
-        "route_stop_links: %d)",
-        path, len(stops_layer), len(links_layer), n_shapes, n_route_links,
+        "route_stop_links: %d, station_network: %d)",
+        path, len(stops_layer), len(links_layer), n_shapes, n_route_links, n_station_edges,
     )
     return path
 

@@ -17,7 +17,12 @@ from gtfs_ingest.analysis.headways import (
     route_rollup,
     stop_departures,
 )
-from gtfs_ingest.analysis.service_filter import load_service_feed, resolve_service
+from gtfs_ingest.analysis.service_filter import (
+    common_service_date,
+    load_service_feed,
+    resolve_service,
+    service_ids_in_range,
+)
 from gtfs_ingest.loader import discover_feeds
 
 from conftest import feed_files, write_feed_dir
@@ -194,6 +199,40 @@ def test_direction_id_blank_becomes_sentinel(tmp_path: Path) -> None:
     feed, _ = load_service_feed(source, date(2026, 1, 3))  # T2, blank direction
     dep = stop_departures(feed)
     assert set(dep["direction_id"]) == {-1}
+
+
+# --------------------------------------------------------------------------
+# Common service date + date ranges
+# --------------------------------------------------------------------------
+
+def test_common_service_date_overlapping_feeds(tmp_path: Path) -> None:
+    # Both feeds share 2026 weekdays: the latest common served date wins.
+    a = write_feed_dir(tmp_path, "feed_a", ANALYSIS_FEED)
+    b = write_feed_dir(tmp_path, "feed_b", feed_files())   # VALID_FEED: WK 2026
+    common = common_service_date([str(a), str(b)])
+    assert common is not None
+    assert common == date(2026, 12, 31)                    # Thursday, both serve it
+
+
+def test_common_service_date_disjoint_feeds_is_none(tmp_path: Path) -> None:
+    old = feed_files(replace={"calendar.txt": (
+        "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+        "WK,1,1,1,1,1,0,0,20200101,20201231\n"
+    )})
+    a = write_feed_dir(tmp_path, "old_feed", old)
+    b = write_feed_dir(tmp_path, "new_feed", ANALYSIS_FEED)   # 2026
+    assert common_service_date([str(a), str(b)]) is None
+
+
+def test_service_ids_in_range_skips_unserved_days(tmp_path: Path) -> None:
+    path = write_feed_dir(tmp_path, "range_feed", ANALYSIS_FEED)
+    # Mon 2026-01-05 (removed by calendar_dates) .. Sun 2026-01-11.
+    served = service_ids_in_range(str(path), date(2026, 1, 5), date(2026, 1, 11))
+    assert sorted(d.isoformat() for d in served) == [
+        "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09",  # Tue-Fri (WK)
+        "2026-01-10",                                            # Sat (SA)
+    ]
+    assert all(ids for ids in served.values())
 
 
 # --------------------------------------------------------------------------

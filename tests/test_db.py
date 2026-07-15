@@ -73,6 +73,27 @@ def test_live_load_is_idempotent(valid_feed) -> None:
     engine.dispose()
 
 
+def test_headway_pk_migration_blocks_are_idempotent_and_complete() -> None:
+    """The DO-blocks widen both headway PKs to include service_date."""
+    from gtfs_ingest.analysis.storage import _DDL_STATEMENTS
+
+    blocks = [s for s in _DDL_STATEMENTS if "DO $$" in s]
+    assert len(blocks) == 2
+    for name in ("route_stop_headways_pkey", "route_headways_pkey"):
+        (block,) = [b for b in blocks if name in b]
+        assert "service_date" in block            # both the guard and the new PK
+        assert "ADD CONSTRAINT" in block and "DROP CONSTRAINT" in block
+        assert "NOT EXISTS" in block              # idempotency guard
+    # Fresh-database CREATEs already carry the widened PKs.
+    creates = [
+        s for s in _DDL_STATEMENTS
+        if "CREATE TABLE IF NOT EXISTS route_stop_headways" in s
+        or "CREATE TABLE IF NOT EXISTS route_headways" in s
+    ]
+    assert len(creates) == 2
+    assert all("service_date, route_id" in s for s in creates)
+
+
 @pytest.mark.skipif(
     not os.environ.get("GTFS_TEST_DATABASE_URL"),
     reason="GTFS_TEST_DATABASE_URL not set; skipping live PostGIS test",

@@ -14,7 +14,7 @@ from gtfs_ingest.analysis.graph_export import build_graph, graph_metrics, write_
 from gtfs_ingest.analysis.pipeline_phase2 import GRAPHML_NAME, JSON_NAME, MARKDOWN_NAME
 
 from test_headways import ANALYSIS_FEED
-from conftest import write_feed_dir
+from conftest import feed_files, write_feed_dir
 
 
 def rs(*rows: tuple[str, str, str]) -> pd.DataFrame:
@@ -351,3 +351,128 @@ def test_analyze_cli_rejects_bad_service_date(tmp_path: Path) -> None:
         ]
     )
     assert exit_code == 1
+
+
+# --------------------------------------------------------------------------
+# Date coherence, --common-date, --service-date-range, analysis clock
+# --------------------------------------------------------------------------
+
+def test_parse_date_range_validation() -> None:
+    import pytest
+
+    from gtfs_ingest.cli import _parse_date_range
+
+    from datetime import date as _date
+    assert _parse_date_range("2026-01-05..2026-01-11") == (_date(2026, 1, 5), _date(2026, 1, 11))
+    for bad in ("2026-01-05", "2026-01-11..2026-01-05", "2026-01-01..2026-03-01", "x..y"):
+        with pytest.raises(ValueError):
+            _parse_date_range(bad)
+
+
+def test_date_mode_flags_are_mutually_exclusive(tmp_path: Path) -> None:
+    from gtfs_ingest import cli
+
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    base = ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
+            "--report", str(tmp_path / "out"), "--dry-run"]
+    assert cli.main(base + ["--service-date", "2026-01-06", "--common-date"]) == 1
+    assert cli.main(base + ["--service-date-range", "2026-01-05..2026-01-06",
+                            "--common-date"]) == 1
+
+
+def test_incoherent_dates_flagged_and_analysis_date_recorded(tmp_path: Path) -> None:
+    """Two feeds with disjoint calendars -> coherence warning + clock field."""
+    from gtfs_ingest import cli
+
+    old = feed_files(replace={"calendar.txt": (
+        "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+        "WK,1,1,1,1,1,0,0,20200101,20201231\n"
+    )})
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    write_feed_dir(tmp_path / "feeds", "old", old)
+    out = tmp_path / "out"
+    assert cli.main(
+        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
+         "--report", str(out), "--analysis-date", "2026-07-12", "--dry-run"]
+    ) == 0
+
+    report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
+    assert report["analysis_date"] == "2026-07-12"
+    assert report["service_dates_coherent"] is False
+    assert len(report["service_dates"]) == 2                 # busiest 2020 vs 2026
+    md = (out / MARKDOWN_NAME).read_text(encoding="utf-8")
+    assert "DIFFERENT service dates" in md
+    # The expired 2020 feed gets deterministic notes against the clock.
+    old_feed = next(f for f in report["feeds"] if f["feed_id"] == "old")
+    assert old_feed["calendar_status"] == "expired"
+
+    # --common-date on disjoint calendars: loud exit 1.
+    assert cli.main(
+        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
+         "--report", str(tmp_path / "out2"), "--common-date", "--dry-run"]
+    ) == 1
+
+
+def test_common_date_resolves_shared_day(tmp_path: Path) -> None:
+    from gtfs_ingest import cli
+
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    write_feed_dir(tmp_path / "feeds", "valid", feed_files())     # both serve 2026 WK
+    out = tmp_path / "out"
+    assert cli.main(
+        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
+         "--report", str(out), "--common-date", "--dry-run"]
+    ) == 0
+
+    report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
+    assert report["service_dates_coherent"] is True
+    dates = {f["service_date"] for f in report["feeds"]}
+    assert len(dates) == 1                                        # one shared day
+    assert {f["service_date_source"] for f in report["feeds"]} == {"common"}
+
+
+def test_service_date_range_analyzes_served_days(tmp_path: Path) -> None:
+    from gtfs_ingest import cli
+
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    out = tmp_path / "out"
+    assert cli.main(
+        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
+         "--report", str(out),
+         "--service-date-range", "2026-01-05..2026-01-11", "--dry-run"]
+    ) == 0
+
+    report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
+    (feed,) = report["feeds"]
+    assert feed["status"] == "analyzed"
+    assert feed["service_date"] == "2026-01-05..2026-01-11"
+    assert feed["service_date_source"] == "range"
+    assert feed["days_analyzed"] == 5      # Mon removed by calendar_dates, Sun no service
+    # Per-day headway rows: the CSV export carries one service_date per day.
+    headways = pd.read_csv(out / "route_stop_headways.csv")
+    assert headways["service_date"].nunique() == 5
+
+
+def test_new_csv_and_station_network_outputs(tmp_path: Path) -> None:
+    from gtfs_ingest import cli
+
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    out = tmp_path / "out"
+    assert cli.main(
+        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
+         "--report", str(out), "--service-date", "2026-01-06", "--dry-run"]
+    ) == 0
+
+    # New CSVs exist with sane contents.
+    nodes = pd.read_csv(out / "station_network_nodes.csv")
+    near = pd.read_csv(out / "near_stations.csv")
+    assert len(nodes) == len(near)                          # one node per stop
+    edges = pd.read_csv(out / "station_network_edges.csv")
+    assert set(edges["edge_type"]) <= {"in_vehicle", "walk", "same_station"}
+    assert (out / "route_headways.csv").is_file()
+    # Station network GraphML + report stats.
+    assert (out / "station_network.graphml").is_file()
+    report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
+    assert report["station_graph"]["n_stops"] == len(near)
+    # New gpkg layer alongside the existing four.
+    assert len(gpd.read_file(out / "transit_analysis.gpkg", layer="station_network")) == len(edges)

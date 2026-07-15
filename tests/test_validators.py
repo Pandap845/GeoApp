@@ -253,6 +253,17 @@ def test_junk_calendar_dates_tolerated(tmp_path: Path) -> None:
     assert not by_code(findings, "validator_crash")
 
 
+def test_feed_expired_respects_injected_analysis_date(tmp_path: Path) -> None:
+    # The same feed judged against two different clocks: deterministic counts.
+    files = feed_files(replace={"calendar.txt": _calendar(date(2020, 1, 1), date(2022, 12, 31))})
+    loaded = load_dir_feed(tmp_path, "clocked", files)
+
+    (finding,) = by_code(validate_feed(loaded, analysis_date=date(2023, 1, 11)), "feed_expired")
+    assert "11 day(s) before today" in finding.message           # exact, reproducible
+    # Clock set BEFORE the calendar end: not expired at all.
+    assert not by_code(validate_feed(loaded, analysis_date=date(2021, 6, 1)), "feed_expired")
+
+
 def test_calendar_range_pure_helper() -> None:
     cal = pd.DataFrame({"start_date": ["20200101"], "end_date": ["20221231"]})
     added = pd.DataFrame({"date": ["20230115"], "exception_type": ["1"]})

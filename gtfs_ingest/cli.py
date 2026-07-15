@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 
 _SUBCOMMANDS = (
     "ingest", "analyze-frequency", "detect-interchanges", "conflate-osm", "google-qa",
-    "locate-stations",
+    "locate-stations", "export-neo4j",
 )
 
 
@@ -134,6 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit with code 2 if any feed produced an ERROR finding.",
     )
+    ingest.add_argument(
+        "--analysis-date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Reference date for the feed-expiry check (default: today; also "
+        "GTFS_ANALYSIS_DATE). Makes expiry findings reproducible.",
+    )
 
     analyze = subparsers.add_parser(
         "analyze-frequency",
@@ -146,6 +153,29 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="YYYY-MM-DD",
         help="Service date to analyze (calendar + calendar_dates honored). "
         "Default: each feed's busiest date.",
+    )
+    analyze.add_argument(
+        "--service-date-range",
+        default=None,
+        metavar="START..END",
+        help="Analyze every served day in the window (max 31 days), e.g. "
+        "2026-01-05..2026-01-11. Headways get one row per day; connectivity "
+        "and near-stations use the union of days. Mutually exclusive with "
+        "--service-date/--common-date.",
+    )
+    analyze.add_argument(
+        "--common-date",
+        action="store_true",
+        help="Resolve ONE service date shared by ALL feeds (the latest date "
+        "every feed has active service) instead of per-feed busiest dates; "
+        "exits 1 when the feeds' calendars share no such date.",
+    )
+    analyze.add_argument(
+        "--analysis-date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Reference date for expiry/staleness notes (default: today; also "
+        "GTFS_ANALYSIS_DATE). Makes the report reproducible.",
     )
     analyze.add_argument(
         "--proximity-m",
@@ -342,11 +372,54 @@ def build_parser() -> argparse.ArgumentParser:
     locate.add_argument("--dry-run", action="store_true",
                         help="Report the plan (stations read, worst-case call count) only; "
                         "no API calls, no export.")
+
+    neo = subparsers.add_parser(
+        "export-neo4j",
+        help="Build an offline Neo4j load package (CSVs + Cypher) from a report directory.",
+    )
+    # No --feeds/--db-url: the exporter reshapes existing analyze-frequency outputs.
+    neo.add_argument("--report", type=Path, default=None, metavar="DIR",
+                     help="analyze-frequency report directory to read (default: ./out).")
+    neo.add_argument("--out", type=Path, default=None, metavar="DIR",
+                     help="Package destination (default: <report>/neo4j).")
+    neo.add_argument("--log-level", default=None,
+                     choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                     help="Log verbosity (default: INFO, or GTFS_LOG_LEVEL env var).")
     return parser
 
 
+#: Hard cap on --service-date-range length (accidental year-long runs).
+MAX_RANGE_DAYS = 31
+
+
+def _parse_date_range(spec: str) -> tuple[date, date]:
+    """Parse ``START..END`` (ISO dates) with sanity limits.
+
+    Raises:
+        ValueError: malformed spec, END before START, or over the cap.
+    """
+    start_s, sep, end_s = spec.partition("..")
+    if not sep or not start_s or not end_s:
+        raise ValueError(
+            f"--service-date-range {spec!r}: expected START..END (YYYY-MM-DD..YYYY-MM-DD)"
+        )
+    start, end = date.fromisoformat(start_s), date.fromisoformat(end_s)
+    if end < start:
+        raise ValueError(f"--service-date-range: END {end} is before START {start}")
+    if (end - start).days + 1 > MAX_RANGE_DAYS:
+        raise ValueError(
+            f"--service-date-range: {(end - start).days + 1} day(s) exceeds "
+            f"the {MAX_RANGE_DAYS}-day cap"
+        )
+    return start, end
+
+
 def _settings_from_args(args: argparse.Namespace) -> Settings:
-    """Resolve Settings from explicit CLI flags with env/.env fallbacks."""
+    """Resolve Settings from explicit CLI flags with env/.env fallbacks.
+
+    Raises:
+        ValueError: on a malformed --analysis-date.
+    """
     overrides: dict = {"feed_paths": list(args.feeds), "dry_run": args.dry_run}
     if args.db_url:
         overrides["database_url"] = args.db_url
@@ -354,6 +427,8 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
         overrides["report_dir"] = args.report
     if args.log_level:
         overrides["log_level"] = args.log_level
+    if getattr(args, "analysis_date", None):
+        overrides["analysis_date"] = date.fromisoformat(args.analysis_date)
     return Settings(**overrides)
 
 
@@ -361,7 +436,12 @@ def _run_ingest(args: argparse.Namespace) -> int:
     """Execute the Phase 1 ingest flow; returns the process exit code."""
     from .pipeline_phase1 import run_pipeline
 
-    settings = _settings_from_args(args)
+    try:
+        settings = _settings_from_args(args)
+    except ValueError as exc:
+        setup_logging("INFO")
+        log.error("Invalid arguments: %s", exc)
+        return 1
     setup_logging(settings.log_level)
     try:
         run_report = run_pipeline(settings)
@@ -386,12 +466,30 @@ def _run_analyze(args: argparse.Namespace) -> int:
     from .analysis.headways import DEFAULT_WINDOWS, TimeWindow
     from .analysis.pipeline_phase2 import AnalysisConfig, run_analysis
 
-    settings = _settings_from_args(args)
+    try:
+        settings = _settings_from_args(args)
+    except ValueError as exc:
+        setup_logging("INFO")
+        log.error("Invalid arguments: %s", exc)
+        return 1
     setup_logging(settings.log_level)
 
     try:
+        # The three date-selection modes are mutually exclusive.
+        date_modes = [
+            name for name, on in (
+                ("--service-date", bool(args.service_date)),
+                ("--service-date-range", bool(args.service_date_range)),
+                ("--common-date", args.common_date),
+            ) if on
+        ]
+        if len(date_modes) > 1:
+            raise ValueError(f"{' and '.join(date_modes)} are mutually exclusive")
         service_date: Optional[date] = (
             date.fromisoformat(args.service_date) if args.service_date else None
+        )
+        service_date_range = (
+            _parse_date_range(args.service_date_range) if args.service_date_range else None
         )
         if args.window:
             windows = []
@@ -409,6 +507,9 @@ def _run_analyze(args: argparse.Namespace) -> int:
             database_url=settings.database_url,
             report_dir=settings.report_dir,
             service_date=service_date,
+            service_date_range=service_date_range,
+            common_date=args.common_date,
+            analysis_date=settings.analysis_date or date.today(),
             proximity_m=args.proximity_m,
             windows=windows,
             mode_codes=mode_codes,
@@ -576,6 +677,26 @@ def _run_locate_stations(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_export_neo4j(args: argparse.Namespace) -> int:
+    """Build the offline Neo4j package; returns the process exit code."""
+    from .export.neo4j import run_export
+
+    settings = Settings(feed_paths=[], dry_run=True,
+                        **({"report_dir": args.report} if args.report else {}),
+                        **({"log_level": args.log_level} if args.log_level else {}))
+    setup_logging(settings.log_level)
+    try:
+        run_export(settings.report_dir, out_dir=args.out)
+    except ValueError as exc:
+        log.error("Export aborted: %s", exc)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - fatal run-level errors -> exit 1
+        log.error("Export aborted: %s", exc)
+        log.debug("Traceback:", exc_info=True)
+        return 1
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI entry point.
 
@@ -602,6 +723,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_conflate_osm(args)
     if args.command == "locate-stations":
         return _run_locate_stations(args)
+    if args.command == "export-neo4j":
+        return _run_export_neo4j(args)
     return _run_google_qa(args)
 
 

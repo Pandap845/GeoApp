@@ -48,7 +48,7 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         min_headway_s    double precision,
         max_headway_s    double precision,
         loaded_at        timestamptz NOT NULL DEFAULT now(),
-        PRIMARY KEY (feed_id, route_id, direction_id, stop_id, time_window)
+        PRIMARY KEY (feed_id, service_date, route_id, direction_id, stop_id, time_window)
     )
     """,
     """
@@ -63,8 +63,44 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         stops_with_headway  integer NOT NULL,
         trip_count          integer NOT NULL,
         loaded_at           timestamptz NOT NULL DEFAULT now(),
-        PRIMARY KEY (feed_id, route_id, direction_id, time_window)
+        PRIMARY KEY (feed_id, service_date, route_id, direction_id, time_window)
     )
+    """,
+    # Upgrade path for databases created before --service-date-range existed:
+    # widen the headway PKs to include service_date (idempotent - only fires
+    # when the live constraint still lacks the column; widening a PK cannot
+    # violate uniqueness because the old key is a subset of the new one).
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'route_stop_headways_pkey')
+           AND NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+            WHERE c.conname = 'route_stop_headways_pkey' AND a.attname = 'service_date'
+        ) THEN
+            ALTER TABLE route_stop_headways DROP CONSTRAINT route_stop_headways_pkey;
+            ALTER TABLE route_stop_headways ADD CONSTRAINT route_stop_headways_pkey
+                PRIMARY KEY (feed_id, service_date, route_id, direction_id, stop_id, time_window);
+        END IF;
+    END $$
+    """,
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'route_headways_pkey')
+           AND NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+            WHERE c.conname = 'route_headways_pkey' AND a.attname = 'service_date'
+        ) THEN
+            ALTER TABLE route_headways DROP CONSTRAINT route_headways_pkey;
+            ALTER TABLE route_headways ADD CONSTRAINT route_headways_pkey
+                PRIMARY KEY (feed_id, service_date, route_id, direction_id, time_window);
+        END IF;
+    END $$
     """,
     """
     CREATE TABLE IF NOT EXISTS route_connections (

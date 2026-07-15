@@ -274,8 +274,14 @@ class FeedReport(BaseModel):
 
 
 class RunReport(BaseModel):
-    """Top-level report for one pipeline run (serialized to JSON as-is)."""
+    """Top-level report for one pipeline run (serialized to JSON as-is).
+
+    ``generated_at`` is a wall-clock timestamp (run metadata);
+    ``analysis_date`` is the run's *input* clock - the reference date the
+    expiry judgments were made against (reproducible via --analysis-date).
+    """
 
     generated_at: str
     dry_run: bool
+    analysis_date: Optional[str] = None
     feeds: list[FeedReport] = Field(default_factory=list)

@@ -26,6 +26,7 @@ def build_run_report(
     feeds: Sequence[FeedReport],
     dry_run: bool,
     generated_at: Optional[datetime] = None,
+    analysis_date: Optional[str] = None,
 ) -> RunReport:
     """Assemble the top-level report object.
 
@@ -34,6 +35,7 @@ def build_run_report(
         dry_run: whether DB writes were skipped this run.
         generated_at: timestamp override (mainly for tests); defaults to now
             in UTC.
+        analysis_date: the run's resolved analysis clock (ISO date).
 
     Returns:
         The complete :class:`RunReport`.
@@ -42,6 +44,7 @@ def build_run_report(
     return RunReport(
         generated_at=ts.isoformat(timespec="seconds"),
         dry_run=dry_run,
+        analysis_date=analysis_date,
         feeds=list(feeds),
     )
 

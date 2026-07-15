@@ -249,7 +249,21 @@ mean/median/min/max_headway_s = statistics over gaps      # seconds
   notes expired calendars, out-of-validity analysis dates, and auto-picked
   "busiest" dates more than 30 days in the past. Nothing blocks — the
   analysis is valid *for its date*; the reader just learns how old that
-  date is.
+  date is. All these judgments compare against the run's **analysis
+  clock** (`--analysis-date` / `GTFS_ANALYSIS_DATE`, default today,
+  resolved once per run and recorded in the reports) — identical inputs +
+  identical clock ⇒ identical findings.
+- **Service-date coherence**: when the analyzed feeds resolve to different
+  service days (e.g. per-feed busiest dates years apart), the report sets
+  `service_dates_coherent: false` and warns — the cross-feed outputs mix
+  non-contemporaneous schedules. `--common-date` resolves one day every
+  feed serves (latest such date; exit 1 when the calendars don't overlap).
+- **Date ranges** (`--service-date-range START..END`, ≤ 31 days): each
+  served day in the window is analyzed separately (headway gaps never span
+  days) and stored per day — the headway table PKs include `service_date`
+  (existing databases are migrated idempotently). Connectivity,
+  near-stations and geometry use the union of days; `travel_min` per
+  segment is the median across days.
 
 **Route rollup** per `(route, direction, window)`:
 
@@ -516,6 +530,22 @@ consecutive travel times via Distance Matrix (`real`) or Haversine at
 `--avg-speed-kmh` (`estimado`) or a generic `--max-route-minutes / n`
 (`generico`) → Excel export. It never writes to the database.
 
+### 3.11 Neo4j export (`export-neo4j`, offline)
+
+Reshapes an existing report directory into a Neo4j load package
+(`<report>/neo4j/`): data CSVs with `neo4j-admin` inline headers
+(`stop_uid:ID(Stop)`, `:START_ID(Stop)`, typed props — the ID spaces
+prevent the Stop/Station id collision, since a Station's id IS its
+canonical stop's uid) plus a generated `load.cypher` (constraints
+`IF NOT EXISTS`, `MERGE`, `IN TRANSACTIONS` — idempotent),
+`post_import.cypher` and `admin_import.txt`. Model: `:Stop` / `:Route`
+(metadata from the route GraphML) / `:Station` (multi-member dedupe groups
+only) with `IN_VEHICLE` (directed, `time_min`), `WALK` + `SAME_STATION`
+(stored once, queried undirected), `SERVES` (derived from in_vehicle
+endpoints) and `PART_OF`. No new dependency, no live connection; no data
+value is ever interpolated into the Cypher (injection-safe by
+construction). Reads only files, so it works on any saved run.
+
 ---
 
 ## 4. Outputs & what is stored
@@ -525,8 +555,8 @@ consecutive travel times via Distance Matrix (`real`) or Haversine at
 | Table | Producer / idempotency | What each row stores |
 | --- | --- | --- |
 | `stops` | ingest / per-feed replace | one normalized stop: `stop_uid` PK, `stop_num_id` (unique), `feed_id`, `stop_id`, `stop_name`, lat/lon, `location_type`, `parent_station`, `geom` POINT 4326 (GiST), `loaded_at` |
-| `route_stop_headways` | analyze-frequency / per-feed replace | headway stats per (feed, route, direction, stop, window): `trip_count`, mean/median/min/max headway seconds, `service_date` |
-| `route_headways` | analyze-frequency / per-feed replace | the rollup per (feed, route, direction, window): mean headway, `stop_count`, `stops_with_headway`, `trip_count` |
+| `route_stop_headways` | analyze-frequency / per-feed replace | headway stats per (feed, **service_date**, route, direction, stop, window) — PK includes the date, so range runs store one row per served day: `trip_count`, mean/median/min/max headway seconds |
+| `route_headways` | analyze-frequency / per-feed replace | the rollup per (feed, **service_date**, route, direction, window): mean headway, `stop_count`, `stops_with_headway`, `trip_count` |
 | `route_connections` | analyze-frequency / full reload | one undirected route pair: `route_a < route_b`, feed ids, `connection_type`, `shared_stop_count`, `min_stop_distance_m` |
 | `stop_equivalences` | analyze-frequency / full reload | one accepted cross-feed alias pair (§3.3b): `group_id`, `canonical_uid`, `stop_uid_a < stop_uid_b` PK, `distance_m`, `name_score`, `shared_routes`, `score` (empty after a `--no-dedupe` run) |
 | `interchanges` | detect-interchanges / full reload | one cluster: `cluster_id`, `is_multimodal`, `stop_count`, `physical_stop_count` (distinct stations after dedupe), `modes` int[], `mode_names` text[], `member_stop_uids` text[], `routes` text[], `feed_ids` text[], `centroid` + `hull` geometry |
@@ -551,7 +581,11 @@ file only, never the database).
 | `near_stations.csv` | analyze-frequency | one row per stop: `ID` (sequential node id, 1..N — the key of every relation column), `stop_uid`, `station`, `system` (serving system names), `stop_id`, lat/lon, `stop_line_ids` (own `ID-line` combos), `near_stations` `[(ID, station, linea, walk minutes), …]`, `same_line_stations` `[(ID, station, linea, dir, scheduled minutes), …]` — all times bare numbers in minutes. Cross-feed aliases of one physical station are excluded from each other's lists by default (§3.3b; `--no-dedupe` restores them) |
 | `stop_equivalences.csv` | analyze-frequency | the dedupe audit (§3.3b): one row per accepted alias pair — `group_id`, `canonical_uid`, both `stop_uid`s, `distance_m`, `name_score`, `shared_routes`, `score`. Only written when dedupe is on |
 | `near_stations_quality.csv` | analyze-frequency | provenance sidecar, always written: same rows and `ID` key as `near_stations.csv`. Per stop: `walk_source` (network / straight_line / mixed / unsnapped >200 m snap / none), `travel_source` (observed / estimated / mixed / none), `travel_n_obs` (worst-case trips behind the scheduled medians), `coord_confidence` (numeric score / needs_review / no_match from Phase 3 `stop_osm_matches`; `unavailable` in dry runs or before conflate-osm), `station_dedup` (dedupe `canonical_uid`, empty when unaliased). The main CSV's format never changes because of it |
-| `transit_analysis.gpkg` | analyze-frequency | 4 EPSG:4326 layers: **`stops`** (points + the CSV attributes), **`near_links`** (walking lines: both num ids, `distance_m`, `walk_min`), **`route_shapes`** (real route polylines: route_uid, linea, direction, shape_id), **`route_stop_links`** (directed consecutive-stop segments: route_uid, linea, direction, both stop_uids, `travel_min` scheduled minutes) |
+| `station_network.graphml` | analyze-frequency | the **routable** stop-level network (nx.MultiDiGraph): nodes = stops (`stop_uid` key, `near_id`/`name`/`feed`/`canonical_uid`/lat/lon), edges typed `in_vehicle` (directed, scheduled `travel_min`), `walk` (reciprocal, walking minutes) and `same_station` (reciprocal, 0 min, dedupe alias links) — `nx.shortest_path(..., weight="time_min")` works directly |
+| `station_network_nodes.csv` / `station_network_edges.csv` | analyze-frequency | the same network flattened for pandas/Excel: nodes with the attributes above; edges with `edge_type, stop_uid_a, stop_uid_b, time_min, linea, direction_id, route_uid, distance_m` (reciprocal arcs deduped to one row per pair) |
+| `route_stop_headways.csv` / `route_headways.csv` | analyze-frequency | the headway tables as files, written on every run incl. dry runs — same columns as the DB tables (with `service_date`; one row set per served day on range runs) |
+| `neo4j/` (package) | export-neo4j | offline Neo4j load package (§3.11): 8 data CSVs with admin-import headers (`stops`, `routes`, `stations`, `rel_in_vehicle`, `rel_walk`, `rel_same_station`, `rel_serves`, `rel_part_of`) + `load.cypher` (idempotent LOAD CSV) + `post_import.cypher` + `admin_import.txt` |
+| `transit_analysis.gpkg` | analyze-frequency | 5 EPSG:4326 layers: **`stops`** (points + the CSV attributes), **`near_links`** (walking lines: both num ids, `distance_m`, `walk_min`), **`route_shapes`** (real route polylines: route_uid, linea, direction, shape_id), **`route_stop_links`** (directed consecutive-stop segments: route_uid, linea, direction, both stop_uids, `travel_min` scheduled minutes), **`station_network`** (the routable network's edges as lines, typed + time-weighted) |
 | `route_connectivity.graphml` | analyze-frequency | the undirected route graph: nodes = route_uid (+ short/long name, route_type, feed), edges = connections (+ type, shared stops, min distance) — for Gephi/yEd/networkx |
 | `interchanges_report.json/.md` | detect-interchanges | cluster totals, mode combinations, per-feed notes, transfers.txt agreement (declared vs inferred, with examples) |
 | `conflation_report.json/.md` | conflate-osm | match rate, needs-review count, side distribution, low-confidence count, reverse-coverage summary (gap count by kind) |
