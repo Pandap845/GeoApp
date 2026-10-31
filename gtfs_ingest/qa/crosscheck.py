@@ -1,37 +1,13 @@
-"""Eligibility selection and verdict logic (all comparisons in memory).
+"""Which items Google QA checks, and the verdict rules (all comparisons in memory).
 
-Eligibility (targeted, never the full stops table):
+Checked: multimodal interchanges (are our modes right?) and needs-review stops
+(is there a transit place nearby?). The interchange mask includes
+transitStation, Google's most expensive SKU, hence the targeting and budget.
 
-- interchanges with ``is_multimodal = true`` - verify the mode combination;
-- stops with ``stop_osm_matches.needs_review = true`` - verify a transit
-  place exists nearby.
-
-Field masks (cost guard - documented in the README): the interchange check
-requests ``places.id, places.types, places.transitStation`` -
-``transitStation`` triggers Google's **Enterprise SKU** (highest tier),
-which is why the check is targeted and budgeted. The stop-existence check
-needs no mode data, so its mask is only ``places.id, places.types``
-(cheaper SKU).
-
-Verdict definitions:
-
-Interchange (compare Google's observed mode set with ours):
-
-- ``CONFIRMED`` - Google's modes cover every mode we inferred,
-- ``PARTIAL``   - some overlap, but not all our modes observed,
-- ``CONFLICT``  - Google reports transit modes with zero overlap,
-- ``NO_DATA``   - call failed, nothing returned, or places carried no
-  usable mode evidence.
-
-Stop existence:
-
-- ``STATION_FOUND`` - a transit-typed place within the radius,
-- ``NOT_FOUND``     - Google answered and nothing transit was there,
-- ``NO_DATA``       - the call failed (no answer to interpret).
-
-Google vehicleType values map onto our basic GTFS route_type codes so the
-comparison happens in OUR vocabulary; the Google-side set is discarded
-right after the verdict is computed.
+Interchange verdicts: CONFIRMED (Google covers all our modes), PARTIAL
+(some overlap), CONFLICT (no overlap), NO_DATA. Stop verdicts: STATION_FOUND,
+NOT_FOUND, NO_DATA. Google's vehicle types are mapped to GTFS route_type codes
+and discarded after the verdict.
 """
 
 from __future__ import annotations
@@ -45,7 +21,6 @@ from .google_client import PlaceResult
 
 log = logging.getLogger(__name__)
 
-#: Field masks (see module docstring for the SKU note).
 INTERCHANGE_FIELD_MASK: tuple[str, ...] = ("places.id", "places.types", "places.transitStation")
 STOP_FIELD_MASK: tuple[str, ...] = ("places.id", "places.types")
 
@@ -71,18 +46,13 @@ VEHICLE_TYPE_TO_MODE: dict[str, int] = {
     "CABLE_CAR": 5, "GONDOLA_LIFT": 6, "FUNICULAR": 7, "MONORAIL": 12,
 }
 
-#: Fallback - Google place type -> basic mode (generic ``transit_station``
-#: -> none).
+#: Fallback when no vehicleType is given: Google place type -> mode.
 PLACE_TYPE_TO_MODE: dict[str, int] = {
     "bus_station": 3, "bus_stop": 3,
     "train_station": 2, "subway_station": 1,
     "light_rail_station": 0, "ferry_terminal": 4,
 }
 
-
-# --------------------------------------------------------------------------
-# Eligibility (reads OUR tables only)
-# --------------------------------------------------------------------------
 
 def eligible_interchanges(engine: Engine) -> list[dict[str, Any]]:
     """Multimodal interchanges with their centroid and inferred modes."""
@@ -102,7 +72,7 @@ def eligible_interchanges(engine: Engine) -> list[dict[str, Any]]:
 
 
 def eligible_stops(engine: Engine) -> list[dict[str, Any]]:
-    """needs_review stops with their coordinates (never the full table)."""
+    """Stops flagged needs_review by the OSM match, with their coordinates."""
     sql = text(
         """
         SELECT m.stop_uid, s.stop_lat AS lat, s.stop_lon AS lon
@@ -118,17 +88,8 @@ def eligible_stops(engine: Engine) -> list[dict[str, Any]]:
     return rows
 
 
-# --------------------------------------------------------------------------
-# Mode extraction (in-memory, discarded after the verdict)
-# --------------------------------------------------------------------------
-
 def extract_vehicle_types(transit_station: Optional[dict[str, Any]]) -> set[str]:
-    """Collect ``vehicleType`` values from a transitStation payload.
-
-    The payload shape is treated as opaque: any nested dict/list is walked
-    and every value under a ``vehicleType`` key is collected. Tolerant by
-    design - schema drift degrades to NO_DATA, never to a crash.
-    """
+    """All vehicleType values anywhere in the payload (unknown shapes just yield nothing)."""
     found: set[str] = set()
 
     def walk(node: Any) -> None:
@@ -147,12 +108,7 @@ def extract_vehicle_types(transit_station: Optional[dict[str, Any]]) -> set[str]
 
 
 def google_mode_set(places: list[PlaceResult]) -> set[int]:
-    """Union of basic mode codes observed across the returned places.
-
-    Primary evidence: ``transitStation.vehicleType`` values. Fallback when
-    a place carries none: its typed place categories (bus_station -> bus,
-    ...). Generic ``transit_station`` types contribute nothing.
-    """
+    """Mode codes seen across the places: vehicleType first, place type as fallback."""
     modes: set[int] = set()
     for place in places:
         vehicle_types = extract_vehicle_types(place.transit_station)
@@ -168,24 +124,10 @@ def is_transit_place(place: PlaceResult) -> bool:
     return any(t in TRANSIT_PLACE_TYPES for t in place.types)
 
 
-# --------------------------------------------------------------------------
-# Verdicts (the ONLY thing that survives the comparison)
-# --------------------------------------------------------------------------
-
 def interchange_verdict(
     our_modes: set[int], places: Optional[list[PlaceResult]]
 ) -> tuple[str, Optional[bool], Optional[str]]:
-    """Compare our inferred mode set against Google's observed one.
-
-    Args:
-        our_modes: basic route_type codes from the ``interchanges`` row.
-        places: in-memory places near the centroid; ``None`` = call failed.
-
-    Returns:
-        ``(verdict, mode_agreement, place_id)`` - the only values that may
-        be persisted. ``place_id`` is the first transit-typed place's id
-        (opaque identifier; storing it is permitted).
-    """
+    """Return (verdict, mode_agreement, place_id); *places* is None when the call failed."""
     if not places:  # None (failure) or empty (nothing returned)
         return "NO_DATA", None, None
     google_modes = google_mode_set(places)
@@ -200,14 +142,7 @@ def interchange_verdict(
 
 
 def stop_verdict(places: Optional[list[PlaceResult]]) -> tuple[str, Optional[str]]:
-    """Does Google report a transit place within the search radius?
-
-    Args:
-        places: in-memory places within the radius; ``None`` = call failed.
-
-    Returns:
-        ``(verdict, place_id)``; ``place_id`` set only for STATION_FOUND.
-    """
+    """Return (verdict, place_id); place_id is set only for STATION_FOUND."""
     if places is None:
         return "NO_DATA", None
     transit = [p for p in places if is_transit_place(p)]

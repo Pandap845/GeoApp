@@ -1,25 +1,8 @@
-"""GeoPackage export of the analysis outputs (QGIS/GDAL-ready).
+"""Write transit_analysis.gpkg (EPSG:4326) for QGIS.
 
-Writes ``transit_analysis.gpkg`` with up to four layers, all EPSG:4326:
-
-- ``stops`` (POINT): every analyzed stop with ``stop_num_id``, ``stop_uid``,
-  feed/stop ids, name, ``location_type``, ``parent_station``, plus the
-  ``stop_line_ids`` and ``near_stations`` strings from the CSV export - the
-  layer is self-contained for map use.
-- ``near_links`` (LINESTRING): one line per near-stop pair (within the
-  proximity threshold), carrying both numeric ids, the geodesic distance,
-  and the estimated walking minutes. This is the WALKING overlay - it
-  connects any two stops that are close, regardless of route or direction.
-- ``route_shapes`` (LINESTRING): the real route paths from ``shapes.txt``
-  per (route, direction, shape) - follows the streets. Only written when
-  at least one analyzed feed ships shapes.
-- ``route_stop_links`` (LINESTRING): one straight segment per consecutive
-  stop pair of a route/direction (``stop_times`` order) - the route
-  topology on the stops, distinguishing "next stop of my route" from
-  "stop I can walk to".
-
-GeoPackage supports 64-bit integers, so the numeric ids survive intact
-(unlike e.g. shapefiles, which would truncate them).
+Layers: stops (points with the near_stations attributes), near_links
+(walkable stop pairs), route_shapes (real paths), route_stop_links (next stop
+on the same route) and station_network (routable edges).
 """
 
 from __future__ import annotations
@@ -39,9 +22,7 @@ log = logging.getLogger(__name__)
 
 GEOPACKAGE_NAME = "transit_analysis.gpkg"
 
-#: Attribute columns of the stops layer (geometry column excluded).
-#: ``ID`` / ``system`` mirror near_stations.csv (the relation strings
-#: reference ``ID``); ``stop_num_id`` remains the database join key.
+#: ID matches near_stations.csv; stop_num_id is the database join key.
 STOPS_LAYER_COLUMNS = [
     "ID", "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
     "system", "location_type", "parent_station", "stop_line_ids",
@@ -58,34 +39,11 @@ def write_geopackage(
     stop_links: Optional[pd.DataFrame] = None,
     station_edges: Optional[gpd.GeoDataFrame] = None,
 ) -> Path:
-    """Write the analysis GeoPackage.
-
-    Args:
-        stops: normalized stops of all feeds (EPSG:4326 geometry).
-        near: ``near_stations.build_near_stations`` output (provides the
-            ``station``/``stop_line_ids``/``near_stations`` attributes).
-        stop_pairs: proximity stop pairs (``stop_uid_a, stop_uid_b,
-            distance_m``) used to draw the ``near_links`` lines.
-        out_dir: report directory (created if needed).
-        route_shapes: ``route_geometry.route_shapes`` output (all feeds
-            concatenated); the layer is skipped when None/empty.
-        stop_links: ``route_geometry.route_stop_links`` output (all feeds
-            concatenated); the layer is skipped when None/empty.
-        station_edges: routable station-network edges
-            (``station_network.station_edges_layer``); skipped when
-            None/empty.
-
-    Returns:
-        The written path.
-
-    Raises:
-        OSError / pyogrio errors: if the file cannot be (re)written - a
-            run-level problem, consistent with the other report outputs.
-    """
+    """Write the GeoPackage, replacing any previous one. Optional layers are skipped when empty."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / GEOPACKAGE_NAME
     if path.exists():
-        path.unlink()  # rewrite atomically per run rather than appending layers
+        path.unlink()  # start fresh instead of appending to old layers
 
     stops_layer = _stops_layer(stops, near)
     stops_layer.to_file(path, layer="stops", driver="GPKG")
@@ -114,7 +72,7 @@ def write_geopackage(
 
 
 def _stops_layer(stops: gpd.GeoDataFrame, near: pd.DataFrame) -> gpd.GeoDataFrame:
-    """Stops as a self-contained point layer (near attributes merged in)."""
+    """Stop points with the near_stations columns merged in."""
     layer = stops[
         ["stop_num_id", "stop_uid", "feed_id", "stop_id",
          "location_type", "parent_station", "geometry"]
@@ -129,7 +87,7 @@ def _stops_layer(stops: gpd.GeoDataFrame, near: pd.DataFrame) -> gpd.GeoDataFram
     layer["stop_line_ids"] = layer["stop_line_ids"].fillna("")
     layer["near_stations"] = layer["near_stations"].fillna("[]")
     layer["same_line_stations"] = layer["same_line_stations"].fillna("[]")
-    # GPKG has no NaN for strings; parent_station NULLs are fine as None.
+    # GeoPackage strings can't be NaN; use None.
     layer["parent_station"] = layer["parent_station"].where(layer["parent_station"].notna(), None)
     gdf = gpd.GeoDataFrame(layer[STOPS_LAYER_COLUMNS + ["geometry"]],
                            geometry="geometry", crs=stops.crs or "EPSG:4326")
@@ -137,7 +95,7 @@ def _stops_layer(stops: gpd.GeoDataFrame, near: pd.DataFrame) -> gpd.GeoDataFram
 
 
 def _near_links_layer(stops: gpd.GeoDataFrame, stop_pairs: pd.DataFrame) -> gpd.GeoDataFrame:
-    """One LINESTRING per near pair, attributed with ids/distance/minutes."""
+    """One line per walkable stop pair, with distance and walking minutes."""
     columns = ["num_id_a", "num_id_b", "stop_uid_a", "stop_uid_b", "distance_m", "walk_min"]
     if stop_pairs.empty:
         return gpd.GeoDataFrame(pd.DataFrame(columns=columns),
@@ -161,12 +119,7 @@ def _near_links_layer(stops: gpd.GeoDataFrame, stop_pairs: pd.DataFrame) -> gpd.
 def _route_stop_links_layer(
     stops: gpd.GeoDataFrame, stop_links: Optional[pd.DataFrame]
 ) -> gpd.GeoDataFrame:
-    """One LINESTRING per consecutive stop pair of a route/direction.
-
-    Pairs whose stops were dropped during normalization (no geometry) are
-    skipped silently - the layer shows what can be drawn, the DB tables
-    remain the source of truth.
-    """
+    """One line per consecutive stop pair; pairs with a stop lacking geometry are skipped."""
     columns = ["route_uid", "feed_id", "linea", "direction_id",
                "stop_uid_a", "stop_uid_b", "travel_min"]
     if stop_links is None or stop_links.empty:

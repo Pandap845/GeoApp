@@ -1,42 +1,12 @@
-"""Command-line entry point with subcommands.
+"""Command line: python -m gtfs_ingest.cli <command> ...
 
-Usage::
+Commands: ingest, analyze-frequency, detect-interchanges, conflate-osm,
+google-qa, locate-stations, export-neo4j. Flags without a command run ingest.
+See README.md for every flag and docs/guide/ for the full run order.
 
-    # Phase 1 - ingest & validate
-    python -m gtfs_ingest.cli ingest --feeds ./data/feeds --report ./out [--dry-run]
-
-    # Phase 2 - headways + route connectivity
-    python -m gtfs_ingest.cli analyze-frequency --feeds ./data/feeds \\
-        --db-url $DATABASE_URL --service-date 2025-06-10 --report ./out \\
-        [--proximity-m 150] [--window am_peak=06:00-09:00 ...] [--dry-run]
-
-    # Phase 3A - multimodal interchange detection (+ transfers.txt check)
-    python -m gtfs_ingest.cli detect-interchanges --feeds ./data/feeds \\
-        --db-url $DATABASE_URL --eps 120 --report ./out [--dry-run]
-
-    # Phase 3B+C - OSM conflation + side-of-street (OSM already in PostGIS)
-    python -m gtfs_ingest.cli conflate-osm --db-url $DATABASE_URL \\
-        --match-threshold-m 50 --report ./out [--dry-run]
-
-    # Station locator - resolve a station list to coordinates + travel times
-    python -m gtfs_ingest.cli locate-stations --stations route.txt \\
-        --enable-google-api --transport-type SITREN --line 2 --report ./out [--dry-run]
-
-    # Stops-only CSV (id, name, latitude, longitude) merged alongside GTFS feeds
-    python -m gtfs_ingest.cli ingest --feeds ./data/feeds ./data/extra_stops.csv \\
-        --report ./out [--dry-run]
-
-Backward compatibility: invoking without a subcommand but with flags
-(``python -m gtfs_ingest.cli --feeds ...``) is treated as ``ingest``.
-
-Exit codes (both subcommands)::
-
-    0 - run completed (individual feeds may still have findings/failures;
-        consult the reports, or use ingest's --fail-on-error for a gate)
-    1 - fatal run-level problem (no feeds found, DB unreachable/missing
-        PostGIS, missing DB URL on a non-dry run, unwritable report dir,
-        invalid --service-date/--window values)
-    2 - ingest only: ERROR findings present and --fail-on-error was set
+Exit codes: 0 = finished (feeds may still have findings), 1 = run-level
+problem (no feeds, database, bad arguments), 2 = ingest found ERRORs with
+--fail-on-error.
 """
 
 from __future__ import annotations
@@ -97,7 +67,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_dedupe_args(parser: argparse.ArgumentParser) -> None:
-    """Cross-feed station deduplication flags (analyze + detect-interchanges)."""
+    """Station deduplication flags (analyze-frequency and detect-interchanges)."""
     parser.add_argument(
         "--dedupe",
         action=argparse.BooleanOptionalAction,
@@ -138,7 +108,7 @@ def _add_dedupe_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the argument parser (separate for testability)."""
+    """Build the argument parser."""
     parser = argparse.ArgumentParser(
         prog="gtfs-ingest",
         description="GTFS ingestion, validation, and service analysis on PostGIS.",
@@ -285,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
         "conflate-osm",
         help="Match stops to OSM transit nodes and compute side-of-street (Phase 3B+C).",
     )
-    # No --feeds: conflation reads the stops table and OSM layers from PostGIS.
+    # No --feeds: reads stops and OSM from PostGIS.
     conflate.add_argument(
         "--db-url",
         default=None,
@@ -397,7 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
         "export-neo4j",
         help="Build an offline Neo4j load package (CSVs + Cypher) from a report directory.",
     )
-    # No --feeds/--db-url: the exporter reshapes existing analyze-frequency outputs.
+    # No --feeds/--db-url: works on an existing report folder.
     neo.add_argument("--report", type=Path, default=None, metavar="DIR",
                      help="analyze-frequency report directory to read (default: ./out).")
     neo.add_argument("--out", type=Path, default=None, metavar="DIR",
@@ -408,16 +378,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-#: Hard cap on --service-date-range length (accidental year-long runs).
+#: Longest allowed --service-date-range, to avoid accidental year-long runs.
 MAX_RANGE_DAYS = 31
 
 
 def _parse_date_range(spec: str) -> tuple[date, date]:
-    """Parse ``START..END`` (ISO dates) with sanity limits.
-
-    Raises:
-        ValueError: malformed spec, END before START, or over the cap.
-    """
+    """Parse START..END (ISO dates); raises ValueError if invalid or too long."""
     start_s, sep, end_s = spec.partition("..")
     if not sep or not start_s or not end_s:
         raise ValueError(
@@ -435,11 +401,7 @@ def _parse_date_range(spec: str) -> tuple[date, date]:
 
 
 def _settings_from_args(args: argparse.Namespace) -> Settings:
-    """Resolve Settings from explicit CLI flags with env/.env fallbacks.
-
-    Raises:
-        ValueError: on a malformed --analysis-date.
-    """
+    """Settings from CLI flags, falling back to the environment and .env."""
     overrides: dict = {"feed_paths": list(args.feeds), "dry_run": args.dry_run}
     if args.db_url:
         overrides["database_url"] = args.db_url
@@ -453,7 +415,7 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
 
 
 def _run_ingest(args: argparse.Namespace) -> int:
-    """Execute the Phase 1 ingest flow; returns the process exit code."""
+    """Run Phase 1 and return the exit code."""
     from .pipeline_phase1 import run_pipeline
 
     try:
@@ -481,7 +443,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
 
 
 def _run_analyze(args: argparse.Namespace) -> int:
-    """Execute the Phase 2 analysis flow; returns the process exit code."""
+    """Run Phase 2 and return the exit code."""
     from .analysis import route_filter
     from .analysis.headways import DEFAULT_WINDOWS, TimeWindow
     from .analysis.pipeline_phase2 import AnalysisConfig, run_analysis
@@ -562,7 +524,7 @@ def _run_analyze(args: argparse.Namespace) -> int:
 
 
 def _run_detect_interchanges(args: argparse.Namespace) -> int:
-    """Execute the Phase 3A interchange flow; returns the process exit code."""
+    """Run interchange detection and return the exit code."""
     from .conflation.pipeline_phase3 import InterchangeConfig, run_interchanges
 
     settings = _settings_from_args(args)
@@ -590,7 +552,7 @@ def _run_detect_interchanges(args: argparse.Namespace) -> int:
 
 
 def _run_conflate_osm(args: argparse.Namespace) -> int:
-    """Execute the Phase 3B+C conflation flow; returns the process exit code."""
+    """Run OSM conflation and return the exit code."""
     from .conflation.pipeline_phase3 import ConflationConfig, run_conflation
 
     overrides: dict = {"feed_paths": [], "dry_run": args.dry_run}
@@ -627,7 +589,7 @@ def _run_conflate_osm(args: argparse.Namespace) -> int:
 
 
 def _run_google_qa(args: argparse.Namespace) -> int:
-    """Execute (or cleanly no-op) the Phase 4 QA flow; returns exit code."""
+    """Run (or skip) Google QA and return the exit code."""
     from .qa.pipeline_phase4 import QaConfig, run_google_qa
 
     overrides: dict = {"feed_paths": [], "dry_run": args.dry_run}
@@ -661,7 +623,7 @@ def _run_google_qa(args: argparse.Namespace) -> int:
 
 
 def _run_locate_stations(args: argparse.Namespace) -> int:
-    """Execute (or cleanly no-op) the station-locator flow; returns exit code."""
+    """Run (or skip) the station locator and return the exit code."""
     from .qa.station_locator import LocatorConfig, run_station_locator
 
     overrides: dict = {"feed_paths": [], "dry_run": args.dry_run}
@@ -700,7 +662,7 @@ def _run_locate_stations(args: argparse.Namespace) -> int:
 
 
 def _run_export_neo4j(args: argparse.Namespace) -> int:
-    """Build the offline Neo4j package; returns the process exit code."""
+    """Build the Neo4j package and return the exit code."""
     from .export.neo4j import run_export
 
     settings = Settings(feed_paths=[], dry_run=True,
@@ -720,17 +682,9 @@ def _run_export_neo4j(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """CLI entry point.
-
-    Args:
-        argv: argument vector override (for tests); defaults to sys.argv.
-
-    Returns:
-        Process exit code (see module docstring). Anticipated failures are
-        logged and mapped to exit codes, never raised.
-    """
+    """CLI entry point; returns the exit code. Expected failures are logged, not raised."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    # Backward compatibility: `--feeds ...` without a subcommand means ingest.
+    # Flags without a command mean ingest (backward compatibility).
     if argv and argv[0] not in _SUBCOMMANDS and argv[0].startswith("--") and argv[0] != "--help":
         argv = ["ingest", *argv]
     args = build_parser().parse_args(argv)

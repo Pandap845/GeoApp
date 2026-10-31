@@ -1,16 +1,7 @@
-"""Bulk DB loading: psycopg3 COPY with a chunked-executemany fallback.
+"""Fast bulk inserts: PostgreSQL COPY, falling back to chunked executemany.
 
-Every write path in the pipeline is a DELETE + INSERT of a pandas frame
-inside one transaction. For plain scalar tables, psycopg3's ``COPY ... FROM
-STDIN`` is an order of magnitude faster than chunked executemany. This
-module provides that fast path behind one call - and because it is a
-performance feature, ANY failure (adapter surprises, restricted proxies,
-exotic types) degrades to the proven executemany path with a logged
-warning; correctness is never at stake, since both run inside the caller's
-transaction.
-
-Tables with array columns or SQL-expression columns (``interchanges``)
-deliberately stay on their own executemany writers.
+COPY is only a speed-up, so any failure falls back to plain INSERTs inside the
+same transaction. Tables with array or SQL-expression columns use their own writers.
 """
 
 from __future__ import annotations
@@ -27,12 +18,7 @@ _CHUNK_SIZE = 1000
 
 
 def clean_records(df: pd.DataFrame) -> list[dict]:
-    """Frame rows as plain-Python dicts: NaN/NA -> None, numpy -> natives.
-
-    Both COPY and executemany need real ``None`` for SQL NULL, and COPY's
-    text protocol is safest with native Python scalars (no dependence on
-    psycopg's optional numpy adapters).
-    """
+    """Rows as plain Python dicts: NaN/NA become None, numpy scalars become natives."""
     cleaned = df.astype(object).where(pd.notna(df), None)
     records = cleaned.to_dict("records")
     for record in records:
@@ -43,20 +29,11 @@ def clean_records(df: pd.DataFrame) -> list[dict]:
 
 
 def copy_rows(conn: Connection, table: str, df: pd.DataFrame) -> int:
-    """COPY the frame into *table* (columns = frame columns). Raises on failure.
-
-    Args:
-        conn: SQLAlchemy connection inside an open transaction.
-        table: target table (trusted internal name, interpolated).
-        df: rows to write.
-
-    Returns:
-        Number of rows written.
-    """
+    """COPY the frame into *table* and return the row count. Raises on failure."""
     if df.empty:
         return 0
     cols = list(df.columns)
-    raw = conn.connection  # DBAPI fairy -> psycopg3 connection
+    raw = conn.connection  # underlying psycopg3 connection
     with raw.cursor() as cur:
         with cur.copy(
             f"COPY {table} ({', '.join(cols)}) FROM STDIN"  # noqa: S608 - internal names
@@ -67,25 +44,11 @@ def copy_rows(conn: Connection, table: str, df: pd.DataFrame) -> int:
 
 
 def bulk_insert(conn: Connection, table: str, df: pd.DataFrame) -> int:
-    """COPY the frame into *table*, falling back to chunked executemany.
-
-    Args:
-        conn: SQLAlchemy connection inside an open transaction.
-        table: target table name.
-        df: rows to write (empty frame is a no-op).
-
-    Returns:
-        Number of rows written.
-
-    Raises:
-        sqlalchemy.exc.SQLAlchemyError: only if the fallback also fails
-            (a genuine data/schema problem, not a COPY limitation).
-    """
+    """Insert the frame into *table* (COPY first, executemany fallback); return the row count."""
     if df.empty:
         return 0
     try:
-        # SAVEPOINT: a failed COPY must not poison the caller's transaction
-        # (PostgreSQL aborts it otherwise) nor leave partial rows behind.
+        # Savepoint, so a failed COPY doesn't abort the caller's transaction.
         with conn.begin_nested():
             return copy_rows(conn, table, df)
     except Exception as exc:  # noqa: BLE001 - COPY is an optimization, never a gate

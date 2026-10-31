@@ -1,35 +1,10 @@
-"""Route-to-route connectivity edges.
+"""Route-to-route connections, plus the stop maps and proximity pairs they come from.
 
-Two routes are *connected* when (checked in this precedence order, strongest
-wins as the edge's ``connection_type``):
-
-1. ``same_stop``            - they serve at least one identical stop
-                              (same ``stop_uid``, therefore same feed).
-2. ``same_parent_station``  - they serve stops sharing a ``parent_station``
-                              (a stop that *is* the parent counts as part of
-                              its own station); feed-scoped, like stop ids.
-3. ``same_station_dedup``   - they serve stops that cross-feed station
-                              deduplication (``analysis.dedupe``) merged into
-                              one canonical physical station. Inferred, so it
-                              is kept distinguishable from the GTFS-declared
-                              ``same_parent_station``.
-4. ``proximity``            - they serve stops within a configurable
-                              threshold (default 150 m). Distances are
-                              geodesic: computed in PostGIS on ``geography``
-                              (authoritative path) or locally in a projected
-                              metric CRS (UTM estimate) when no database is
-                              available (dry runs, tests). Proximity and
-                              same_station_dedup are the only connection
-                              types that can cross feeds - ids never match
-                              across feeds, but geography does.
-
-Routes are identified by ``route_uid = "{feed_id}:{route_id}"`` so edges are
-unambiguous across feeds. Edges are undirected and normalized to
-``route_a < route_b`` (string order); every pair appears at most once with:
-``connection_type`` (strongest), ``shared_stop_count`` (identical stops, 0
-if none) and ``min_stop_distance_m`` (0.0 for same-stop pairs, the smallest
-inter-stop distance found for proximity pairs, NULL for parent-only pairs
-whose stops are farther apart than the threshold).
+Two routes connect when they serve stops that are (strongest first):
+same_stop (identical stop), same_parent_station, same_station_dedup (one
+deduplicated station) or proximity (within the threshold). Only the last two
+can link different feeds. Each route pair appears once, route_a < route_b,
+labelled with its strongest connection.
 """
 
 from __future__ import annotations
@@ -50,17 +25,7 @@ EDGE_COLUMNS = PAIR_KEY + [
 
 
 def route_stop_map(feed: Any, feed_id: str) -> pd.DataFrame:
-    """Distinct (route, stop) service pairs of one filtered feed.
-
-    Args:
-        feed: typed partridge feed filtered to the analyzed service date -
-            connectivity thus reflects stops *actually served* that day.
-        feed_id: Phase 1 provenance id, used to build the ``*_uid`` keys.
-
-    Returns:
-        Columns ``feed_id, route_id, route_uid, stop_id, stop_uid``, one row
-        per distinct route/stop pairing. Empty inputs yield an empty frame.
-    """
+    """Distinct (route, stop) pairs served on the analyzed day."""
     columns = ["feed_id", "route_id", "route_uid", "stop_id", "stop_uid"]
     stop_times, trips = feed.stop_times, feed.trips
     if stop_times.empty or trips.empty:
@@ -78,20 +43,7 @@ def route_stop_map(feed: Any, feed_id: str) -> pd.DataFrame:
 
 
 def station_map(stops: pd.DataFrame) -> pd.DataFrame:
-    """Map stops to a station key derived from ``parent_station``.
-
-    A child stop maps to its parent's ``stop_uid``; a stop that appears as
-    someone's parent maps to itself (so routes serving the station stop
-    directly connect with routes serving its platforms).
-
-    Args:
-        stops: normalized stops of one or more feeds (Phase 1 normalizer
-            output: has ``stop_uid``, ``feed_id``, ``parent_station``).
-
-    Returns:
-        Columns ``stop_uid, station_uid`` - only stops belonging to some
-        station are included.
-    """
+    """Map each child stop, and each parent itself, to its station's stop_uid."""
     columns = ["stop_uid", "station_uid"]
     if stops.empty:
         return pd.DataFrame(columns=columns)
@@ -112,24 +64,7 @@ def station_map(stops: pd.DataFrame) -> pd.DataFrame:
 def proximity_pairs_postgis(
     engine: Engine, feed_ids: list[str], threshold_m: float
 ) -> pd.DataFrame:
-    """Stop pairs within *threshold_m* meters, computed in PostGIS.
-
-    Uses ``geography`` casts so distances are geodesic meters regardless of
-    latitude, against the Phase 1 ``stops`` table (the pipeline refreshes it
-    for the analyzed feeds before calling this).
-
-    Args:
-        engine: Phase 1 database engine.
-        feed_ids: restrict candidates to these feeds' stops.
-        threshold_m: maximum separation in meters.
-
-    Returns:
-        Columns ``stop_uid_a, stop_uid_b, distance_m`` with
-        ``stop_uid_a < stop_uid_b`` (each unordered pair once).
-
-    Raises:
-        sqlalchemy.exc.SQLAlchemyError: on database failure.
-    """
+    """Stop pairs (a < b) within *threshold_m* geodesic meters, computed in PostGIS."""
     sql = text(
         """
         SELECT a.stop_uid AS stop_uid_a,
@@ -148,20 +83,7 @@ def proximity_pairs_postgis(
 
 
 def proximity_pairs_local(stops: gpd.GeoDataFrame, threshold_m: float) -> pd.DataFrame:
-    """Stop pairs within *threshold_m* meters, computed locally (no DB).
-
-    Fallback for dry runs and tests: reprojects the stops to an estimated
-    UTM zone and measures planar distances there. Accurate to well under a
-    meter at these scales for data within one region; the PostGIS geography
-    path is authoritative for production loads.
-
-    Args:
-        stops: Phase 1 normalized stops (EPSG:4326 GeoDataFrame).
-        threshold_m: maximum separation in meters.
-
-    Returns:
-        Same shape as :func:`proximity_pairs_postgis`.
-    """
+    """Same as proximity_pairs_postgis, computed locally in a UTM projection (no database)."""
     columns = ["stop_uid_a", "stop_uid_b", "distance_m"]
     if len(stops) < 2:
         return pd.DataFrame(columns=columns)
@@ -184,7 +106,7 @@ def proximity_pairs_local(stops: gpd.GeoDataFrame, threshold_m: float) -> pd.Dat
 
 
 def _normalize_pairs(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop self-pairs and order each pair as route_a < route_b."""
+    """Drop self-pairs and order each pair so route_a < route_b."""
     df = df[df["route_a"] != df["route_b"]].copy()
     swap = df["route_a"] > df["route_b"]
     df.loc[swap, ["route_a", "route_b"]] = df.loc[swap, ["route_b", "route_a"]].to_numpy()
@@ -192,7 +114,7 @@ def _normalize_pairs(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _same_stop_pairs(route_stops: pd.DataFrame) -> pd.DataFrame:
-    """Pairs serving an identical stop, with the count of shared stops."""
+    """Route pairs serving the same stop, with how many stops they share."""
     joined = route_stops.merge(route_stops, on="stop_uid", suffixes=("_a", "_b"))
     pairs = _normalize_pairs(
         joined.rename(columns={"route_uid_a": "route_a", "route_uid_b": "route_b"})
@@ -205,7 +127,7 @@ def _same_stop_pairs(route_stops: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parent_station_pairs(route_stops: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
-    """Pairs serving stops of the same station (parent_station grouping)."""
+    """Route pairs serving stops of the same parent station."""
     with_station = route_stops.merge(stations, on="stop_uid")
     joined = with_station.merge(with_station, on="station_uid", suffixes=("_a", "_b"))
     pairs = _normalize_pairs(
@@ -215,7 +137,7 @@ def _parent_station_pairs(route_stops: pd.DataFrame, stations: pd.DataFrame) -> 
 
 
 def _dedup_station_pairs(route_stops: pd.DataFrame, canonical: pd.DataFrame) -> pd.DataFrame:
-    """Pairs serving stops merged into one canonical station by dedupe."""
+    """Route pairs serving stops of the same dedupe group."""
     if canonical.empty:
         return pd.DataFrame(columns=PAIR_KEY)
     with_canon = route_stops.merge(
@@ -229,7 +151,7 @@ def _dedup_station_pairs(route_stops: pd.DataFrame, canonical: pd.DataFrame) -> 
 
 
 def _proximity_pairs(route_stops: pd.DataFrame, stop_pairs: pd.DataFrame) -> pd.DataFrame:
-    """Pairs serving stops within threshold, with the minimum distance."""
+    """Route pairs serving nearby stops, with the smallest distance between them."""
     if stop_pairs.empty:
         return pd.DataFrame(columns=PAIR_KEY + ["min_stop_distance_m"])
     routes_at = route_stops[["stop_uid", "route_uid"]]
@@ -251,21 +173,7 @@ def build_edges(
     stop_pairs: Optional[pd.DataFrame] = None,
     canonical: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Combine all connection evidence into the final undirected edge list.
-
-    Args:
-        route_stops: concatenated :func:`route_stop_map` frames (all feeds).
-        stations: concatenated :func:`station_map` frames.
-        stop_pairs: proximity stop pairs from one of the
-            ``proximity_pairs_*`` functions (``None`` -> no proximity edges).
-        canonical: cross-feed dedupe membership map
-            (``dedupe.canonical_map``); ``None``/empty -> no dedup edges.
-
-    Returns:
-        One row per connected route pair with :data:`EDGE_COLUMNS`;
-        ``connection_type`` follows the precedence documented in the module
-        docstring. Empty inputs yield an empty frame.
-    """
+    """One row per connected route pair, labelled with its strongest connection type."""
     if route_stops.empty:
         return pd.DataFrame(columns=EDGE_COLUMNS)
 

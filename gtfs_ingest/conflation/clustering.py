@@ -1,27 +1,10 @@
-"""Interchange detection: DBSCAN clustering merged with parent_station.
+"""Interchange detection: DBSCAN on stops, merged with parent stations and dedupe groups.
 
-Method (documented in the README):
-
-1. Stops are projected to a metric CRS (configurable; default: UTM zone
-   estimated from the data extent) and clustered with DBSCAN
-   (``eps`` = 120 m, ``min_samples`` = 2 by default - both configurable).
-2. DBSCAN clusters are then **merged with parent_station groupings** via
-   connected components: stops sharing a station (and the station stop
-   itself) always land in the same cluster, so a declared station is never
-   split - even when its platforms are farther apart than ``eps``. When
-   cross-feed dedupe is on (``analysis.dedupe``), its canonical groups are
-   a third merge source: aliases of one physical station are never split.
-3. Components with >= 2 stops become interchange clusters; the rest are
-   noise. Cluster ids are deterministic (assigned in order of each
-   cluster's lexicographically smallest stop_uid).
-4. Each cluster collects the GTFS ``route_type``s of the routes serving its
-   member stops. Extended route types (Google extension, e.g. 700-series
-   bus) are normalized to the basic 0-12 codes first. A cluster with more
-   than one distinct mode is a **multimodal interchange**; single-mode
-   clusters are kept and labeled ``is_multimodal = false``. Each cluster
-   also reports ``physical_stop_count`` - members counted after dedupe -
-   so a cluster made of one station's aliases is visible
-   (``physical_stop_count = 1``).
+DBSCAN runs in a metric CRS (default eps 120 m, min_samples 2). Stops of the
+same parent station or dedupe group are always kept together. Groups of 2+
+stops become clusters, numbered by their smallest stop_uid. A cluster served
+by more than one mode is multimodal; physical_stop_count counts members after
+dedupe.
 """
 
 from __future__ import annotations
@@ -69,9 +52,6 @@ _EXTENDED_RANGES: tuple[tuple[int, int, int], ...] = (
     (1400, 1499, 7),  # funicular
 )
 
-#: Columns of the interchange cluster frame. ``physical_stop_count`` is the
-#: number of distinct physical stations among the members after cross-feed
-#: dedupe (equals ``stop_count`` when dedupe is off or found no aliases).
 CLUSTER_COLUMNS = [
     "cluster_id", "is_multimodal", "stop_count", "physical_stop_count",
     "modes", "mode_names",
@@ -80,15 +60,7 @@ CLUSTER_COLUMNS = [
 
 
 def normalize_route_type(route_type: object) -> Optional[int]:
-    """Map a GTFS route_type (basic or extended) to a basic 0-12 code.
-
-    Args:
-        route_type: raw value (int, numeric string, or garbage).
-
-    Returns:
-        The basic code, or ``None`` when the value is missing/unparseable
-        (never raises - broken feeds are a fact of life here).
-    """
+    """Basic 0-12 code for a basic or extended route_type; None if unparseable."""
     try:
         code = int(float(route_type))  # tolerate "3", 3, "3.0"
     except (TypeError, ValueError):
@@ -102,7 +74,7 @@ def normalize_route_type(route_type: object) -> Optional[int]:
 
 
 def mode_name(basic_code: int) -> str:
-    """Human label for a basic route_type code (``mode_<n>`` if unknown)."""
+    """Mode name for a basic route_type code ("mode_<n>" if unknown)."""
     return MODE_NAMES.get(basic_code, f"mode_{basic_code}")
 
 
@@ -113,28 +85,7 @@ def cluster_stops(
     metric_crs: Optional[str] = None,
     canonical: Optional[pd.DataFrame] = None,
 ) -> np.ndarray:
-    """Assign a cluster label to every stop (``-1`` = not in any cluster).
-
-    DBSCAN in a metric CRS, then merged with parent_station groups and -
-    when *canonical* is given - with cross-feed dedupe groups (see module
-    docstring). Deterministic for identical input.
-
-    Args:
-        stops: normalized stops (all feeds; EPSG:4326 geometry, needs
-            ``stop_uid``, ``feed_id``, ``parent_station``).
-        eps_m: DBSCAN neighborhood radius in meters.
-        min_samples: DBSCAN core-point threshold.
-        metric_crs: metric CRS override (e.g. ``"EPSG:32618"``); default
-            estimates a UTM zone from the stop extent.
-        canonical: cross-feed dedupe membership map
-            (``analysis.dedupe.canonical_map`` output: ``stop_uid``,
-            ``canonical_uid``); aliases of one physical station are never
-            split across clusters. ``None``/empty -> no dedup merging.
-
-    Returns:
-        Integer labels aligned with ``stops`` rows; clusters are numbered
-        from 0, non-clustered stops get ``-1``.
-    """
+    """Cluster label per stop row (-1 = no cluster); deterministic for the same input."""
     n = len(stops)
     if n == 0:
         return np.array([], dtype=int)
@@ -145,19 +96,17 @@ def cluster_stops(
 
     graph = nx.Graph()
     graph.add_nodes_from(range(n))
-    # Chain members of each DBSCAN cluster.
+    # Join stops that share a DBSCAN cluster, a parent station or a dedupe group.
     order = np.argsort(dbscan_labels, kind="stable")
     for prev, cur in zip(order, order[1:]):
         if dbscan_labels[prev] == dbscan_labels[cur] and dbscan_labels[cur] != -1:
             graph.add_edge(int(prev), int(cur))
-    # Chain members of each parent_station group (station never split).
     pos_by_uid = {uid: i for i, uid in enumerate(stops["stop_uid"])}
     stations = station_map(pd.DataFrame(stops.drop(columns="geometry")))
     for _, group in stations.groupby("station_uid"):
         members = [pos_by_uid[u] for u in group["stop_uid"] if u in pos_by_uid]
         for prev, cur in zip(members, members[1:]):
             graph.add_edge(prev, cur)
-    # Chain members of each cross-feed dedupe group (aliases never split).
     if canonical is not None and not canonical.empty:
         for _, group in canonical.groupby("canonical_uid"):
             members = [pos_by_uid[u] for u in sorted(group["stop_uid"]) if u in pos_by_uid]
@@ -184,26 +133,7 @@ def build_interchanges(
     routes: pd.DataFrame,
     canonical: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Aggregate clustered stops into interchange records.
-
-    Args:
-        stops: the frame passed to :func:`cluster_stops` (EPSG:4326).
-        labels: its output.
-        route_stops: (route_uid, stop_uid) service pairs, all feeds
-            (``analysis.connectivity.route_stop_map`` output).
-        routes: route metadata with ``route_uid`` and ``route_type``.
-        canonical: cross-feed dedupe membership map; used only to compute
-            ``physical_stop_count`` (``None``/empty -> equals stop_count).
-
-    Returns:
-        One row per cluster with :data:`CLUSTER_COLUMNS`: mode codes/names
-        (sorted, deduplicated after normalization), ``is_multimodal``
-        (> 1 distinct mode), member/route/feed lists, and centroid + convex
-        hull WKT in EPSG:4326. Clusters whose stops are served by no known
-        route get empty mode lists and ``is_multimodal = false``.
-        ``is_multimodal`` is deliberately untouched by dedupe: physical
-        counts expose phantom clusters, they don't reclassify modes.
-    """
+    """One row per cluster: modes, members, routes, feeds, centroid and hull (WKT)."""
     route_types: dict[str, Optional[int]] = {}
     if not routes.empty and "route_type" in routes.columns:
         route_types = {

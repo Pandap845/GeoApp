@@ -23,10 +23,7 @@ def write(tmp_path: Path, name: str, text: str, encoding: str = "utf-8") -> Path
     return path
 
 
-# --------------------------------------------------------------------------
 # Header resolution
-# --------------------------------------------------------------------------
-
 def test_canonical_header_resolves(tmp_path: Path) -> None:
     frame, findings = read_stops_csv(write(tmp_path, "stops.csv", CANONICAL_CSV))
 
@@ -104,10 +101,7 @@ def test_stop_name_is_optional(tmp_path: Path) -> None:
     assert "unresolved_csv_header" not in codes(findings)
 
 
-# --------------------------------------------------------------------------
 # Failure reporting
-# --------------------------------------------------------------------------
-
 def test_unresolved_header_returns_finding_not_exception(tmp_path: Path) -> None:
     text = "ID_PARADA,DESC,X,Y\n1,Centro,20.67,-103.34\n"
     frame, findings = read_stops_csv(write(tmp_path, "stops.csv", text))
@@ -144,10 +138,7 @@ def test_headerless_file_is_unresolved(tmp_path: Path) -> None:
     assert "unresolved_csv_header" in codes(findings)
 
 
-# --------------------------------------------------------------------------
 # Encoding and delimiters
-# --------------------------------------------------------------------------
-
 def test_utf8_bom_header_resolves(tmp_path: Path) -> None:
     """The Excel-on-Windows default, which partridge cannot read."""
     path = tmp_path / "stops.csv"
@@ -198,10 +189,7 @@ def test_decimal_comma_warns_with_actionable_message(tmp_path: Path) -> None:
     assert "decimal point" in warning.message
 
 
-# --------------------------------------------------------------------------
 # Contract with the normalizer
-# --------------------------------------------------------------------------
-
 def test_values_are_strings(tmp_path: Path) -> None:
     """All-string dtypes are what let normalize_stops run unchanged."""
     frame, _ = read_stops_csv(write(tmp_path, "stops.csv", CANONICAL_CSV))

@@ -1,10 +1,4 @@
-"""DDL and idempotent loading for the Phase 3 tables.
-
-All three tables hold derived artifacts recomputed from the full analyzed
-set each run (clusters get run-scoped ids; matches depend on the current
-OSM import), so idempotency is **full delete-and-reload per run** inside a
-transaction - the same rationale as Phase 2's ``route_connections``.
-"""
+"""Phase 3 tables: schema and loaders. Every table is fully reloaded each run."""
 
 from __future__ import annotations
 
@@ -34,8 +28,7 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         loaded_at           timestamptz NOT NULL DEFAULT now()
     )
     """,
-    # Upgrade path for databases created before cross-feed dedupe existed
-    # (CREATE TABLE IF NOT EXISTS alone would silently miss the new column).
+    # Adds the column to databases created before it existed.
     "ALTER TABLE interchanges ADD COLUMN IF NOT EXISTS physical_stop_count integer NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS ix_interchanges_centroid ON interchanges USING GIST (centroid)",
     """
@@ -73,12 +66,7 @@ _CHUNK_SIZE = 1000
 
 
 def ensure_conflation_schema(engine: Engine) -> None:
-    """Create the Phase 3 tables and indexes (idempotent).
-
-    Raises:
-        sqlalchemy.exc.SQLAlchemyError: on connection/DDL failure
-            (run-level problem).
-    """
+    """Create the Phase 3 tables and indexes if missing."""
     with engine.begin() as conn:
         for stmt in _DDL_STATEMENTS:
             conn.execute(text(stmt))
@@ -86,7 +74,7 @@ def ensure_conflation_schema(engine: Engine) -> None:
 
 
 def _to_records(df: pd.DataFrame) -> list[dict]:
-    """NaN/NA -> None so psycopg writes SQL NULLs (lists pass through)."""
+    """Rows as dicts with NaN turned into None; list values pass through."""
     cleaned = df.copy()
     for col in cleaned.columns:
         cleaned[col] = [None if not isinstance(v, (list, tuple)) and pd.isna(v) else v
@@ -95,15 +83,7 @@ def _to_records(df: pd.DataFrame) -> list[dict]:
 
 
 def load_interchanges(engine: Engine, clusters: pd.DataFrame) -> int:
-    """Reload the ``interchanges`` table from the cluster frame.
-
-    Args:
-        engine: database engine (schema must exist).
-        clusters: ``clustering.build_interchanges`` output.
-
-    Returns:
-        Rows inserted.
-    """
+    """Replace the interchanges table with *clusters*; return the row count."""
     sql = text(
         """
         INSERT INTO interchanges (
@@ -128,7 +108,7 @@ def load_interchanges(engine: Engine, clusters: pd.DataFrame) -> int:
 
 
 def _reload_plain(engine: Engine, table: str, df: pd.DataFrame) -> int:
-    """DELETE + bulk INSERT a plain-columned frame into a fixed-name table."""
+    """Delete every row of *table*, then bulk-insert *df*."""
     with engine.begin() as conn:
         conn.execute(text(f"DELETE FROM {table}"))
         bulk_insert(conn, table, df)

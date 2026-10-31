@@ -45,12 +45,12 @@ import pandas as pd
 import pyogrio
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT_DIR = ROOT / "out"
+OUT_DIR = ROOT / "outputs" / "out_mibici_v3"
 
 NEAR_STATIONS = OUT_DIR / "near_stations.csv"
 REL_SERVES = OUT_DIR / "neo4j" / "rel_serves.csv"
 ROUTES = OUT_DIR / "neo4j" / "routes.csv"
-SOURCE_GPKG = OUT_DIR / "transit_gdl_2.0.gpkg"
+SOURCE_GPKG = OUT_DIR / "transit_analysis.gpkg"
 TARGET_GPKG = OUT_DIR / "transit_branches.gpkg"
 
 #: Source CRS. Not declared in the CSV, but the extent is decimal degrees over

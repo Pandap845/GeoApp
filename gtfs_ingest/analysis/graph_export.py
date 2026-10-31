@@ -1,8 +1,6 @@
-"""networkx graph construction, metrics, and GraphML export.
+"""Route-connectivity graph: build it, measure it, write it as GraphML.
 
-Nodes are ``route_uid`` strings carrying feed/route metadata; edges carry
-the connectivity attributes. Isolated routes (analyzed but connected to
-nothing) are explicit nodes so they show up in the metrics and the export.
+Nodes are route_uids; every analyzed route is a node, so unconnected routes show up.
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 def _clean_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
-    """Drop None/NaN/NA values - GraphML cannot serialize them."""
+    """Drop None/NaN values, which GraphML cannot store."""
     return {
         key: value
         for key, value in attrs.items()
@@ -27,18 +25,7 @@ def _clean_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_graph(routes: pd.DataFrame, edges: pd.DataFrame) -> nx.Graph:
-    """Build the undirected route-connectivity graph.
-
-    Args:
-        routes: one row per analyzed route with ``route_uid, feed_id,
-            route_id`` and optional ``route_short_name, route_long_name,
-            route_type`` metadata; ALL analyzed routes become nodes, so
-            unconnected ones appear as isolates.
-        edges: edge list from ``connectivity.build_edges``.
-
-    Returns:
-        ``networkx.Graph`` with attribute-carrying nodes and edges.
-    """
+    """Undirected graph: one node per analyzed route, one edge per connected route pair."""
     graph = nx.Graph()
     for row in routes.to_dict("records"):
         uid = row.pop("route_uid")
@@ -50,16 +37,7 @@ def build_graph(routes: pd.DataFrame, edges: pd.DataFrame) -> nx.Graph:
 
 
 def graph_metrics(graph: nx.Graph) -> dict[str, Any]:
-    """Basic connectivity metrics for the report.
-
-    Args:
-        graph: graph from :func:`build_graph`.
-
-    Returns:
-        Dict with ``n_routes``, ``n_edges``, ``n_components``,
-        ``component_sizes`` (descending), ``isolated_routes`` (degree 0,
-        sorted) and ``degree`` (route_uid -> connection count).
-    """
+    """Counts, component sizes, isolated routes and per-route degree for the report."""
     components = [len(c) for c in nx.connected_components(graph)]
     return {
         "n_routes": graph.number_of_nodes(),
@@ -72,18 +50,7 @@ def graph_metrics(graph: nx.Graph) -> dict[str, Any]:
 
 
 def write_graphml(graph: nx.Graph, path: Path) -> Path:
-    """Write the graph as GraphML (attributes already sanitized).
-
-    Args:
-        graph: graph from :func:`build_graph`.
-        path: target file path; parent directories are created.
-
-    Returns:
-        The written path.
-
-    Raises:
-        OSError: if the file cannot be written (run-level problem).
-    """
+    """Write the graph as GraphML, creating parent folders."""
     path.parent.mkdir(parents=True, exist_ok=True)
     nx.write_graphml(graph, path)
     log.info("GraphML written: %s (%d nodes, %d edges)", path, graph.number_of_nodes(), graph.number_of_edges())

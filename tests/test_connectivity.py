@@ -356,10 +356,7 @@ def test_analyze_cli_rejects_bad_service_date(tmp_path: Path) -> None:
     assert exit_code == 1
 
 
-# --------------------------------------------------------------------------
 # Date coherence, --common-date, --service-date-range, analysis clock
-# --------------------------------------------------------------------------
-
 def test_parse_date_range_validation() -> None:
     import pytest
 
@@ -481,10 +478,7 @@ def test_new_csv_and_station_network_outputs(tmp_path: Path) -> None:
     assert len(gpd.read_file(out / "transit_analysis.gpkg", layer="station_network")) == len(edges)
 
 
-# --------------------------------------------------------------------------
 # Stops-only CSV sources in Phase 2
-# --------------------------------------------------------------------------
-
 def _run_analysis(tmp_path: Path, out_name: str, *extra: str) -> dict:
     """Run analyze-frequency over the feeds dir plus *extra* args; return the JSON."""
     from gtfs_ingest import cli
@@ -552,9 +546,7 @@ def test_analyze_frequency_with_stops_only_csv(tmp_path: Path) -> None:
     assert q["travel_source"] == "none"
     assert int(q["travel_n_obs"]) == 0
 
-    # Present in the GeoPackage and as a station-network node (the Neo4j
-    # input), but never a dedupe alias and never on a walk arc - which would
-    # make it a waypoint between transit stops.
+    # In the GeoPackage and the station network, but never deduplicated or walk-linked.
     layer = gpd.read_file(out / "transit_analysis.gpkg", layer="stops")
     assert "extra_stops:C1" in set(layer["stop_uid"])
     nodes = pd.read_csv(out / "station_network_nodes.csv")
@@ -605,14 +597,7 @@ def test_mode_filter_does_not_drop_stops_only_feed(tmp_path: Path) -> None:
 def test_stops_only_feed_is_included_in_the_postgis_proximity_query(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Guards the one defect a dry run cannot catch.
-
-    On a live run the proximity pairs come from PostGIS, filtered by an
-    explicit feed-id list; dry runs take the local branch and ignore that list
-    entirely. If the list were keyed on "analyzed" alone, a stops-only feed's
-    rows would sit in the database matching nothing, and every one of its
-    stops would silently come out with no neighbours.
-    """
+    """The PostGIS proximity query must include stops-only feeds (dry runs can't catch this)."""
     from gtfs_ingest import db
     from gtfs_ingest.analysis import pipeline_phase2, storage
 
@@ -647,13 +632,8 @@ def test_stops_only_feed_is_included_in_the_postgis_proximity_query(
     assert "metro" in seen["feed_ids"]
 
 
-# --------------------------------------------------------------------------
 # Within-feed dedupe: one line published under two id schemes
-# --------------------------------------------------------------------------
-
-#: A feed that lists route R1's stops twice - once as SITEUR_*, once as ST_* -
-#: the shape observed in real Guadalajara feeds, where it splits the rendered
-#: route into two disjoint chains.
+#: Route R1's stop listed twice (SITEUR_* and ST_*), as in the real mdb feed.
 DUAL_SCHEME_FEED = feed_files(
     replace={
         "stops.txt": (

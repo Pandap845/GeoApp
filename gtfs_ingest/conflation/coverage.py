@@ -1,28 +1,8 @@
-"""Reverse OSM coverage check: transit nodes OSM knows but GTFS doesn't.
+"""Reverse coverage check: OSM transit nodes with no GTFS stop nearby.
 
-The regular conflation (Part B) is one-directional - every GTFS stop looks
-for its OSM counterpart. This module asks the opposite question: **which
-OSM transit nodes inside the service area have no GTFS stop anywhere near
-them?** Those are either coverage gaps in the feeds (systems/routes not
-shipped) or OSM noise - a reviewable list instead of a visual surprise on
-the basemap.
-
-Method (all in PostGIS, no network):
-
-1. Service area = convex hull of all GTFS stops, buffered by
-   ``coverage_buffer_m`` (geodesic meters) - OSM nodes outside it are out
-   of scope, not gaps.
-2. Candidate nodes = same tag filter as the forward match
-   (``highway=bus_stop``, ``public_transport=platform|stop_position|
-   station``, ``railway=station|halt|tram_stop``).
-3. A candidate is a **gap** when no GTFS stop lies within
-   ``coverage_radius_m`` (geodesic). The nearest stop distance is reported
-   for context.
-
-Output: an ``osm_only_stops`` layer (EPSG:4326 points) exported to its own
-GeoPackage next to the reports. OSM data is ODbL - exporting ids/names/
-positions for review is fine (unlike Google content, which never leaves
-memory).
+Service area = convex hull of all stops plus a buffer. An OSM transit node
+inside it with no stop within the radius is a gap: either a missing system in
+the feeds or OSM noise. Results go to osm_coverage_gaps.gpkg for review.
 """
 
 from __future__ import annotations
@@ -50,19 +30,7 @@ def osm_only_stops(
     coverage_radius_m: float,
     coverage_buffer_m: float,
 ) -> gpd.GeoDataFrame:
-    """OSM transit nodes in the service area with no GTFS stop nearby.
-
-    Args:
-        engine: database engine (stops + OSM layers in the same PostGIS).
-        schema: validated OSM layer facts.
-        coverage_radius_m: max stop distance for a node to count as covered.
-        coverage_buffer_m: buffer around the stops' convex hull (service
-            area).
-
-    Returns:
-        GeoDataFrame (EPSG:4326 points) with :data:`GAP_COLUMNS`; empty
-        when the stops table is empty or OSM has no uncovered node.
-    """
+    """OSM transit nodes in the service area farther than *coverage_radius_m* from any stop."""
     g = schema.geom_column
     name_expr = "p.name" if schema.point_has_name else "NULL"
     sql = text(
@@ -109,7 +77,7 @@ def osm_only_stops(
 
 
 def rows_to_frame(rows: list) -> gpd.GeoDataFrame:
-    """Query rows -> point GeoDataFrame (separate for testability)."""
+    """Turn query rows into a point GeoDataFrame."""
     frame = pd.DataFrame(rows, columns=GAP_COLUMNS)
     if frame.empty:
         return gpd.GeoDataFrame(frame, geometry=gpd.GeoSeries([], crs="EPSG:4326"))

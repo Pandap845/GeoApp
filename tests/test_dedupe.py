@@ -17,10 +17,7 @@ LAT_20M = 0.00018
 LAT_45M = 0.0004
 
 
-# --------------------------------------------------------------------------
 # Name normalization / similarity
-# --------------------------------------------------------------------------
-
 def test_normalize_name_accents_case_punctuation_tokens() -> None:
     assert dedupe.normalize_name("Estación Juárez") == "estacion juarez"
     assert dedupe.normalize_name("JUAREZ, Estacion.") == "estacion juarez"  # token sort
@@ -38,10 +35,7 @@ def test_name_similarity_bounds() -> None:
     assert dedupe.name_similarity(None, None) == 0.0
 
 
-# --------------------------------------------------------------------------
 # find_equivalences: the accept rule
-# --------------------------------------------------------------------------
-
 def test_cross_feed_same_name_within_distance_is_accepted() -> None:
     stops = make_stops(
         ("fa", "S1", "Estación Juárez", 40.0, -75.0),
@@ -105,10 +99,7 @@ def test_empty_stop_name_matches_only_via_shared_route() -> None:
     assert dedupe.find_equivalences(stops, rs(), routes_meta()).empty
 
 
-# --------------------------------------------------------------------------
 # canonical_map: grouping and determinism
-# --------------------------------------------------------------------------
-
 def _chain_stops(order: list[int]):
     """A -~10m- B -~10m- C chain (A-C beyond radius), rows in *order*."""
     rows = [
@@ -157,10 +148,7 @@ def test_attach_groups_payload_columns() -> None:
     assert 0.0 <= row["score"] <= 1.0
 
 
-# --------------------------------------------------------------------------
 # filter_stop_pairs
-# --------------------------------------------------------------------------
-
 def test_filter_stop_pairs_drops_alias_pairs_only() -> None:
     stops = make_stops(
         ("fa", "S1", "Main St", 40.0, -75.0),
@@ -198,10 +186,7 @@ def test_write_equivalences(tmp_path: Path) -> None:
     assert len(reread) == 1
 
 
-# --------------------------------------------------------------------------
 # Within-feed dedupe (one station published under two id schemes)
-# --------------------------------------------------------------------------
-
 def test_within_feed_is_off_by_default() -> None:
     """The library default reproduces the historical cross-feed-only result."""
     stops = make_stops(

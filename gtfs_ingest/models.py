@@ -1,9 +1,7 @@
-"""Typed models and GTFS schema constants shared across the pipeline.
+"""Shared models and GTFS constants.
 
-Everything that crosses a module boundary (findings, feed metadata, report
-payloads) is a pydantic model so it can be validated once and serialized
-directly into the JSON report. The one exception is :class:`LoadedFeed`,
-which wraps a live partridge feed object and is therefore a plain dataclass.
+Anything that crosses modules or goes into a report is a pydantic model.
+LoadedFeed is a dataclass because it wraps a live partridge object.
 """
 
 from __future__ import annotations
@@ -19,22 +17,14 @@ from pydantic import BaseModel, Field
 
 
 def numeric_stop_id(stop_uid: str) -> int:
-    """Deterministic numeric ID for a stop, derived from its ``stop_uid``.
+    """Stable numeric id for a stop: the first 48 bits of sha256(stop_uid).
 
-    First 48 bits of ``sha256(stop_uid)`` as an unsigned integer: numeric,
-    globally unique in practice (collision odds for even 100k stops are
-    ~1e-5), stable across runs and feed sets, and small enough to survive
-    a round-trip through JSON/JavaScript numbers. ``stop_uid`` remains the
-    durable human-readable key; this is its machine-friendly alias.
+    Small enough to survive JSON/JavaScript numbers; collisions are negligible.
     """
     return int.from_bytes(hashlib.sha256(stop_uid.encode("utf-8")).digest()[:6], "big")
 
-# --------------------------------------------------------------------------
-# GTFS schema constants
-# --------------------------------------------------------------------------
 
-#: Files that must be present in every feed. calendar.txt/calendar_dates.txt
-#: are conditionally required (at least one of the two) and checked separately.
+#: Files every feed must have (calendar files are checked separately).
 REQUIRED_FILES: tuple[str, ...] = (
     "agency.txt",
     "stops.txt",
@@ -43,12 +33,10 @@ REQUIRED_FILES: tuple[str, ...] = (
     "stop_times.txt",
 )
 
-#: At least one of these must be present (GTFS conditional requirement).
+#: At least one of these must exist.
 CALENDAR_FILES: tuple[str, ...] = ("calendar.txt", "calendar_dates.txt")
 
-#: Optional files whose presence we report per feed (the feed x optional-file
-#: matrix in the report). calendar_dates.txt appears here too because it is
-#: optional whenever calendar.txt exists.
+#: Optional files listed per feed in the report.
 OPTIONAL_FILES: tuple[str, ...] = (
     "calendar.txt",
     "calendar_dates.txt",
@@ -63,11 +51,8 @@ OPTIONAL_FILES: tuple[str, ...] = (
     "attributions.txt",
 )
 
-#: Minimum columns each file must carry for this pipeline to work with it.
-#: Note: per the GTFS spec stop_lat/stop_lon are only conditionally required
-#: (location_type 0/1/2), but this pipeline requires the *columns* to exist
-#: in stops.txt because geometry is built from them; per-row blanks on
-#: location_type 3/4 rows are tolerated (see validators/normalizer).
+#: Columns each file needs. stop_lat/stop_lon must exist as columns because
+#: geometry is built from them, even though GTFS makes them conditional.
 REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "agency.txt": ("agency_name", "agency_url", "agency_timezone"),
     "stops.txt": ("stop_id", "stop_lat", "stop_lon"),
@@ -90,21 +75,8 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
-# --------------------------------------------------------------------------
-# Findings
-# --------------------------------------------------------------------------
-
 class Severity(str, enum.Enum):
-    """Severity classification for a validation finding.
-
-    Levels::
-
-        ERROR   - the feed violates the GTFS spec or is unusable in a way that
-                  loses data (missing required file, unparseable table, bad ids).
-        WARNING - suspicious but recoverable; affected rows are skipped or the
-                  condition does not block loading (e.g. dangling parent_station).
-        INFO    - purely informational (e.g. which optional files are present).
-    """
+    """ERROR: data is lost or the spec is broken. WARNING: recoverable. INFO: informational."""
 
     ERROR = "ERROR"
     WARNING = "WARNING"
@@ -112,40 +84,18 @@ class Severity(str, enum.Enum):
 
 
 class Finding(BaseModel):
-    """A single validation finding for one feed.
-
-    Attributes:
-        severity: ERROR / WARNING / INFO classification.
-        code: stable machine-readable identifier (e.g. ``duplicate_stop_ids``)
-            so downstream tooling can filter without parsing messages.
-        message: human-readable description of the problem.
-        file: GTFS filename the finding relates to, if any.
-        count: number of affected rows/values, if countable.
-        sample: up to a handful of example offending values, for debugging.
-    """
+    """One validation result for a feed; *code* is stable for filtering."""
 
     severity: Severity
     code: str
     message: str
     file: Optional[str] = None
     count: Optional[int] = None
-    sample: Optional[list[str]] = None
+    sample: Optional[list[str]] = None  # a few example offending values
 
-
-# --------------------------------------------------------------------------
-# Feed metadata
-# --------------------------------------------------------------------------
 
 class FeedSource(BaseModel):
-    """A discovered feed on disk, before any loading is attempted.
-
-    Attributes:
-        feed_id: deterministic identifier derived from the file/directory
-            name (see ``loader.derive_feed_id`` for the exact rules).
-        path: absolute path to the .zip file, feed directory, or stops CSV.
-        kind: ``"zip"``, ``"dir"``, or ``"csv"`` for a stops-only CSV
-            (see :mod:`gtfs_ingest.stops_csv`).
-    """
+    """A feed found on disk, before loading."""
 
     feed_id: str
     path: Path
@@ -153,45 +103,17 @@ class FeedSource(BaseModel):
 
     @property
     def is_stops_only(self) -> bool:
-        """True for a source that carries stop geometry and nothing else.
-
-        Such a source has no routes, trips, stop_times or calendar, so it
-        contributes stops to the inventory, proximity, deduplication and the
-        spatial exports, but no headways, route connectivity or same-line
-        topology. Every phase branches on this one predicate.
-        """
+        """True for a stops-only CSV: geometry, but no routes, trips or calendar."""
         return self.kind == "csv"
 
 
 @dataclass
 class LoadedFeed:
-    """A feed opened with partridge, plus per-table read bookkeeping.
+    """An opened feed. table() never raises; parse errors go to table_errors.
 
-    Table access goes through :meth:`table`, which never raises: an
-    unreadable table (bad encoding, malformed CSV, ...) is recorded in
-    ``table_errors`` and reported as ``None``. This is what lets the
-    validators run every check on a broken feed instead of dying on the
-    first bad file.
-
-    A stops-only CSV source is represented here with ``feed=None`` and a
-    **pre-seeded** ``_tables["stops.txt"]``: :meth:`table` consults that cache
-    before it ever looks at ``feed``, so every consumer that reads GTFS tables
-    through :meth:`table` works on such a source unchanged, with no partridge
-    object in play.
-
-    Attributes:
-        source: the discovered feed this was loaded from.
-        feed: the partridge raw feed object, or ``None`` if the container
-            itself could not be opened (see ``load_error``) or the source is
-            a stops-only CSV.
-        files_present: basenames of the ``.txt`` members found in the zip/dir;
-            ``{"stops.txt"}`` for a stops-only CSV, which presents exactly one
-            logical table.
-        load_error: message if the feed container could not be opened.
-        table_errors: filename -> error message for tables that failed to parse.
-        load_findings: findings produced while opening the source itself
-            (encoding, delimiter and header resolution for a CSV), replayed by
-            ``validators.validate_feed`` so they reach the report.
+    feed is None when the container could not be opened (see load_error) or
+    for a stops-only CSV, whose stops.txt is pre-seeded in _tables.
+    load_findings holds problems found while opening (e.g. CSV header issues).
     """
 
     source: FeedSource
@@ -204,26 +126,14 @@ class LoadedFeed:
 
     @property
     def feed_id(self) -> str:
-        """Shortcut for ``source.feed_id``."""
         return self.source.feed_id
 
     @property
     def is_stops_only(self) -> bool:
-        """Shortcut for ``source.is_stops_only``."""
         return self.source.is_stops_only
 
     def table(self, filename: str) -> Optional[pd.DataFrame]:
-        """Return a GTFS table as a DataFrame, or ``None`` if unavailable.
-
-        Args:
-            filename: GTFS filename, e.g. ``"stops.txt"``.
-
-        Returns:
-            The table as read by partridge (raw, all-string dtypes), or
-            ``None`` when the file is absent, the feed failed to open, or
-            the file could not be parsed (the parse error is stored in
-            ``table_errors``). Never raises.
-        """
+        """The raw table (all strings), or None if absent or unreadable."""
         if filename in self._tables:
             return self._tables[filename]
         df: Optional[pd.DataFrame] = None
@@ -236,7 +146,7 @@ class LoadedFeed:
         return df
 
     def row_counts(self) -> dict[str, int]:
-        """Row counts for every readable file present in the feed."""
+        """Row count of every readable file in the feed."""
         counts: dict[str, int] = {}
         for name in sorted(self.files_present):
             df = self.table(name)
@@ -245,31 +155,10 @@ class LoadedFeed:
         return counts
 
 
-# --------------------------------------------------------------------------
-# Normalized stop schema
-# --------------------------------------------------------------------------
-
 class StopRecord(BaseModel):
-    """One row of the normalized, cross-feed stops schema.
+    """One normalized stop; also the contract of the PostGIS stops table."""
 
-    This model documents (and in tests, enforces) the exact contract of the
-    normalized stops DataFrame and of the PostGIS ``stops`` table.
-
-    Attributes:
-        stop_uid: globally unique key, ``"{feed_id}:{stop_id}"``.
-        stop_num_id: numeric alias of ``stop_uid`` (see
-            :func:`numeric_stop_id`) for consumers that need integer ids.
-        feed_id: provenance - which feed the stop came from.
-        stop_id: original GTFS stop_id (whitespace-stripped).
-        stop_name: stop name or ``None`` when blank in the source.
-        stop_lat: WGS84 latitude in [-90, 90].
-        stop_lon: WGS84 longitude in [-180, 180].
-        location_type: GTFS location_type; blanks/unparseable values
-            normalize to 0 (= stop/platform, the GTFS default).
-        parent_station: original parent_station id or ``None``.
-    """
-
-    stop_uid: str
+    stop_uid: str  # "{feed_id}:{stop_id}"
     stop_num_id: int
     feed_id: str
     stop_id: str
@@ -280,13 +169,9 @@ class StopRecord(BaseModel):
     parent_station: Optional[str] = None
 
 
-#: Column order of the normalized stops frame (geometry column excluded).
+#: Column order of the normalized stops frame (without geometry).
 STOP_COLUMNS: tuple[str, ...] = tuple(StopRecord.model_fields)
 
-
-# --------------------------------------------------------------------------
-# Report payloads
-# --------------------------------------------------------------------------
 
 class FeedReport(BaseModel):
     """Everything the report records about one feed."""
@@ -294,9 +179,7 @@ class FeedReport(BaseModel):
     feed_id: str
     source_path: str
     status: Literal["loaded", "failed"]
-    #: Source layout this feed came from - "zip", "dir", or "csv" for a
-    #: stops-only CSV. Defaulted so older reports deserialize unchanged.
-    source_kind: str = "dir"
+    source_kind: str = "dir"  # "zip", "dir" or "csv"
     row_counts: dict[str, int] = Field(default_factory=dict)
     optional_files: dict[str, bool] = Field(default_factory=dict)
     findings: list[Finding] = Field(default_factory=list)
@@ -304,17 +187,12 @@ class FeedReport(BaseModel):
     stops_loaded: int = 0
 
     def count(self, severity: Severity) -> int:
-        """Number of findings with the given severity."""
+        """Number of findings with this severity."""
         return sum(1 for f in self.findings if f.severity is severity)
 
 
 class RunReport(BaseModel):
-    """Top-level report for one pipeline run (serialized to JSON as-is).
-
-    ``generated_at`` is a wall-clock timestamp (run metadata);
-    ``analysis_date`` is the run's *input* clock - the reference date the
-    expiry judgments were made against (reproducible via --analysis-date).
-    """
+    """Phase 1 run report; analysis_date is the reference date for expiry checks."""
 
     generated_at: str
     dry_run: bool

@@ -1,21 +1,9 @@
-"""Guarded persistence for the QA verdict tables.
+"""QA verdict tables, guarded so no Google content beyond place_id is ever stored.
 
-THE STORAGE CONSTRAINT LIVES HERE: per the Google Maps Platform Terms, the
-only Google-derived value that may reach the database is the opaque
-``place_id``. Everything else in these tables is computed by US (verdicts,
-agreement flag, timestamp) or references OUR keys (cluster_id, stop_uid).
-
-Enforcement is mechanical, not conventional: every record passes
-:func:`_assert_persistable` against a frozen column allowlist before any
-SQL runs; an unexpected column raises :class:`StorageViolation`. The test
-suite additionally parses the DDL/INSERT statements in this module and
-fails if a column outside the allowlist ever appears.
-
-Idempotency: **per-row upsert** (``ON CONFLICT DO UPDATE``) keyed on our
-ids, unlike the full-reload of Phase 3 tables - QA runs are budgeted and
-partial by design, and a re-check of 20 interchanges must not wipe the 180
-verdicts from a previous run. Re-running the same check replaces exactly
-that row.
+Google Maps terms allow storing only the opaque place_id. Every record is
+checked against a fixed column allowlist before any SQL runs, and a test
+checks the SQL in this module too. Rows are upserted (not reloaded) because
+QA runs are partial: re-checking 20 items must not erase earlier verdicts.
 """
 
 from __future__ import annotations
@@ -32,7 +20,7 @@ class StorageViolation(RuntimeError):
     """A record tried to persist a column outside the QA allowlist."""
 
 
-#: The ONLY columns that may ever be written to the QA tables.
+#: The only columns that may ever be written to the QA tables.
 ALLOWED_INTERCHANGE_COLUMNS: frozenset[str] = frozenset(
     {"interchange_cluster_id", "verdict", "mode_agreement", "google_place_id", "checked_at"}
 )
@@ -86,12 +74,7 @@ _UPSERT_STOP = text(
 
 
 def _assert_persistable(record: Mapping[str, object], allowed: frozenset[str]) -> None:
-    """Raise :class:`StorageViolation` if *record* carries extra columns.
-
-    This is the runtime guard for the licensing constraint - it runs before
-    any SQL is issued, so a coding mistake elsewhere cannot leak Google
-    content into the database.
-    """
+    """Raise StorageViolation if *record* has a column outside *allowed*."""
     unexpected = set(record) - allowed
     if unexpected:
         raise StorageViolation(
@@ -101,11 +84,7 @@ def _assert_persistable(record: Mapping[str, object], allowed: frozenset[str]) -
 
 
 def ensure_qa_schema(engine: Engine) -> None:
-    """Create the two QA verdict tables (idempotent).
-
-    Raises:
-        sqlalchemy.exc.SQLAlchemyError: on connection/DDL failure.
-    """
+    """Create the two QA verdict tables if missing."""
     with engine.begin() as conn:
         for stmt in DDL_STATEMENTS:
             conn.execute(text(stmt))
@@ -113,11 +92,7 @@ def ensure_qa_schema(engine: Engine) -> None:
 
 
 def upsert_interchange_verdicts(engine: Engine, records: Iterable[Mapping[str, object]]) -> int:
-    """Upsert interchange verdict rows (validated against the allowlist).
-
-    Raises:
-        StorageViolation: a record carries a non-allowlisted column.
-    """
+    """Upsert interchange verdicts; raises StorageViolation on a non-allowed column."""
     rows = [dict(r) for r in records]
     for row in rows:
         _assert_persistable(row, ALLOWED_INTERCHANGE_COLUMNS)
@@ -130,11 +105,7 @@ def upsert_interchange_verdicts(engine: Engine, records: Iterable[Mapping[str, o
 
 
 def upsert_stop_verdicts(engine: Engine, records: Iterable[Mapping[str, object]]) -> int:
-    """Upsert stop verdict rows (validated against the allowlist).
-
-    Raises:
-        StorageViolation: a record carries a non-allowlisted column.
-    """
+    """Upsert stop verdicts; raises StorageViolation on a non-allowed column."""
     rows = [dict(r) for r in records]
     for row in rows:
         _assert_persistable(row, ALLOWED_STOP_COLUMNS)

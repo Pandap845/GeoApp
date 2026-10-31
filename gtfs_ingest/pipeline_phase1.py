@@ -1,18 +1,8 @@
-"""End-to-end orchestration of the Phase 1 flow.
+"""Phase 1 orchestration: discover, load, validate, normalize, store stops, report.
 
-Per run:  discover feeds -> (ensure DB schema unless dry-run) -> per feed:
-load -> validate -> normalize -> load stops into PostGIS -> emit reports.
-
-Failure isolation contract: any exception while processing one feed is
-caught, logged with traceback, recorded as an ERROR finding on that feed's
-report entry, and the run continues with the next feed. Only run-level
-problems (unwritable report dir, unreachable/misconfigured database) abort
-the run, because every subsequent feed would fail identically.
-
-A feed's stops are loaded whenever its stops.txt yielded normalized rows,
-even if the feed has other validation ERRORs (e.g. broken stop_times) -
-partial data with provenance beats no data, and the report documents every
-defect. Feeds whose stops.txt is unusable simply contribute zero rows.
+A failure in one feed becomes an ERROR finding and the run moves on; only
+run-level problems (database, report folder) stop it. Stops are loaded even
+when other files of the feed have errors: partial data beats no data.
 """
 
 from __future__ import annotations
@@ -35,17 +25,10 @@ def process_feed(
     engine: Optional[Engine],
     analysis_date: Optional[date] = None,
 ) -> FeedReport:
-    """Run the full load/validate/normalize/store flow for one feed.
+    """Load, validate, normalize and store one feed. Never raises.
 
-    Args:
-        source: discovered feed.
-        engine: database engine, or ``None`` for dry runs (skip DB writes).
-        analysis_date: the run's reference date for expiry judgments
-            (injectable clock); ``None`` uses today.
-
-    Returns:
-        The feed's report entry. Never raises: any unexpected failure is
-        captured as an ERROR finding with ``status="failed"``.
+    *engine* is None for dry runs. Unexpected errors become an ERROR finding
+    and a "failed" status.
     """
     findings: list[Finding] = []
     try:
@@ -98,20 +81,11 @@ def process_feed(
 
 
 def run_pipeline(settings: Settings) -> RunReport:
-    """Execute one full pipeline run and write the reports.
-
-    Args:
-        settings: resolved configuration (CLI + environment).
-
-    Returns:
-        The run report (also written to ``settings.report_dir`` as JSON
-        and Markdown).
+    """Run Phase 1 for every discovered feed and write the reports.
 
     Raises:
-        ValueError: if a non-dry run has no database URL configured.
-        RuntimeError / sqlalchemy errors: if the database is unreachable or
-            lacks PostGIS (run-level problems).
-        OSError: if the report directory is unwritable.
+        ValueError: a non-dry run without a database URL.
+        OSError / database errors: run-level problems.
     """
     sources = loader.discover_feeds(settings.feed_paths)
     if not sources:
@@ -127,8 +101,7 @@ def run_pipeline(settings: Settings) -> RunReport:
         engine = db.make_engine(settings.database_url)
         db.ensure_schema(engine)
 
-    # One resolved analysis date per run: expiry judgments become
-    # reproducible facts instead of moving wall-clock targets.
+    # Fix the date once so expiry checks are reproducible within a run.
     analysis_date = settings.analysis_date or date.today()
     feed_reports = [
         process_feed(source, engine, analysis_date=analysis_date) for source in sources

@@ -1,41 +1,14 @@
-"""OSM schema validation + nearest-transit-node matching (Part B).
+"""Match every stop to its nearest OSM transit node and score the match.
 
-OSM schema assumptions (validated at startup, configurable, never hardcoded
-at call sites - see ``config.Settings`` / the conflate-osm CLI flags):
+Needs an osm2pgsql-style line table (highway, oneway) and point table
+(highway, railway, public_transport); names and SRID are read from the data.
+validate_osm_schema lists every missing piece at once before any work runs.
 
-- an osm2pgsql-classic-style **line table** (default ``planet_osm_line``)
-  with LINESTRING geometries in some SRID, a ``highway`` tag column, and an
-  ``oneway`` column;
-- a **point table** (default ``planet_osm_point``) with POINT geometries
-  and the tag columns ``highway``, ``railway``, ``public_transport``;
-- the geometry column (default ``way``) may be in any SRID - geometries are
-  transformed on the fly and its SRID is read from the data;
-- a ``name`` column is used when present, silently skipped when not.
+    confidence = round(max(0, 1 - distance / threshold) * type_score, 3)
 
-``validate_osm_schema`` fails fast with one clear message listing every
-missing table/column, so a mislabeled import surfaces before any work runs.
-
-Matching: for each GTFS stop, the nearest OSM node carrying a compatible
-transit tag (``highway=bus_stop``, ``public_transport in (platform,
-stop_position, station)``, ``railway in (station, halt, tram_stop)``) is
-found with the PostGIS KNN operator (``<->``, index-assisted) in a LATERAL
-join; the true geodesic distance is then measured on ``geography``.
-
-Confidence formula (documented in the README)::
-
-    distance_score = max(0, 1 - distance_m / threshold_m)
-    confidence     = round(distance_score * type_score, 3)
-
-where ``type_score`` reflects tag/type compatibility between the stop's
-GTFS ``location_type`` and the OSM element kind::
-
-    location_type = 1 (station):  station-ish OSM kind -> 1.0, else 0.6
-    location_type = 0/other:      platform-ish kind    -> 1.0,
-                                  station-ish kind     -> 0.8,
-                                  anything else        -> 0.7
-
-``needs_review`` is set when there is no match at all, the distance exceeds
-the threshold, or confidence < 0.5.
+type_score: station stop -> 1.0 for an OSM station, else 0.6; other stops ->
+1.0 platform-like, 0.8 station, 0.7 anything else. needs_review when there
+is no match, it is beyond the threshold, or confidence < 0.5.
 """
 
 from __future__ import annotations
@@ -50,8 +23,7 @@ from sqlalchemy import Engine, bindparam, text
 
 log = logging.getLogger(__name__)
 
-#: Conservative identifier check - table/column names are interpolated into
-#: SQL, so anything unusual is rejected outright.
+#: Table/column names go into SQL text, so only plain identifiers are allowed.
 _IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$", re.IGNORECASE)
 
 #: OSM tag values accepted as transit nodes.
@@ -88,21 +60,11 @@ def _check_identifier(name: str, what: str) -> None:
 def validate_osm_schema(
     engine: Engine, line_table: str, point_table: str, geom_column: str
 ) -> OsmSchema:
-    """Validate that the configured OSM layers exist and are usable.
-
-    Args:
-        engine: database engine.
-        line_table / point_table / geom_column: configured layer names.
-
-    Returns:
-        An :class:`OsmSchema` with the detected SRIDs and optional-column
-        availability.
+    """Check the OSM tables exist and have the needed columns; return their SRIDs.
 
     Raises:
-        ValueError: on names that are not plain SQL identifiers.
-        RuntimeError: with a single message listing every missing
-            table/column, or when a table is empty (SRID undeterminable) -
-            fail fast, before any per-stop work.
+        ValueError: a name is not a plain SQL identifier.
+        RuntimeError: listing every missing table or column, or an empty table.
     """
     for name, what in ((line_table, "OSM line table"), (point_table, "OSM point table"),
                        (geom_column, "OSM geometry column")):
@@ -174,18 +136,7 @@ def validate_osm_schema(
 
 
 def nearest_transit_nodes(engine: Engine, schema: OsmSchema) -> pd.DataFrame:
-    """Nearest compatible OSM transit node for every stop in ``stops``.
-
-    Args:
-        engine: database engine.
-        schema: validated OSM layer facts.
-
-    Returns:
-        One row per GTFS stop with ``osm_id / osm_kind / osm_name /
-        distance_m`` (all None/NaN when no transit node exists in the OSM
-        extract at all). No threshold is applied here - scoring decides
-        what counts as matched.
-    """
+    """Nearest OSM transit node for every stop (no distance limit; scoring decides)."""
     g = schema.geom_column
     name_expr = "p.name" if schema.point_has_name else "NULL"
     sql = text(
@@ -212,8 +163,7 @@ def nearest_transit_nodes(engine: Engine, schema: OsmSchema) -> pd.DataFrame:
         ) o ON TRUE
         """
     ).bindparams(
-        # expanding=True renders IN :param as IN (v1, v2, ...) - psycopg3
-        # does not expand a plain tuple parameter itself.
+        # expanding=True turns "IN :param" into "IN (v1, v2, ...)".
         bindparam("pt_values", value=list(PT_VALUES), expanding=True),
         bindparam("railway_values", value=list(RAILWAY_VALUES), expanding=True),
         bindparam("point_srid", value=schema.point_srid),
@@ -231,7 +181,7 @@ def nearest_transit_nodes(engine: Engine, schema: OsmSchema) -> pd.DataFrame:
 
 
 def type_score(location_type: object, osm_kind: object) -> float:
-    """Tag/type compatibility component of the confidence formula."""
+    """How well the OSM node kind fits the stop's location_type (see module docstring)."""
     kind = str(osm_kind) if pd.notna(osm_kind) else ""
     try:
         loc = int(location_type)
@@ -247,18 +197,7 @@ def type_score(location_type: object, osm_kind: object) -> float:
 
 
 def score_matches(matches: pd.DataFrame, threshold_m: float) -> pd.DataFrame:
-    """Apply the documented confidence formula and the review flag.
-
-    Args:
-        matches: output of :func:`nearest_transit_nodes` (or an equivalent
-            frame in tests).
-        threshold_m: match threshold in meters.
-
-    Returns:
-        The frame with ``match_confidence`` and ``needs_review`` added, in
-        :data:`MATCH_COLUMNS` order. Unmatched stops get confidence 0.0 and
-        ``needs_review = True``.
-    """
+    """Add match_confidence and needs_review; unmatched stops get 0.0 and True."""
     result = matches.copy()
     distance = pd.to_numeric(result["distance_m"], errors="coerce")
     distance_score = (1 - distance / threshold_m).clip(lower=0.0, upper=1.0)

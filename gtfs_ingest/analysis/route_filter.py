@@ -1,21 +1,8 @@
-"""Optional route/mode filtering for Phase 2 (``--mode`` / ``--route``).
+"""Optional --transport-mode / --route filtering for Phase 2.
 
-By default the analysis covers every route of every feed. These helpers
-implement the opt-in restriction:
-
-- ``--mode`` accepts mode *names* (``bus``, ``tram``, ``metro``, ``rail``,
-  ``ferry``, ``cable_tram``, ``aerial_lift``, ``funicular``,
-  ``trolleybus``, ``monorail``) or GTFS ``route_type`` codes - basic or
-  extended (``700`` normalizes to bus, ``109`` to rail, ...).
-- ``--route`` accepts ``route_id`` or ``route_short_name`` values.
-
-A route is selected when it matches **either** filter (union), so
-``--mode rail --route C98`` means "all rail routes plus the C98 bus".
-The selection happens per feed against its raw ``routes.txt``; the chosen
-``route_id`` set is then pushed into the partridge view, so trips,
-stop_times, shapes - everything trip-derived - is filtered at the source.
-Stops are NOT filtered: the stop inventory is Phase 1 data and stays
-complete; stops served only by excluded routes simply appear unserved.
+A route is kept when it matches either filter (union): "--mode rail --route C98"
+means every rail route plus C98. Only trip-derived data is filtered; stops are
+never dropped, so stops served only by excluded routes just appear unserved.
 """
 
 from __future__ import annotations
@@ -33,22 +20,15 @@ _NAME_TO_CODE: dict[str, int] = {name: code for code, name in MODE_NAMES.items()
 
 
 def _tokens(specs: Iterable[str]) -> list[str]:
-    """Split repeatable/comma-separated flag values into clean tokens."""
+    """Split repeated and comma-separated flag values into clean tokens."""
     return [t.strip() for spec in specs for t in str(spec).split(",") if t.strip()]
 
 
 def parse_modes(specs: Iterable[str]) -> frozenset[int]:
-    """Parse ``--mode`` values into basic route_type codes.
-
-    Args:
-        specs: raw flag values (repeatable and/or comma-separated).
-
-    Returns:
-        The set of basic 0-12 codes.
+    """Turn mode names (bus, tram, ...) or route_type codes into basic 0-12 codes.
 
     Raises:
-        ValueError: on an unknown mode name or an unmapped numeric code,
-            listing the accepted names.
+        ValueError: on an unknown name or code.
     """
     codes: set[int] = set()
     for token in _tokens(specs):
@@ -69,12 +49,12 @@ def parse_modes(specs: Iterable[str]) -> frozenset[int]:
 
 
 def parse_routes(specs: Iterable[str]) -> frozenset[str]:
-    """Parse ``--route`` values (route_id / route_short_name tokens)."""
+    """Parse --route values (route_id or route_short_name)."""
     return frozenset(_tokens(specs))
 
 
 def mode_labels(codes: Optional[Iterable[int]]) -> list[str]:
-    """Human labels for the report (sorted; empty when no filter)."""
+    """Sorted mode names for the report; empty when there is no filter."""
     return sorted(mode_name(c) for c in codes) if codes else []
 
 
@@ -83,17 +63,10 @@ def allowed_route_ids(
     mode_codes: Optional[frozenset[int]],
     route_specs: Optional[frozenset[str]],
 ) -> Optional[set[str]]:
-    """The feed's route_ids selected by the filters.
+    """Route ids of this feed selected by the filters.
 
-    Args:
-        routes: the feed's raw ``routes.txt`` table (all-string dtypes).
-        mode_codes: basic route_type codes from :func:`parse_modes`.
-        route_specs: route_id/route_short_name tokens from :func:`parse_routes`.
-
-    Returns:
-        ``None`` when no filter is configured (analyze everything - the
-        default); otherwise the matching route_id set, possibly empty
-        (the feed has nothing the caller asked for).
+    Returns None when no filter is set (analyze everything), otherwise the
+    matching ids, possibly an empty set.
     """
     if not mode_codes and not route_specs:
         return None

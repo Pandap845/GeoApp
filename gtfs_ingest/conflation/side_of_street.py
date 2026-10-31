@@ -1,44 +1,13 @@
-"""Side-of-street disambiguation (Part C - nearest centerline + sign math).
+"""Which side of the nearest OSM street each stop is on.
 
-For each GTFS stop the nearest OSM highway centerline is fetched with the
-PostGIS KNN operator; the left/right decision itself is pure planar
-geometry, computed in a metric CRS.
+With d = street direction and v = vector from the closest point on the street
+to the stop, cross = d.x * v.y - d.y * v.x is positive for left, negative for
+right. Direction is the drawing order, reversed for oneway=-1/reverse; for
+two-way streets the side is relative to the drawing order.
+Example: street (0,0)->(100,0), stop (50,10): cross = +10 -> left.
 
-Sign convention (documented in the README with a worked example):
-
-    Take the segment of the centerline nearest to the stop. Let ``d`` be
-    the segment's direction vector *in travel direction* and ``v`` the
-    vector from the stop's perpendicular foot on the segment to the stop.
-    The z component of the 2D cross product::
-
-        cross = d.x * v.y - d.y * v.x
-
-    is positive when the stop lies LEFT of the direction of travel and
-    negative when it lies RIGHT ("driver's view": travelling along ``d``,
-    left hand side = left).
-
-    Travel direction is the way's digitized direction (coordinate order),
-    reversed when ``oneway`` is ``-1``/``reverse`` (OSM's convention for
-    "one way against digitization"). Two-way and untagged ways use the
-    digitized direction as-is - the reported side is then relative to
-    digitization, which is stable but arbitrary; consumers must combine it
-    with the direction they care about.
-
-    Worked example: way digitized (0,0) -> (100,0) (pointing +x), stop at
-    (50, 10): d = (1, 0), v = (0, 10), cross = 1*10 - 0*0 = +10 -> left.
-    With ``oneway = -1`` travel is -x, so the same stop is right.
-
-Confidence: ``low`` when the answer is geometrically fragile -
-
-- the stop is within ``on_tolerance_m`` (1 m) of the centerline
-  (side reported as ``"on"``),
-- the perpendicular foot lies within ``endpoint_tolerance_m`` (10 m) of
-  either way end (typically an intersection, where "which street?" itself
-  is ambiguous), or
-- the perpendicular distance is under 2 m (nearly collinear digitization
-  noise dominates).
-
-Otherwise ``high``.
+Confidence is low when the stop is within 1 m of the line ("on"), within 10 m
+of a street end (likely an intersection), or under 2 m away.
 """
 
 from __future__ import annotations
@@ -58,7 +27,7 @@ from .osm_match import OsmSchema
 
 log = logging.getLogger(__name__)
 
-#: ``oneway`` values meaning "traffic flows against digitized direction".
+#: oneway values meaning traffic runs against the drawing order.
 REVERSED_ONEWAY = {"-1", "reverse"}
 
 ON_TOLERANCE_M = 1.0
@@ -73,22 +42,12 @@ SIDE_COLUMNS = [
 
 @dataclass(frozen=True)
 class SideResult:
-    """Outcome of the side computation for one stop/way pair.
+    """Side of one stop relative to one street."""
 
-    Attributes:
-        side: ``"left"`` / ``"right"`` relative to travel direction (see
-            module docstring), or ``"on"`` within the on-line tolerance.
-        perpendicular_distance_m: distance from the stop to its nearest
-            point on the centerline, in the metric CRS.
-        near_endpoint: nearest point lies within the endpoint tolerance of
-            a way end (intersection proxy).
-        confidence: ``"high"`` or ``"low"`` (see module docstring).
-    """
-
-    side: str
+    side: str  # "left", "right" or "on"
     perpendicular_distance_m: float
     near_endpoint: bool
-    confidence: str
+    confidence: str  # "high" or "low"
 
 
 def side_of_line(
@@ -98,22 +57,7 @@ def side_of_line(
     on_tolerance_m: float = ON_TOLERANCE_M,
     endpoint_tolerance_m: float = ENDPOINT_TOLERANCE_M,
 ) -> SideResult:
-    """Which side of *line* does *point* lie on? (planar/metric coordinates)
-
-    Args:
-        line: highway centerline, already projected to a metric CRS.
-        point: stop location in the same CRS.
-        oneway: raw OSM ``oneway`` value; ``-1``/``reverse`` flips travel
-            direction relative to digitization, anything else (including
-            ``None``) keeps it.
-        on_tolerance_m: distances under this report side ``"on"``.
-        endpoint_tolerance_m: proximity to a way end that flags low
-            confidence (intersection proxy).
-
-    Returns:
-        A :class:`SideResult`. Never raises for degenerate geometry: a
-        zero-length segment yields side ``"on"`` with low confidence.
-    """
+    """Side of *point* relative to *line* (both in a metric CRS); see the module rules."""
     along = line.project(point)
     foot = line.interpolate(along)
     perp = point.distance(foot)
@@ -140,7 +84,7 @@ def side_of_line(
 
 
 def _segment_at(line: LineString, along: float) -> tuple[tuple[float, float], tuple[float, float]]:
-    """The line segment containing chainage *along* (last segment at the end)."""
+    """The segment that contains the point at distance *along* on the line."""
     coords = list(line.coords)
     cumulative = 0.0
     for start, end in zip(coords, coords[1:]):
@@ -153,18 +97,7 @@ def _segment_at(line: LineString, along: float) -> tuple[tuple[float, float], tu
 
 
 def nearest_streets(engine: Engine, schema: OsmSchema) -> pd.DataFrame:
-    """Nearest OSM highway centerline for every stop (KNN, no threshold).
-
-    Args:
-        engine: database engine.
-        schema: validated OSM layer facts.
-
-    Returns:
-        One row per stop with the stop WKT, the way's ``osm_id`` /
-        ``highway`` / ``oneway``, the way geometry as EPSG:4326 WKT, and
-        the geodesic ``distance_m`` (None when the extract has no highway
-        lines at all).
-    """
+    """Nearest OSM street for every stop, with its geometry and distance (no limit)."""
     g = schema.geom_column
     sql = text(
         f"""
@@ -198,19 +131,7 @@ def compute_sides(
     threshold_m: float,
     metric_crs: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Apply the side math to the nearest-street rows.
-
-    Args:
-        streets: output of :func:`nearest_streets`.
-        threshold_m: max centerline distance; farther (or missing) streets
-            yield a NULL-way row (recorded, never a crash).
-        metric_crs: metric CRS override; default estimates a UTM zone from
-            the stop extent.
-
-    Returns:
-        One row per stop with :data:`SIDE_COLUMNS`; stops without a usable
-        street keep NULL ``osm_way_id``/``side`` and low confidence.
-    """
+    """Side of street per stop; streets farther than *threshold_m* leave the row empty."""
     if streets.empty:
         return pd.DataFrame(columns=SIDE_COLUMNS)
 

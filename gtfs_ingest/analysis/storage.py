@@ -1,20 +1,7 @@
-"""DDL and idempotent loading for the Phase 2 analysis tables.
+"""Phase 2 tables: schema and loaders.
 
-Kept in the analysis subpackage (rather than bloating Phase 1's ``db.py``)
-while reusing its engine and conventions.
-
-Idempotency strategies (documented in the README):
-
-- ``route_stop_headways`` / ``route_headways``: **per-feed delete-and-reload**
-  in one transaction, same as Phase 1 stops - re-analyzing a feed replaces
-  exactly that feed's rows.
-- ``route_connections``: **full truncate-and-reload per run**. Proximity
-  edges can span feeds, so rows aren't attributable to a single feed;
-  the table is cheap derived data recomputed from the analyzed feed set.
-- ``stop_equivalences``: **full truncate-and-reload per run**, for the same
-  reason - a row pairs two stops that describe one physical station, either
-  across feeds or within a single feed (``analysis.dedupe``; the ``match_kind``
-  column says which), so rows aren't attributable to a single feed either.
+Headway tables are replaced per feed. route_connections and stop_equivalences
+are reloaded in full each run because their rows can span feeds.
 """
 
 from __future__ import annotations
@@ -30,8 +17,7 @@ from ..bulk import bulk_insert
 
 log = logging.getLogger(__name__)
 
-#: Columns fetched from the Phase 3 ``stop_osm_matches`` table for the
-#: quality sidecar's ``coord_confidence``.
+#: stop_osm_matches columns read for the quality sidecar.
 OSM_MATCH_COLUMNS = ["stop_uid", "osm_id", "distance_m", "match_confidence", "needs_review"]
 
 _DDL_STATEMENTS: tuple[str, ...] = (
@@ -67,10 +53,7 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY (feed_id, service_date, route_id, direction_id, time_window)
     )
     """,
-    # Upgrade path for databases created before --service-date-range existed:
-    # widen the headway PKs to include service_date (idempotent - only fires
-    # when the live constraint still lacks the column; widening a PK cannot
-    # violate uniqueness because the old key is a subset of the new one).
+    # Older databases: add service_date to the headway primary keys.
     """
     DO $$
     BEGIN
@@ -131,15 +114,14 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY (stop_uid_a, stop_uid_b)
     )
     """,
-    # Databases created before within-feed dedupe lack match_kind; without
-    # this the next replace_all_rows fails on a column mismatch.
+    # Older databases lack match_kind.
     "ALTER TABLE stop_equivalences ADD COLUMN IF NOT EXISTS match_kind text",
     "CREATE INDEX IF NOT EXISTS ix_rsh_feed ON route_stop_headways (feed_id)",
     "CREATE INDEX IF NOT EXISTS ix_rh_feed ON route_headways (feed_id)",
     "CREATE INDEX IF NOT EXISTS ix_stop_equiv_group ON stop_equivalences (group_id)",
 )
 
-#: Whitelist: table name -> has a feed_id column usable for per-feed replace.
+#: Allowed tables -> whether rows can be replaced per feed.
 _TABLES: dict[str, bool] = {
     "route_stop_headways": True,
     "route_headways": True,
@@ -148,15 +130,7 @@ _TABLES: dict[str, bool] = {
 }
 
 def ensure_analysis_schema(engine: Engine) -> None:
-    """Create the four analysis tables and their indexes (idempotent).
-
-    Args:
-        engine: engine from Phase 1 ``db.make_engine``.
-
-    Raises:
-        sqlalchemy.exc.SQLAlchemyError: on connection/DDL failure
-            (run-level problem - every feed would fail identically).
-    """
+    """Create the four analysis tables and their indexes if missing."""
     with engine.begin() as conn:
         for stmt in _DDL_STATEMENTS:
             conn.execute(text(stmt))
@@ -167,27 +141,15 @@ def ensure_analysis_schema(engine: Engine) -> None:
 
 
 def _insert(conn, table: str, df: pd.DataFrame) -> None:
-    """psycopg3 COPY with executemany fallback (``bulk.bulk_insert``)."""
+    """Bulk insert (COPY with executemany fallback)."""
     bulk_insert(conn, table, df)
 
 
 def replace_feed_rows(engine: Engine, table: str, feed_id: str, df: pd.DataFrame) -> int:
-    """Idempotently replace one feed's rows in a headway table.
-
-    Args:
-        engine: database engine.
-        table: ``route_stop_headways`` or ``route_headways``.
-        feed_id: feed whose rows are replaced.
-        df: new rows (must include the table's columns; ``feed_id`` column
-            expected to equal *feed_id*).
-
-    Returns:
-        Number of rows inserted.
+    """Replace one feed's rows in a headway table; return the count.
 
     Raises:
-        ValueError: unknown table name (guards the SQL interpolation).
-        sqlalchemy.exc.SQLAlchemyError: on DB failure (transaction rolls
-            back; previous rows stay intact).
+        ValueError: *table* doesn't support per-feed replacement.
     """
     if not _TABLES.get(table):
         raise ValueError(f"table {table!r} does not support per-feed replacement")
@@ -199,20 +161,10 @@ def replace_feed_rows(engine: Engine, table: str, feed_id: str, df: pd.DataFrame
 
 
 def fetch_osm_matches(engine: Engine, feed_ids: list[str]) -> Optional[pd.DataFrame]:
-    """Read the Phase 3 ``stop_osm_matches`` rows for these feeds.
+    """OSM match rows for these feeds, or None if the table can't be read.
 
-    Never raises: the table exists only after ``conflate-osm`` has run
-    against the same database, so any failure (missing table, connection
-    problem) degrades to ``None`` - the sidecar then reports
-    ``coord_confidence = unavailable``.
-
-    Args:
-        engine: database engine.
-        feed_ids: restrict to these feeds' stops.
-
-    Returns:
-        :data:`OSM_MATCH_COLUMNS` frame (possibly empty), or ``None`` when
-        the data cannot be read.
+    The table exists only after conflate-osm has run; None makes the sidecar
+    report coord_confidence = unavailable.
     """
     sql = text(
         "SELECT stop_uid, osm_id, distance_m, match_confidence, needs_review "
@@ -231,22 +183,10 @@ def fetch_osm_matches(engine: Engine, feed_ids: list[str]) -> Optional[pd.DataFr
 
 
 def replace_all_rows(engine: Engine, table: str, df: pd.DataFrame) -> int:
-    """Idempotently replace the full contents of a run-scoped table.
-
-    Used for ``route_connections`` and ``stop_equivalences`` (see module
-    docstring for why).
-
-    Args:
-        engine: database engine.
-        table: whitelisted table name.
-        df: complete new contents.
-
-    Returns:
-        Number of rows inserted.
+    """Replace the whole contents of an analysis table; return the count.
 
     Raises:
         ValueError: unknown table name.
-        sqlalchemy.exc.SQLAlchemyError: on DB failure (transactional).
     """
     if table not in _TABLES:
         raise ValueError(f"unknown analysis table {table!r}")

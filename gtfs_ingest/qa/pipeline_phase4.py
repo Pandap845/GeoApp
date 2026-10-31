@@ -1,18 +1,8 @@
-"""Phase 4 orchestration: gated, budgeted Google QA cross-check.
+"""Phase 4 orchestration: the opt-in, budgeted Google QA cross-check.
 
-Gating (checked before anything else; both cause a clean NO-OP, exit 0):
-
-1. ``enabled`` must be True (the ``--enable-google-qa`` flag);
-2. an API key must be present (``GOOGLE_MAPS_API_KEY`` env var only).
-
-When it runs: eligible records only (multimodal interchanges, needs-review
-stops), one API call per record, hard budget ceiling, verdicts upserted to
-the two QA tables (place_id + verdict + flag + timestamp - nothing else),
-and a JSON + Markdown report referencing OUR ids and verdicts only.
-
-This phase never mutates GTFS/OSM data - it appends/updates verdict rows.
-``--dry-run`` makes NO API calls and NO DB writes: it reports what would be
-checked (eligibility counts vs the budget).
+Without --enable-google-qa and GOOGLE_MAPS_API_KEY it does nothing (exit 0).
+Otherwise: one API call per eligible item, up to the budget, verdicts upserted,
+report with our ids only. --dry-run makes no calls and no writes.
 """
 
 from __future__ import annotations
@@ -35,11 +25,7 @@ QA_MD = "google_qa_report.md"
 
 
 class QaConfig(BaseModel):
-    """Configuration of one google-qa run.
-
-    ``api_key`` is excluded from reprs; it must come from the environment
-    (the CLI has no flag for it, by design).
-    """
+    """Configuration of one google-qa run (api_key comes from the environment only)."""
 
     database_url: Optional[str] = None
     report_dir: Path = Path("out")
@@ -72,15 +58,10 @@ class QaReport(BaseModel):
 
 
 def run_google_qa(config: QaConfig) -> QaReport:
-    """Execute (or cleanly skip) the Phase 4 QA cross-check.
-
-    Returns:
-        The report (also written to ``config.report_dir``). Skips are
-        reported with a clear status, never raised.
+    """Run or skip the QA cross-check and write its report; skips are a status, not an error.
 
     Raises:
-        ValueError: enabled run without a database URL.
-        sqlalchemy errors / OSError: run-level problems (DB, report dir).
+        ValueError: enabled without a database URL.
     """
     now = datetime.now(timezone.utc)
     report = QaReport(
@@ -90,7 +71,7 @@ def run_google_qa(config: QaConfig) -> QaReport:
         budget_remaining=config.max_calls,
     )
 
-    # ---- gating: OFF unless flag AND key are both present -----------------
+    # Off unless both the flag and the key are present.
     if not config.enabled:
         report.status = "skipped_disabled"
         report.notes.append("google-qa is OFF by default; pass --enable-google-qa to run it")
@@ -132,7 +113,7 @@ def run_google_qa(config: QaConfig) -> QaReport:
     stop_rows: list[dict] = []
     budget_hit = False
     try:
-        # ---- (a) multimodal interchanges: verify the mode combination -----
+        # Interchanges: check the mode combination.
         for row in interchanges:
             try:
                 places = client.search_nearby(
@@ -145,7 +126,7 @@ def run_google_qa(config: QaConfig) -> QaReport:
                 break
             our_modes = set(row["modes"] or [])
             verdict, agreement, place_id = crosscheck.interchange_verdict(our_modes, places)
-            # `places` (Google content) goes out of scope here - by design.
+            # Google content (places) is discarded here on purpose.
             interchange_rows.append(
                 {
                     "interchange_cluster_id": int(row["cluster_id"]),
@@ -160,7 +141,7 @@ def run_google_qa(config: QaConfig) -> QaReport:
                     {"cluster_id": int(row["cluster_id"]), "our_modes": list(row["mode_names"] or [])}
                 )
 
-        # ---- (b) needs-review stops: verify a transit place exists --------
+        # Needs-review stops: check a transit place exists nearby.
         if not budget_hit:
             for row in stops:
                 try:

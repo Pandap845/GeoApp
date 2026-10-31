@@ -45,10 +45,7 @@ def text_search_response(name="Estación Central", lat=20.67, lng=-103.35, pid="
     }
 
 
-# --------------------------------------------------------------------------
 # Pure helpers
-# --------------------------------------------------------------------------
-
 def test_read_station_list_mixes_commas_and_newlines(tmp_path: Path) -> None:
     stations = tmp_path / "route.txt"
     stations.write_text("Central, Juárez\n\n  Periférico Sur \nCentral", encoding="utf-8")
@@ -74,10 +71,7 @@ def test_haversine_and_estimate() -> None:
     assert 260 < minutes < 270
 
 
-# --------------------------------------------------------------------------
 # Client: legacy endpoints share the budget and redaction rules
-# --------------------------------------------------------------------------
-
 def test_geocode_parses_first_result_and_sends_key_param() -> None:
     seen = {}
 
@@ -146,10 +140,7 @@ def test_legacy_calls_respect_the_shared_budget() -> None:
     assert client.calls_made == 1
 
 
-# --------------------------------------------------------------------------
 # End-to-end flow (patched client transport - no network)
-# --------------------------------------------------------------------------
-
 def run_locator(tmp_path, handler, stations="Central, Juárez, Periférico", **overrides):
     """Run the locator against a MockTransport by patching the client class."""
     stations_file = tmp_path / "route.txt"
@@ -298,10 +289,7 @@ def test_unresolved_station_gets_generic_edge_time(tmp_path: Path) -> None:
     assert report.edges_generic == 1  # 60 / 2 stations = 30 min generic estimate
 
 
-# --------------------------------------------------------------------------
 # Gating and dry run: no network, clean statuses
-# --------------------------------------------------------------------------
-
 def test_noop_when_disabled(tmp_path: Path) -> None:
     report = run_station_locator(LocatorConfig(enabled=False, report_dir=tmp_path))
     assert report.status == "skipped_disabled"

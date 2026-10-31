@@ -1,32 +1,10 @@
-"""OSM street-network walking distances for the near-stations relation.
+"""Walking distances along OSM streets for nearby stop pairs (--network-walk).
 
-The default walking times in ``near_stations`` are straight-line - honest
-but optimistic where a barrier (highway, river, railyard) separates two
-stops that are close as the crow flies. This module replaces the pair
-distances with **network distances walked along OSM streets**, using the
-``planet_osm_line`` layer already in PostGIS (no pgRouting required):
-
-1. Fetch walkable ways (``highway`` tagged, motorways excluded) inside the
-   analyzed stops' convex hull + buffer, in one indexed query.
-2. Build a vertex graph in a metric CRS: nodes are way vertices (merged on
-   coordinates rounded to 0.1 m), edges are consecutive-vertex segments
-   weighted by planar length.
-3. Snap every stop of a near pair to its nearest graph vertex (KD-tree).
-4. For each source stop, run a **bounded Dijkstra** (early exit past
-   ``cutoff_m``) and read the distances to its neighbours' vertices. The
-   snap offsets of both endpoints are added, so times stay conservative.
-
-A pair keeps its straight-line distance when no path exists within the
-cutoff (disconnected islands, snapping misses) - the fallback count is
-reported. Opt-in via ``analyze-frequency --network-walk``: the computation
-covers ~40k pairs against a metro-area street graph, which costs minutes,
-not seconds.
-
-Provenance for the quality sidecar (``near_stations_quality.csv``): the
-returned pairs carry ``walk_source`` (``network``/``straight_line``),
-``line_m`` and per-endpoint snap distances ``snap_m_a``/``snap_m_b``;
-stops snapping farther than :data:`MAX_SNAP_M` are classified
-``unsnapped`` downstream (classification only - routing is unchanged).
+Steps: fetch walkable ways around the stops, build a street graph in a metric
+CRS, snap each stop to its nearest vertex, then run a Dijkstra limited to
+cutoff_m. Snap distances are added so times stay conservative. Pairs with no
+path keep their straight-line distance. Each pair records walk_source, line_m
+and snap distances for the quality sidecar.
 """
 
 from __future__ import annotations
@@ -49,16 +27,13 @@ from . import graph_cache
 
 log = logging.getLogger(__name__)
 
-#: highway values never walkable.
+#: highway values that are never walkable.
 EXCLUDED_HIGHWAYS: tuple[str, ...] = ("motorway", "motorway_link", "proposed", "construction")
 
-#: Vertex merge tolerance (meters) - OSM shared endpoints coincide exactly;
-#: the rounding just guards float noise.
+#: Vertices closer than this (meters) are merged; guards float noise.
 _MERGE_M = 0.1
 
-#: Classification-only threshold for the quality sidecar - a stop farther
-#: than this from any walkable way is labeled ``unsnapped``. Routing
-#: behavior is unchanged (snapping itself has no upper bound).
+#: A stop farther than this from any street is labelled "unsnapped" (label only).
 MAX_SNAP_M = 200.0
 
 
@@ -69,17 +44,7 @@ def fetch_walk_lines(
     line_table: str = "planet_osm_line",
     geom_column: str = "way",
 ) -> gpd.GeoSeries:
-    """Walkable OSM ways (EPSG:4326) inside the stops' buffered hull.
-
-    Args:
-        engine: database engine (stops + OSM in the same PostGIS).
-        feed_ids: restrict the hull to these feeds' stops.
-        buffer_m: hull buffer so edge stops keep their surroundings.
-        line_table / geom_column: OSM layer names (osm2pgsql classic).
-
-    Returns:
-        GeoSeries of LineStrings; empty when nothing intersects.
-    """
+    """Walkable OSM ways (EPSG:4326) inside the convex hull of the stops plus *buffer_m*."""
     sql = text(
         f"""
         WITH area AS (
@@ -108,15 +73,7 @@ def fetch_walk_lines(
 def build_walk_graph(
     lines_metric: gpd.GeoSeries,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Vertex graph (CSR adjacency) from projected street lines.
-
-    Args:
-        lines_metric: LineStrings in a metric CRS.
-
-    Returns:
-        ``(node_xy, indptr, indices, weights)`` - node coordinates and the
-        CSR arrays of the undirected graph (each edge stored both ways).
-    """
+    """Street graph as (node_xy, indptr, indices, weights) CSR arrays, edges stored both ways."""
     starts: list[np.ndarray] = []
     ends: list[np.ndarray] = []
     for geom in lines_metric:
@@ -139,7 +96,7 @@ def build_walk_graph(
     keep = (u != v) & (w > 0)
     u, v, w = u[keep], v[keep], w[keep]
 
-    # Undirected: store both directions, then CSR-compress by source node.
+    # Store both directions, then compress by source node.
     src = np.concatenate([u, v])
     dst = np.concatenate([v, u])
     wgt = np.concatenate([w, w])
@@ -152,9 +109,7 @@ def build_walk_graph(
     return node_xy, indptr, dst.astype(np.int64), wgt
 
 
-#: Source vertices routed per scipy dijkstra call. Each call allocates a
-#: dense (chunk, n_vertices) float64 matrix: 16 sources over a 2M-vertex
-#: metro graph is ~256 MB - bounded memory while amortizing per-call setup.
+#: Sources per Dijkstra call; each call holds a (chunk x vertices) matrix (~256 MB at 16).
 _DIJKSTRA_CHUNK = 16
 
 
@@ -167,21 +122,7 @@ def pair_network_distances(
     stop_pairs: pd.DataFrame,
     cutoff_m: float = 800.0,
 ) -> pd.DataFrame:
-    """Network walking distance for each near pair.
-
-    Args:
-        node_xy / indptr / indices / weights: :func:`build_walk_graph` output.
-        stop_xy: index = stop_uid, columns ``x, y`` (same metric CRS).
-        stop_pairs: ``stop_uid_a, stop_uid_b, distance_m`` (straight-line).
-        cutoff_m: search radius; pairs without a path within it fall back.
-
-    Returns:
-        ``stop_pairs`` plus ``network_m`` (NaN = no path found; callers keep
-        the straight-line value) - snap offsets of both stops included -
-        and ``snap_m_a``/``snap_m_b`` (each endpoint's distance to its
-        nearest graph vertex; NaN when the graph is empty). The snap
-        columns feed the quality sidecar's ``unsnapped`` classification.
-    """
+    """Add network_m (NaN when no path within *cutoff_m*) and snap_m_a/snap_m_b to each pair."""
     result = stop_pairs.copy()
     result["network_m"] = np.nan
     if len(node_xy) == 0 or stop_pairs.empty:
@@ -196,8 +137,7 @@ def pair_network_distances(
     result["snap_m_a"] = result["stop_uid_a"].map(snap_of)
     result["snap_m_b"] = result["stop_uid_b"].map(snap_of)
 
-    # Group pair rows by snapped SOURCE VERTEX (stops sharing a vertex are
-    # routed once) and batch the sources through scipy's C Dijkstra.
+    # Route each source vertex once, in batches.
     by_vertex: dict[int, list[int]] = {}
     for row_idx, (a, b) in enumerate(zip(result["stop_uid_a"], result["stop_uid_b"])):
         if a in node_of and b in node_of:
@@ -213,7 +153,7 @@ def pair_network_distances(
         source_vertices = sorted(by_vertex)
         for start in range(0, len(source_vertices), _DIJKSTRA_CHUNK):
             chunk = source_vertices[start : start + _DIJKSTRA_CHUNK]
-            # limit= bounds the search radius; unreached vertices read inf.
+            # Vertices beyond the limit come back as inf.
             dmat = dijkstra(graph, directed=True, indices=chunk, limit=cutoff_m)
             for row_in_chunk, vertex in enumerate(chunk):
                 for i in by_vertex[vertex]:
@@ -225,19 +165,9 @@ def pair_network_distances(
 
 
 def _finalize_pairs(pairs: pd.DataFrame) -> pd.DataFrame:
-    """Fold ``network_m`` into ``distance_m`` and label each pair's source.
-
-    Args:
-        pairs: :func:`pair_network_distances` output (has ``network_m``).
-
-    Returns:
-        The frame with ``distance_m`` network-refined where a path exists
-        (never shorter than the straight line), ``line_m`` preserving the
-        original straight-line value, and ``walk_source``
-        (``"network"``/``"straight_line"``); ``network_m`` dropped.
-    """
+    """Use network_m as distance_m where routed; keep the straight line in line_m."""
     pairs["line_m"] = pairs["distance_m"]
-    # A street path can never beat the straight line; clip guards snap noise.
+    # A street path can't be shorter than the straight line.
     routed = pairs["network_m"].notna()
     pairs.loc[routed, "distance_m"] = np.maximum(
         pairs.loc[routed, "network_m"], pairs.loc[routed, "line_m"]
@@ -262,7 +192,7 @@ def _build_or_load_graph(
     geom_column: str,
     cache_dir: Optional[Path],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """The walk graph for these inputs, via the npz cache when enabled."""
+    """Load the walk graph from the cache, or build (and cache) it."""
     key = None
     if cache_dir is not None:
         try:
@@ -309,20 +239,9 @@ def network_distances(
     geom_column: str = "way",
     cache_dir: Optional[Path] = None,
 ) -> pd.DataFrame:
-    """End to end: OSM walk graph -> per-pair network walking distances.
+    """Replace pair distances with street walking distances where a path exists.
 
-    Args:
-        cache_dir: directory for the on-disk walk-graph cache
-            (``graph_cache``); ``None`` disables caching (default).
-
-    Returns:
-        ``stop_pairs`` with ``distance_m`` replaced by the network distance
-        where a path exists (never shorter than the straight line), plus
-        provenance columns for the quality sidecar: ``line_m`` (original
-        straight-line value), ``walk_source`` (``network``/``straight_line``
-        per pair), and ``snap_m_a``/``snap_m_b`` (endpoint snap distances).
-        When *stop_pairs* is empty it is returned unchanged (no columns
-        added) - consumers treat the missing columns as "never ran".
+    Adds line_m, walk_source and snap columns. *cache_dir* None disables the cache.
     """
     if stop_pairs.empty:
         return stop_pairs

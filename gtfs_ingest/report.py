@@ -1,11 +1,4 @@
-"""Validation/coverage report emission (JSON + Markdown).
-
-The JSON file is the machine-readable source of truth: it is the direct
-serialization of :class:`~gtfs_ingest.models.RunReport`, so its schema is
-exactly the pydantic model. The Markdown file renders the same data for
-humans: a run summary, the feed x optional-file matrix, and one section per
-feed with row counts and findings.
-"""
+"""Phase 1 validation report: JSON (the RunReport model as-is) and Markdown for people."""
 
 from __future__ import annotations
 
@@ -28,18 +21,7 @@ def build_run_report(
     generated_at: Optional[datetime] = None,
     analysis_date: Optional[str] = None,
 ) -> RunReport:
-    """Assemble the top-level report object.
-
-    Args:
-        feeds: one report per processed feed.
-        dry_run: whether DB writes were skipped this run.
-        generated_at: timestamp override (mainly for tests); defaults to now
-            in UTC.
-        analysis_date: the run's resolved analysis clock (ISO date).
-
-    Returns:
-        The complete :class:`RunReport`.
-    """
+    """Assemble the run report; *generated_at* defaults to now (UTC)."""
     ts = generated_at or datetime.now(timezone.utc)
     return RunReport(
         generated_at=ts.isoformat(timespec="seconds"),
@@ -50,18 +32,10 @@ def build_run_report(
 
 
 def write_reports(report: RunReport, out_dir: Path) -> tuple[Path, Path]:
-    """Write the JSON and Markdown reports to *out_dir* (created if needed).
-
-    Args:
-        report: the assembled run report.
-        out_dir: target directory.
-
-    Returns:
-        ``(json_path, markdown_path)``.
+    """Write both reports to *out_dir* and return (json_path, markdown_path).
 
     Raises:
-        OSError: if the directory/files cannot be written - this is a fatal
-            configuration problem, not a per-feed one, so it propagates.
+        OSError: if the folder cannot be written (a run-level problem).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = out_dir / JSON_NAME
@@ -73,15 +47,7 @@ def write_reports(report: RunReport, out_dir: Path) -> tuple[Path, Path]:
 
 
 def render_markdown(report: RunReport) -> str:
-    """Render the run report as human-readable Markdown.
-
-    Args:
-        report: the assembled run report.
-
-    Returns:
-        Markdown text with a run summary table, the feed x optional-file
-        matrix, and a per-feed detail section (row counts + findings).
-    """
+    """Markdown: summary table, optional-file matrix, then row counts and findings per feed."""
     lines: list[str] = [
         "# GTFS Ingestion & Validation Report",
         "",

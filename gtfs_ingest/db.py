@@ -1,7 +1,4 @@
-"""
-GTFS ingest database schema and load functions.
-Basic PostGIS schema for normalized stops, plus idempotent load of one feed's stops.
-"""
+"""PostGIS stops table: engine, schema, and delete-and-reload of one feed's stops."""
 
 from __future__ import annotations
 
@@ -17,7 +14,6 @@ from .bulk import copy_rows
 
 log = logging.getLogger(__name__)
 
-#: Table + index DDL. IF NOT EXISTS keeps schema creation idempotent.
 _DDL_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS stops (
@@ -53,10 +49,9 @@ _INSERT_SQL = text(
     """
 )
 
-#: Rows per executemany batch (keeps memory bounded on huge feeds).
 _CHUNK_SIZE = 1000
 
-#: Scalar columns staged through the COPY temp table (geom is built in SQL).
+#: Columns copied into the temp table; geom is built in SQL.
 _STOP_COLUMNS = [
     "stop_uid", "stop_num_id", "feed_id", "stop_id", "stop_name",
     "stop_lat", "stop_lon", "location_type", "parent_station",
@@ -93,18 +88,7 @@ _INSERT_FROM_TEMP_SQL = text(
 
 
 def make_engine(db_url: str) -> Engine:
-    """Create a SQLAlchemy 2.x engine bound to the psycopg (v3) driver.
-
-    Args:
-        db_url: SQLAlchemy URL. A bare ``postgresql://`` scheme is upgraded
-            to ``postgresql+psycopg://`` so psycopg v3 is always used.
-
-    Returns:
-        A lazily-connecting engine (no connection is attempted here).
-
-    Raises:
-        sqlalchemy.exc.ArgumentError: if the URL is not parseable.
-    """
+    """SQLAlchemy engine on psycopg v3; a plain postgresql:// URL is upgraded."""
     url = make_url(db_url)
     if url.drivername == "postgresql":
         url = url.set(drivername="postgresql+psycopg")
@@ -112,18 +96,12 @@ def make_engine(db_url: str) -> Engine:
 
 
 def ensure_schema(engine: Engine) -> None:
-    """Create the PostGIS extension (best effort) and the stops table/indexes.
-
-    Args:
-        engine: engine from :func:`make_engine`.
+    """Enable PostGIS if possible and create the stops table.
 
     Raises:
-        RuntimeError: if PostGIS is not installed and cannot be enabled
-            (the geometry column is unusable without it).
-        sqlalchemy.exc.SQLAlchemyError: on connection/DDL failure.
+        RuntimeError: PostGIS is not available.
     """
-    # Separate transaction: CREATE EXTENSION needs elevated rights and its
-    # failure would poison the transaction the DDL runs in.
+    # Own transaction: CREATE EXTENSION may fail without superuser rights.
     try:
         with engine.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
@@ -146,40 +124,21 @@ def ensure_schema(engine: Engine) -> None:
 
 
 def _records(stops: pd.DataFrame) -> list[dict]:
-    """Convert the normalized frame to psycopg-friendly dicts (NaN/NA -> None)."""
+    """Stops as dicts without geometry, NaN turned into None."""
     df = stops.drop(columns="geometry", errors="ignore").copy()
     df = df.astype(object).where(pd.notna(df), None)
     return df.to_dict("records")
 
 
 def load_feed_stops(engine: Engine, feed_id: str, stops: pd.DataFrame) -> int:
-    """Idempotently (re)load one feed's normalized stops.
-
-    Deletes the feed's existing rows and inserts the new set in a single
-    transaction (see module docstring for why delete-and-reload was chosen).
-
-    Args:
-        engine: engine from :func:`make_engine`; schema must already exist.
-        feed_id: provenance id whose rows are replaced.
-        stops: normalized stops frame from ``normalizer.normalize_stops``.
-            An empty frame simply clears the feed's rows.
-
-    Returns:
-        Number of rows inserted.
-
-    Raises:
-        sqlalchemy.exc.SQLAlchemyError: on database failure; the transaction
-            rolls back, leaving the previously loaded data intact. The
-            pipeline catches this per feed and records it as a finding.
-    """
+    """Replace this feed's rows in the stops table (one transaction) and return the count."""
     started = time.perf_counter()
     frame = stops.drop(columns="geometry", errors="ignore")
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM stops WHERE feed_id = :feed_id"), {"feed_id": feed_id})
         if len(frame):
             try:
-                # Fast path: COPY into a temp table, build geom in one INSERT.
-                # SAVEPOINT keeps the transaction usable if COPY fails.
+                # COPY into a temp table, then build geom in one INSERT (savepoint for fallback).
                 with conn.begin_nested():
                     conn.execute(_TEMP_TABLE_SQL)
                     copy_rows(conn, "tmp_stops", frame[_STOP_COLUMNS])

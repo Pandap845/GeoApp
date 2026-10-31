@@ -1,29 +1,10 @@
-"""Station Locator: route geocoding + travel times (GetlocationApiGoogle.md).
+"""Station locator: turn a list of station names into a route with coordinates and times.
 
-Re-implements the Station Locator flow on this package's Phase 4 rails:
-read a list of station names from a TXT/CSV file, resolve each name to
-coordinates with **Text Search** (anchored to the previously resolved
-station to disambiguate homonyms), fall back to the **Geocoding API**,
-compute the travel time between consecutive stations with the **Distance
-Matrix API** (or a Haversine estimate), and export the resulting directed
-route to an Excel file plus the usual JSON + Markdown report.
-
-Rails kept from the QA cross-check (same client, same guarantees):
-
-- OFF by default: needs the explicit enable flag AND ``GOOGLE_MAPS_API_KEY``
-  in the environment (no CLI flag for the key); otherwise a clean no-op.
-- Hard ``--max-calls`` budget, rate limit, backoff, ``--dry-run`` (no API
-  calls at all), and never crashing on API errors (``None`` sentinels keep
-  the fallback chain going).
-- NO database writes, ever. Unlike the QA verdict tables, this tool's
-  entire purpose is exporting resolved names/coordinates for the user's
-  route file — that Google-derived content goes to the export file ONLY,
-  never to PostGIS (see the README licensing note before enabling).
-
-Anchoring (duplicate-name disambiguation): the coordinates of the previous
-successfully resolved station are passed as a Text Search location bias
-circle of ``search_radius_m`` so Google ranks results near the route first.
-The first station of a run has no anchor.
+Each name is resolved with Text Search, biased toward the previous station so
+namesakes elsewhere lose; Geocoding is the fallback. Travel times come from
+Distance Matrix, else a straight-line estimate. Output: an Excel route plus
+JSON/Markdown reports. Same rules as Google QA (opt-in, budget, dry run), and
+nothing is ever written to the database. See docs/guide/google-apis.md.
 """
 
 from __future__ import annotations
@@ -43,14 +24,14 @@ log = logging.getLogger(__name__)
 LOCATOR_JSON = "station_locator_report.json"
 LOCATOR_MD = "station_locator_report.md"
 
-#: Text Search mask - exactly what the locator consumes, nothing more.
+#: Only the fields the locator uses.
 TEXT_SEARCH_FIELD_MASK: tuple[str, ...] = (
     "places.id",
     "places.displayName",
     "places.location",
 )
 
-#: GUI transport type -> (Distance Matrix mode, transit_mode).
+#: Transport type -> (Distance Matrix mode, transit_mode).
 TRANSPORT_MODE_MAP: dict[str, tuple[str, str]] = {
     "SITREN": ("transit", "train"),
     "MIMACRO": ("transit", "bus"),
@@ -66,11 +47,7 @@ EXCEL_HEADER: tuple[str, ...] = (
 
 
 class LocatorConfig(BaseModel):
-    """Configuration of one locate-stations run.
-
-    ``api_key`` is excluded from reprs; it must come from the environment
-    (the CLI has no flag for it, by design — same rule as the QA phase).
-    """
+    """Configuration of one locate-stations run (api_key comes from the environment only)."""
 
     stations_file: Optional[Path] = None
     report_dir: Path = Path("out")
@@ -122,19 +99,8 @@ class LocatorReport(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
-# --------------------------------------------------------------------------
-# Pure helpers (no I/O, no API)
-# --------------------------------------------------------------------------
-
 def read_station_list(path: Path) -> list[str]:
-    """Station names from a TXT/CSV file (comma- and/or newline-separated).
-
-    Order is preserved (it defines the route); blanks are dropped,
-    duplicates are kept (a route may legitimately revisit a name).
-
-    Raises:
-        OSError: unreadable file.
-    """
+    """Station names in file order (comma or newline separated); repeats are kept."""
     names: list[str] = []
     for line in path.read_text(encoding="utf-8-sig").splitlines():
         names.extend(part.strip() for part in line.split(",") if part.strip())
@@ -142,7 +108,7 @@ def read_station_list(path: Path) -> list[str]:
 
 
 def build_query(station: str, transport_type: str, line: Optional[str]) -> str:
-    """The Spanish Text Search query, exactly as the original app builds it."""
+    """Spanish Text Search query, as the original app builds it."""
     query = f"Estación {transport_type} {station}".strip()
     if line:
         query += f" línea {line}"
@@ -158,18 +124,14 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def estimate_minutes(a: tuple[float, float], b: tuple[float, float], avg_speed_kmh: float) -> float:
-    """Straight-line travel time estimate at the configured average speed."""
+    """Minutes at *avg_speed_kmh* along the straight line."""
     return round(haversine_km(a[0], a[1], b[0], b[1]) / avg_speed_kmh * 60, 1)
 
 
 def transit_mode_for(transport_type: str) -> tuple[str, str]:
-    """Map the transport type to Distance Matrix ``(mode, transit_mode)``."""
+    """Distance Matrix (mode, transit_mode) for a transport type."""
     return TRANSPORT_MODE_MAP.get(transport_type.upper(), DEFAULT_TRANSIT_MODE)
 
-
-# --------------------------------------------------------------------------
-# Resolution (Text Search with anchor -> Geocoding fallback)
-# --------------------------------------------------------------------------
 
 def _resolve_station(
     client: GooglePlacesClient,
@@ -177,14 +139,9 @@ def _resolve_station(
     station: str,
     anchor: Optional[tuple[float, float]],
 ) -> tuple[Optional[float], Optional[float], Optional[str]]:
-    """One station -> ``(lat, lon, source)``; Nones when both APIs failed.
+    """Return (lat, lon, source) for one station, or Nones if both APIs fail.
 
-    Takes the FIRST Text Search result — the anchor bias is what makes the
-    first result trustworthy. The Geocoding fallback prefers the name Text
-    Search recommended (if any) over the raw constructed query.
-
-    Raises:
-        CallBudgetExhausted: budget ceiling reached mid-resolution.
+    Uses the first Text Search hit (the bias toward the anchor makes it reliable).
     """
     query = build_query(station, config.transport_type, config.line)
     places = client.search_text(
@@ -208,20 +165,11 @@ def _resolve_station(
     return None, None, None
 
 
-# --------------------------------------------------------------------------
-# Orchestration
-# --------------------------------------------------------------------------
-
 def run_station_locator(config: LocatorConfig) -> LocatorReport:
-    """Execute (or cleanly skip) a locate-stations run.
-
-    Returns:
-        The report (also written to ``config.report_dir``). Skips are
-        reported with a clear status, never raised.
+    """Run or skip the locator and write its reports.
 
     Raises:
-        ValueError: enabled run without a readable stations file.
-        OSError: run-level problems (report dir, export file).
+        ValueError: enabled without a readable stations file.
     """
     now = datetime.now(timezone.utc)
     report = LocatorReport(
@@ -231,7 +179,7 @@ def run_station_locator(config: LocatorConfig) -> LocatorReport:
         budget_remaining=config.max_calls,
     )
 
-    # ---- gating: OFF unless flag AND key are both present -----------------
+    # Off unless both the flag and the key are present.
     if not config.enabled:
         report.status = "skipped_disabled"
         report.notes.append("locate-stations is OFF by default; pass --enable-google-api to run it")
@@ -271,8 +219,8 @@ def run_station_locator(config: LocatorConfig) -> LocatorReport:
     rows = [StationRow(index=i + 1, name=name) for i, name in enumerate(stations)]
     budget_hit = False
     try:
-        # ---- (1) geocode every station first, updating the anchor ---------
-        anchor: Optional[tuple[float, float]] = None  # reset at run start
+        # Resolve every station; each success becomes the next anchor.
+        anchor: Optional[tuple[float, float]] = None
         for row in rows:
             try:
                 lat, lon, source = _resolve_station(client, config, row.name, anchor)
@@ -283,7 +231,7 @@ def run_station_locator(config: LocatorConfig) -> LocatorReport:
             if lat is not None and lon is not None:
                 anchor = (lat, lon)
 
-        # ---- (2) directed edges between consecutive stations --------------
+        # Travel time from each station to the next.
         use_matrix = config.use_distance_matrix and not budget_hit
         mode, transit_mode = transit_mode_for(config.transport_type)
         generic = round(config.max_route_minutes / len(stations), 1)
@@ -346,12 +294,8 @@ def run_station_locator(config: LocatorConfig) -> LocatorReport:
     return report
 
 
-# --------------------------------------------------------------------------
-# Exports
-# --------------------------------------------------------------------------
-
 def _write_excel(rows: list[StationRow], config: LocatorConfig, path: Path) -> None:
-    """Excel export with the original app's columns; last station gets N/A."""
+    """Excel route with the original app's columns; the last station gets N/A."""
     from openpyxl import Workbook
 
     workbook = Workbook()

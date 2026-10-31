@@ -32,10 +32,7 @@ def place(pid="p1", types=(), transit=None) -> PlaceResult:
     )
 
 
-# --------------------------------------------------------------------------
 # Mode extraction
-# --------------------------------------------------------------------------
-
 def test_vehicle_types_extracted_from_nested_payload() -> None:
     payload = {"lines": [{"vehicleType": "BUS"}, {"vehicle": {"vehicleType": "heavy_rail"}}]}
     assert extract_vehicle_types(payload) == {"BUS", "HEAVY_RAIL"}
@@ -51,10 +48,7 @@ def test_mode_set_maps_vehicle_types_with_place_type_fallback() -> None:
     assert google_mode_set(places) == {1, 3}         # metro + bus
 
 
-# --------------------------------------------------------------------------
 # Verdicts
-# --------------------------------------------------------------------------
-
 def test_interchange_verdicts() -> None:
     bus_rail = [place("g1", types=["transit_station"],
                       transit={"lines": [{"vehicleType": "BUS"}, {"vehicleType": "RAIL"}]})]
@@ -81,10 +75,7 @@ def test_stop_verdicts() -> None:
     assert stop_verdict(None) == ("NO_DATA", None)     # call failed: no answer
 
 
-# --------------------------------------------------------------------------
 # Client (httpx.MockTransport - no network)
-# --------------------------------------------------------------------------
-
 def make_client(handler, max_calls=10) -> GooglePlacesClient:
     return GooglePlacesClient(
         api_key="test-key",
@@ -170,10 +161,7 @@ def test_field_names_only_redacts_values() -> None:
     assert not any("SECRET" in n or n == "x" for n in names)
 
 
-# --------------------------------------------------------------------------
 # Gating: OFF by default, no key -> clean no-op (no DB, no network)
-# --------------------------------------------------------------------------
-
 def test_pipeline_noop_when_disabled(tmp_path: Path) -> None:
     report = run_google_qa(QaConfig(enabled=False, report_dir=tmp_path))
     assert report.status == "skipped_disabled"

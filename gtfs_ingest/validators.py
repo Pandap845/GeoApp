@@ -1,29 +1,9 @@
-"""Integrity validation for loaded GTFS feeds.
+"""Feed validation: run every check and return all findings, never raising.
 
-``validate_feed`` runs *all* checks and returns the full list of findings -
-it never stops at the first problem and never raises. Every individual check
-is additionally wrapped so that an unexpected crash inside one check becomes
-an ERROR finding (code ``validator_crash``) rather than aborting the feed.
-
-Checks performed (see README for the full documented list):
-  * required files present; calendar.txt OR calendar_dates.txt present
-  * required files non-empty; all present files parseable
-  * required columns present per file
-  * stops.txt: non-null stop_id, coordinate parseability + WGS84 range,
-    duplicate stop_id detection, parent_station referential integrity
-  * cross-file referential integrity: trips.route_id -> routes.route_id,
-    stop_times.trip_id -> trips.trip_id, stop_times.stop_id -> stops.stop_id
-  * calendar expiry: WARNING when the feed's declared service (calendar +
-    added calendar_dates) has entirely ended before today
-  * inventory of optional files (INFO)
-
-Severity policy:
-  * ERROR   - spec violation or data loss (missing/empty/unreadable required
-    file, missing required column, bad ids, bad coordinates, dangling
-    trip/stop_time references).
-  * WARNING - recoverable oddity; loading proceeds (dangling parent_station,
-    since a stop is still a valid point without its station).
-  * INFO    - inventory facts (optional files present/absent).
+Checks: required files and columns, readable tables, stop ids and
+coordinates, parent_station links, trips/stop_times references, calendar
+expiry, optional-file inventory. A check that crashes becomes a
+validator_crash ERROR instead of stopping the feed.
 """
 
 from __future__ import annotations
@@ -46,7 +26,7 @@ from .models import (
 
 log = logging.getLogger(__name__)
 
-#: Max number of example offending values attached to a finding.
+#: Max example values per finding.
 _SAMPLE_SIZE = 5
 
 
@@ -56,22 +36,14 @@ def _sample(values: pd.Series) -> list[str]:
 
 
 def _clean_ids(series: pd.Series) -> pd.Series:
-    """Whitespace-stripped string view of an id column ('' stays '')."""
+    """Id column as stripped strings."""
     return series.astype("string").str.strip()
 
 
 def validate_feed(loaded: LoadedFeed, analysis_date: Optional[date] = None) -> list[Finding]:
-    """Run every integrity check against one feed.
+    """All findings for one feed, in check order (empty = clean). Never raises.
 
-    Args:
-        loaded: feed as returned by ``loader.load_feed``.
-        analysis_date: reference date for the expiry check (the run's
-            injectable "analysis clock"); ``None`` uses today.
-
-    Returns:
-        All findings, in check order. Empty list means a fully clean feed.
-        Never raises: unexpected exceptions inside a check are converted to
-        an ERROR finding with code ``validator_crash``.
+    *analysis_date* is the reference date for the expiry check (default: today).
     """
     findings: list[Finding] = []
 
@@ -84,8 +56,7 @@ def validate_feed(loaded: LoadedFeed, analysis_date: Optional[date] = None) -> l
             )
         )
 
-    # Problems detected while opening the source itself (CSV encoding, delimiter,
-    # header resolution) are findings like any other and belong in the report.
+    # Problems found while opening the source (e.g. CSV header).
     findings.extend(loaded.load_findings)
 
     def _calendar_expiry(inner: LoadedFeed, out: list[Finding]) -> None:
@@ -117,20 +88,11 @@ def validate_feed(loaded: LoadedFeed, analysis_date: Optional[date] = None) -> l
     return findings
 
 
-# --------------------------------------------------------------------------
-# Individual checks (each appends to `findings`, never raises intentionally)
-# --------------------------------------------------------------------------
-
 def _check_required_files(loaded: LoadedFeed, findings: list[Finding]) -> None:
-    """ERROR for each missing required file; calendar handled as either/or.
+    """ERROR per missing required file; at least one calendar file is required.
 
-    This is the only check that is not gated on a file being present, so it is
-    also the only one a stops-only source has to opt out of: such a source is
-    not a GTFS feed and never claimed to be, and reporting five ERRORs for
-    files it cannot have would both drown its real findings and make
-    ``--fail-on-error`` reject a perfectly good stop list. Every other check
-    self-gates and still runs in full - coordinates, duplicate ids and null ids
-    are validated exactly as they are for a real feed.
+    Stops-only sources skip this check (they are not GTFS feeds) but still get
+    every other check.
     """
     if loaded.is_stops_only:
         findings.append(
@@ -170,7 +132,7 @@ def _check_required_files(loaded: LoadedFeed, findings: list[Finding]) -> None:
 
 
 def _check_table_readability(loaded: LoadedFeed, findings: list[Finding]) -> None:
-    """Force-read every present file; ERROR on parse failure or empty required file."""
+    """Read every file; ERROR if one can't be parsed or a required one is empty."""
     conditionally_required = set(REQUIRED_FILES) | set(CALENDAR_FILES)
     for name in sorted(loaded.files_present):
         df = loaded.table(name)  # records parse errors in table_errors
@@ -215,12 +177,11 @@ def _check_required_columns(loaded: LoadedFeed, findings: list[Finding]) -> None
 
 
 def _check_stops(loaded: LoadedFeed, findings: list[Finding]) -> None:
-    """stop_id nullness/duplication, coordinate sanity, parent_station links."""
+    """Blank or repeated stop_ids, bad coordinates, broken parent_station links."""
     stops = loaded.table("stops.txt")
     if stops is None or stops.empty:
         return
 
-    # --- stop_id present and non-blank -----------------------------------
     if "stop_id" not in stops.columns:
         return  # missing_required_columns already covers this
     stop_ids = _clean_ids(stops["stop_id"])
@@ -236,7 +197,6 @@ def _check_stops(loaded: LoadedFeed, findings: list[Finding]) -> None:
             )
         )
 
-    # --- duplicate stop_id -------------------------------------------------
     valid_ids = stop_ids[~blank_mask]
     dupes = valid_ids[valid_ids.duplicated()]
     if not dupes.empty:
@@ -251,9 +211,7 @@ def _check_stops(loaded: LoadedFeed, findings: list[Finding]) -> None:
             )
         )
 
-    # --- coordinates --------------------------------------------------------
-    # location_type 3 (generic node) and 4 (boarding area) may legally omit
-    # coordinates; every other row must have parseable, in-range values.
+    # location_type 3 and 4 may omit coordinates; all other rows need valid ones.
     if "location_type" in stops.columns:
         loc_type = pd.to_numeric(stops["location_type"], errors="coerce").fillna(0)
     else:
@@ -284,7 +242,6 @@ def _check_stops(loaded: LoadedFeed, findings: list[Finding]) -> None:
                 )
             )
 
-    # --- parent_station referential integrity ------------------------------
     if "parent_station" in stops.columns:
         parents = _clean_ids(stops["parent_station"])
         has_parent = parents.notna() & (parents != "")
@@ -315,7 +272,7 @@ def _ref_check(
     parent_file: str,
     parent_col: str,
 ) -> None:
-    """ERROR if child[child_col] contains values absent from parent[parent_col]."""
+    """ERROR if child[child_col] has values missing from parent[parent_col]."""
     if child is None or parent is None or child.empty:
         return
     if child_col not in child.columns or parent_col not in parent.columns:
@@ -341,7 +298,7 @@ def _ref_check(
 
 
 def _check_referential_integrity(loaded: LoadedFeed, findings: list[Finding]) -> None:
-    """trips->routes, stop_times->trips, stop_times->stops link checks."""
+    """Check trips -> routes, stop_times -> trips and stop_times -> stops."""
     routes = loaded.table("routes.txt")
     trips = loaded.table("trips.txt")
     stops = loaded.table("stops.txt")
@@ -356,21 +313,9 @@ def calendar_range(
     calendar: Optional[pd.DataFrame],
     calendar_dates: Optional[pd.DataFrame],
 ) -> tuple[Optional[date], Optional[date]]:
-    """(earliest service start, latest service end) declared by a feed.
+    """(first, last) service date from calendar.txt plus added calendar_dates; Nones if none.
 
-    Combines ``calendar.txt`` ``start_date``/``end_date`` with
-    ``calendar_dates.txt`` ADDED dates (``exception_type`` 1 - type-2
-    removals never extend service; a missing exception_type column counts
-    every date, tolerant). Unparseable YYYYMMDD values are skipped.
-
-    Also used by Phase 2 for the per-feed expiry note.
-
-    Args:
-        calendar: raw calendar.txt frame (or ``None``).
-        calendar_dates: raw calendar_dates.txt frame (or ``None``).
-
-    Returns:
-        ``(start, end)`` as dates; ``(None, None)`` when nothing parses.
+    Removed dates (exception_type 2) never extend the range. Used by Phase 2 too.
     """
     def _dates(frame: Optional[pd.DataFrame], column: str) -> pd.Series:
         if frame is None or frame.empty or column not in frame.columns:
@@ -398,12 +343,7 @@ def calendar_range(
 def _check_calendar_expiry(
     loaded: LoadedFeed, findings: list[Finding], today: Optional[date] = None
 ) -> None:
-    """WARNING when the feed's declared service has entirely ended.
-
-    Args:
-        today: the run's analysis date (injectable clock); ``None`` falls
-            back to the wall clock.
-    """
+    """WARNING when all of the feed's service ended before *today* (default: real today)."""
     _, end = calendar_range(
         loaded.table("calendar.txt"), loaded.table("calendar_dates.txt")
     )
@@ -427,7 +367,7 @@ def _check_calendar_expiry(
 
 
 def _report_optional_files(loaded: LoadedFeed, findings: list[Finding]) -> None:
-    """INFO finding summarizing which optional files the feed ships."""
+    """INFO finding listing which optional files the feed has."""
     present = [f for f in OPTIONAL_FILES if f in loaded.files_present]
     absent = [f for f in OPTIONAL_FILES if f not in loaded.files_present]
     findings.append(
@@ -444,13 +384,5 @@ def _report_optional_files(loaded: LoadedFeed, findings: list[Finding]) -> None:
 
 
 def optional_file_matrix(loaded: LoadedFeed) -> dict[str, bool]:
-    """Presence map of every tracked optional file for this feed.
-
-    Args:
-        loaded: feed to inspect.
-
-    Returns:
-        ``{optional_filename: is_present}`` for all of ``OPTIONAL_FILES``;
-        feeds that failed to open report every file as absent.
-    """
+    """{optional file: present?} for every tracked optional file."""
     return {name: name in loaded.files_present for name in OPTIONAL_FILES}

@@ -1,39 +1,14 @@
-"""Offline Neo4j load package built from analyze-frequency outputs.
+"""Offline Neo4j load package built from an analyze-frequency report folder.
 
-Reads a report directory (``station_network_nodes.csv``,
-``station_network_edges.csv``, plus ``route_connectivity.graphml`` and
-``stop_equivalences.csv`` when present) and writes ``<report>/neo4j/``:
-data CSVs with **neo4j-admin inline headers** plus a generated
-``load.cypher``. One CSV set serves both load paths:
+Reads the station-network CSVs (plus route_connectivity.graphml and
+stop_equivalences.csv when present) and writes <report>/neo4j/: CSVs with
+neo4j-admin headers, load.cypher for cypher-shell, and post_import.cypher
+plus admin_import.txt for a bulk import.
 
-* ``neo4j-admin database import full`` consumes the files directly
-  (see ``admin_import.txt``; run ``post_import.cypher`` afterwards);
-* any running instance loads them with ``cypher-shell -f load.cypher``
-  (the script accesses the admin-style columns with backticks).
-
-Graph model:
-
-* ``(:Stop {stop_uid})`` - every analyzed stop, with name/feed/lat/lon and
-  a ``location`` point (Cypher path);
-* ``(:Route {route_uid})`` - line metadata from the route GraphML
-  (short/long name, route_type, modalidad); degrades to uid-only nodes
-  with a warning when the GraphML is absent;
-* ``(:Station {canonical_uid})`` - one per multi-member dedupe group only
-  (a station per stop would add thousands of no-information nodes);
-* ``[:IN_VEHICLE {time_min, linea, direction_id, route_uid}]`` directed;
-* ``[:WALK {time_min, distance_m}]`` and ``[:SAME_STATION]`` stored once
-  per pair - query them undirected (``-[:WALK]-``);
-* ``(:Route)-[:SERVES]->(:Stop)`` derived from the in_vehicle endpoints
-  (a route with no timed consecutive pair yields no SERVES - documented
-  limitation, none in current data);
-* ``(:Stop)-[:PART_OF]->(:Station)`` for every member of a group,
-  including the canonical stop itself.
-
-Safety: no data value is ever interpolated into the ``.cypher`` files -
-everything flows through pandas-quoted CSV, so names with quotes/accents
-cannot break the script. ``:ID(Stop)``/``:ID(Station)``/``:ID(Route)``
-ID spaces prevent the admin-path collision between a Station's id and its
-canonical Stop's id (they are the same string).
+Graph: Stop, Route and Station nodes (Station only for groups with 2+ stops);
+IN_VEHICLE (directed), WALK and SAME_STATION (stored once, query undirected),
+SERVES and PART_OF. No data value is ever written into the .cypher text;
+everything goes through quoted CSV.
 """
 
 from __future__ import annotations
@@ -66,9 +41,7 @@ FRAME_FILES: dict[str, str] = {
     "rel_part_of": "rel_part_of.csv",
 }
 
-#: frame key -> {plain column -> neo4j-admin header column}. Single source
-#: of truth: the writers AND the Cypher renderer both read this map, so
-#: filenames, columns and the script can never drift apart.
+#: frame key -> {column -> neo4j-admin header}. Writers and Cypher both read this map.
 ADMIN_HEADERS: dict[str, dict[str, str]] = {
     "stops": {
         "stop_uid": "stop_uid:ID(Stop)",
@@ -126,7 +99,7 @@ ADMIN_HEADERS: dict[str, dict[str, str]] = {
     },
 }
 
-#: Node label / relationship type per frame key (admin command + Cypher).
+#: Node label or relationship type per frame key.
 FRAME_KIND: dict[str, tuple[str, str]] = {
     "stops": ("node", "Stop"),
     "routes": ("node", "Route"),
@@ -150,18 +123,10 @@ class Neo4jInputs:
 
 
 def load_inputs(report_dir: Path) -> Neo4jInputs:
-    """Read the analyze-frequency outputs the exporter needs.
-
-    Args:
-        report_dir: an ``analyze-frequency`` report directory.
-
-    Returns:
-        The loaded frames; routes degrade to uid-only (from the edges) with
-        a warning when the GraphML is absent; equivalences may be ``None``.
+    """Read the report files the exporter needs.
 
     Raises:
-        ValueError: when a required file is missing (the caller maps this
-            to exit code 1 with the "run analyze-frequency first" hint).
+        ValueError: a required file is missing (run analyze-frequency first).
     """
     missing = [name for name in REQUIRED_FILES if not (report_dir / name).is_file()]
     if missing:
@@ -197,16 +162,7 @@ def _edge_subset(edges: pd.DataFrame, kind: str) -> pd.DataFrame:
 
 
 def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
-    """Assemble the eight frames of the load package (plain column names).
-
-    Pure - all decisions documented in the module docstring happen here:
-    Station only for multi-member canonical groups, SERVES from in_vehicle
-    endpoints, ``direction_id`` normalized to string (it is a MERGE key).
-
-    Returns:
-        ``{frame_key: DataFrame}`` keyed exactly as :data:`FRAME_FILES`;
-        empty inputs yield empty (but correctly-columned) frames.
-    """
+    """Build the eight package tables, keyed as in FRAME_FILES."""
     nodes, edges = inputs.nodes, inputs.edges
 
     stops = pd.DataFrame(columns=list(ADMIN_HEADERS["stops"]))
@@ -215,7 +171,7 @@ def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
         stops["canonical_uid"] = stops["canonical_uid"].fillna(stops["stop_uid"])
         stops = stops.sort_values("stop_uid", kind="mergesort").reset_index(drop=True)
 
-    # Routes: GraphML attrs when available, else uid-only from the edges.
+    # Routes: GraphML attributes when available, else just the uid.
     route_cols = list(ADMIN_HEADERS["routes"])
     routes = inputs.routes.copy()
     if routes.empty or "route_uid" not in routes.columns:
@@ -230,7 +186,7 @@ def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
             routes[col] = None
     routes = routes[route_cols].sort_values("route_uid", kind="mergesort").reset_index(drop=True)
 
-    # Stations: only canonical groups with >1 member carry information.
+    # Stations: only groups with more than one stop.
     stations = pd.DataFrame(columns=list(ADMIN_HEADERS["stations"]))
     part_of = pd.DataFrame(columns=list(ADMIN_HEADERS["rel_part_of"]))
     if not stops.empty:
@@ -316,12 +272,9 @@ def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
     return frames
 
 
-# --------------------------------------------------------------------------
-# Renderers (all filenames/columns come from the maps above - never inline)
-# --------------------------------------------------------------------------
 
 def _col(frame_key: str, plain: str) -> str:
-    """The backticked admin-header column for Cypher row access."""
+    """Backticked admin-header column name for Cypher."""
     return f"row.`{ADMIN_HEADERS[frame_key][plain]}`"
 
 
@@ -334,11 +287,7 @@ CREATE POINT INDEX stop_location IF NOT EXISTS FOR (s:Stop) ON (s.location);
 
 
 def render_load_cypher(frames: dict[str, pd.DataFrame]) -> str:
-    """The idempotent LOAD CSV script (cypher-shell / Browser with :auto).
-
-    MERGE throughout so re-running is safe (slower than CREATE, fine at
-    this scale). WALK/SAME_STATION are merged undirected and stored once.
-    """
+    """Re-runnable LOAD CSV script (MERGE everywhere)."""
     f = FRAME_FILES
     lines = [
         "// Generated by gtfs-ingest export-neo4j.",
@@ -427,7 +376,7 @@ def render_load_cypher(frames: dict[str, pd.DataFrame]) -> str:
 
 
 def render_post_import_cypher() -> str:
-    """Constraints + location point, for AFTER a neo4j-admin bulk import."""
+    """Constraints and location points to run after a bulk import."""
     return "\n".join(
         [
             "// Run after `neo4j-admin database import` (see admin_import.txt):",
@@ -445,7 +394,7 @@ def render_post_import_cypher() -> str:
 
 
 def render_admin_command() -> str:
-    """The documented neo4j-admin bulk-import command (both shells)."""
+    """The neo4j-admin bulk-import command."""
     parts = []
     for key, (kind, label) in FRAME_KIND.items():
         flag = "--nodes" if kind == "node" else "--relationships"
@@ -473,18 +422,7 @@ def render_admin_command() -> str:
 
 
 def write_package(frames: dict[str, pd.DataFrame], out_dir: Path) -> list[Path]:
-    """Write the CSVs (admin headers) and the three text files.
-
-    Args:
-        frames: :func:`build_package` output (plain column names).
-        out_dir: package directory (created if needed).
-
-    Returns:
-        Every written path.
-
-    Raises:
-        OSError: if a file cannot be written (run-level problem).
-    """
+    """Write the CSVs and the three text files; return every path."""
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for key, filename in FRAME_FILES.items():
@@ -506,17 +444,10 @@ def write_package(frames: dict[str, pd.DataFrame], out_dir: Path) -> list[Path]:
 
 
 def run_export(report_dir: Path, out_dir: Optional[Path] = None) -> list[Path]:
-    """Build and write the package from a report directory.
-
-    Args:
-        report_dir: an ``analyze-frequency`` report directory.
-        out_dir: package destination; default ``<report_dir>/neo4j``.
-
-    Returns:
-        The written paths.
+    """Build and write the package; *out_dir* defaults to <report_dir>/neo4j.
 
     Raises:
-        ValueError: missing required inputs (caller maps to exit 1).
+        ValueError: required inputs are missing.
     """
     inputs = load_inputs(report_dir)
     frames = build_package(inputs)

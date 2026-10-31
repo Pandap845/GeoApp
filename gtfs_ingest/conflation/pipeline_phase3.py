@@ -1,20 +1,10 @@
 """Phase 3 orchestration: detect-interchanges and conflate-osm.
 
-``run_interchanges`` (Part A): feeds -> normalized stops + route/stop maps
-(Phase 1/2 code reused) -> DBSCAN + parent_station clusters -> mode sets ->
-transfers.txt cross-check -> ``interchanges`` table + report. Clustering
-uses the *full* feed (all trips regardless of service day): an interchange
-is infrastructure, not a schedule property.
-
-``run_conflation`` (Parts B + C): stops already in PostGIS + the OSM layers
-in the same database -> nearest transit node match with confidence, and
-nearest highway centerline with side-of-street. A database is required
-even with ``--dry-run`` (OSM is the reference source); dry-run only skips
-the table writes.
-
-Both follow the same failure contract as earlier phases: per-feed problems
-are recorded and skipped; only run-level problems (bad DB, missing OSM
-layers, unwritable report dir) abort.
+run_interchanges clusters stops into interchanges using every trip of the
+feed (an interchange is infrastructure, not a schedule). run_conflation
+matches stops to OSM and computes side of street; it always needs the
+database because OSM lives there, and --dry-run only skips the writes.
+A broken feed is recorded and skipped.
 """
 
 from __future__ import annotations
@@ -42,10 +32,6 @@ INTERCHANGE_MD = "interchanges_report.md"
 CONFLATION_JSON = "conflation_report.json"
 CONFLATION_MD = "conflation_report.md"
 
-
-# --------------------------------------------------------------------------
-# Configs
-# --------------------------------------------------------------------------
 
 class InterchangeConfig(BaseModel):
     """Configuration of one detect-interchanges run."""
@@ -81,10 +67,6 @@ class ConflationConfig(BaseModel):
     dry_run: bool = False
 
 
-# --------------------------------------------------------------------------
-# Reports
-# --------------------------------------------------------------------------
-
 class FeedNote(BaseModel):
     """Per-feed outcome in the interchange report."""
 
@@ -97,7 +79,7 @@ class FeedNote(BaseModel):
 
 
 class InterchangeReport(BaseModel):
-    """Top-level detect-interchanges report (serialized to JSON as-is)."""
+    """detect-interchanges report (written to JSON as-is)."""
 
     generated_at: str
     dry_run: bool
@@ -107,9 +89,9 @@ class InterchangeReport(BaseModel):
     dedupe_distance_m: float = DEDUPE_DISTANCE_M
     # None = within-feed dedupe was off (or the report predates the field).
     dedupe_within_feed_distance_m: Optional[float] = None
-    equivalence_groups: int = 0       # alias groups found (cross- + within-feed)
-    stops_deduplicated: int = 0       # stops belonging to some alias group
-    single_physical_station_clusters: int = 0  # clusters that are one station's aliases
+    equivalence_groups: int = 0
+    stops_deduplicated: int = 0
+    single_physical_station_clusters: int = 0  # clusters that are just one station's aliases
     feeds: list[FeedNote]
     clusters_total: int = 0
     multimodal_count: int = 0
@@ -119,7 +101,7 @@ class InterchangeReport(BaseModel):
 
 
 class ConflationReport(BaseModel):
-    """Top-level conflate-osm report (serialized to JSON as-is)."""
+    """conflate-osm report (written to JSON as-is)."""
 
     generated_at: str
     dry_run: bool
@@ -140,12 +122,8 @@ class ConflationReport(BaseModel):
     osm_only_by_kind: dict[str, int] = Field(default_factory=dict)
 
 
-# --------------------------------------------------------------------------
-# Part A - interchanges
-# --------------------------------------------------------------------------
-
 def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]]:
-    """Load one feed's stops/route maps/transfers with failure isolation."""
+    """Load one feed's stops, route maps and transfers; failures go into the note."""
     note = FeedNote(feed_id=source.feed_id, status="ok")
     data: dict[str, pd.DataFrame | None] = {"stops": None, "route_stops": None, "routes": None, "transfers": None}
     try:
@@ -155,10 +133,7 @@ def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]
         stops, _ = normalizer.normalize_stops(loaded)
         data["stops"] = stops
 
-        # A stops-only source has no partridge feed to build route maps from.
-        # Its stops still cluster normally (clustering is geometry plus
-        # parent_station), they just carry no route evidence, so such a
-        # cluster gets empty modes and is never multimodal.
+        # Stops-only: clustered by position, but no routes, so never multimodal.
         if source.is_stops_only:
             note.status = "stops_only"
             note.stops = int(len(stops))
@@ -177,7 +152,7 @@ def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]
             if "route_type" not in routes.columns:
                 routes["route_type"] = None
                 note.notes.append("routes.txt lacks route_type; modes unknown")
-            # route_short_name feeds the dedupe shared-route evidence.
+            # route_short_name is needed by dedupe's shared-route rule.
             keep = ["route_uid", "route_type"]
             if "route_short_name" in routes.columns:
                 keep.append("route_short_name")
@@ -196,11 +171,10 @@ def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]
 
 
 def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
-    """Execute Part A end to end and write outputs.
+    """Detect interchanges and write the table and reports.
 
     Raises:
-        ValueError: non-dry run without a database URL.
-        RuntimeError / sqlalchemy errors / OSError: run-level problems.
+        ValueError: a non-dry run without a database URL.
     """
     sources = loader.discover_feeds(config.feed_paths)
     engine: Optional[Engine] = None
@@ -225,15 +199,8 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
     route_stops = _concat("route_stops", ["feed_id", "route_id", "route_uid", "stop_id", "stop_uid"])
     routes = _concat("routes", ["route_uid", "route_type"])
 
-    # Station dedupe: recomputed here (not read from the Phase 2 table) so the
-    # pipelines stay independently runnable; distance + name evidence is
-    # schedule-independent, so results match Phase 2 except for pairs rescued
-    # only by shared routes (full feed here vs service-day filtered there).
-    #
-    # That divergence is MAXIMAL for within-feed pairs, which are accepted on
-    # shared routes and nothing else: a duplicate whose stops run on some other
-    # date merges here but not in Phase 2. Expect this phase to report more
-    # within-feed groups than Phase 2 on the same feeds - by design, not a bug.
+    # Dedupe is recomputed so this phase runs on its own. It sees every trip,
+    # not one day, so it can find more shared-route pairs than Phase 2.
     canonical = pd.DataFrame(columns=dedupe.CANONICAL_COLUMNS)
     if config.dedupe and len(stops):
         accepted = dedupe.find_equivalences(
@@ -292,19 +259,12 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
     return report
 
 
-# --------------------------------------------------------------------------
-# Parts B + C - conflation
-# --------------------------------------------------------------------------
-
 def run_conflation(config: ConflationConfig) -> ConflationReport:
-    """Execute Parts B and C end to end and write outputs.
+    """Match stops to OSM, compute side of street and coverage gaps; write reports.
 
     Raises:
-        ValueError: no database URL (a DB is required even for dry runs -
-            OSM in the database is the reference source).
-        RuntimeError: missing/unusable OSM layers (fail fast, with a
-            message naming exactly what is missing).
-        sqlalchemy errors / OSError: run-level problems.
+        ValueError: no database URL (needed even for dry runs).
+        RuntimeError: the OSM tables are missing or unusable.
     """
     if not config.database_url:
         raise ValueError(
@@ -331,7 +291,7 @@ def run_conflation(config: ConflationConfig) -> ConflationReport:
         storage.load_osm_matches(engine, matches)
         storage.load_sides(engine, sides)
 
-    # Part D - reverse coverage: OSM transit nodes with no GTFS stop nearby.
+    # OSM transit nodes with no GTFS stop nearby.
     gaps = coverage.rows_to_frame([])
     if not config.skip_coverage:
         gaps = coverage.osm_only_stops(
@@ -368,10 +328,6 @@ def run_conflation(config: ConflationConfig) -> ConflationReport:
     )
     return report
 
-
-# --------------------------------------------------------------------------
-# Report writers
-# --------------------------------------------------------------------------
 
 def _write(report: BaseModel, out_dir: Path, json_name: str, md_name: str, renderer) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)

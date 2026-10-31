@@ -1,58 +1,17 @@
-"""Station deduplication (Phase 2, also reused by Phase 3).
+"""Station deduplication: find stop records that are the same physical station.
 
-The same physical station is often described more than once, under different
-stop ids. Two distinct cases, with deliberately different evidence rules:
+Two rules:
 
-**Cross-feed** (always on) - different feeds describe one station differently
-(e.g. ``improved:SITEUR_x`` vs ``mdb:TL_x``):
+- cross-feed: stops of different feeds within 30 m, with a similar name
+  (>= 0.75) or a shared route short name;
+- within-feed: stops of the same feed within 5 m that share a route. Names
+  don't count here, and the radius is tight so the opposite-direction stop
+  across the street (20-40 m away, same routes) stays separate.
 
-* candidate pairs: stops of **different feeds** within ``distance_m``
-  (default 30 m), found with :func:`connectivity.proximity_pairs_local`;
-* accept rule: normalized-name similarity >= ``name_threshold`` **or** at
-  least one shared normalized ``route_short_name``.
-
-**Within-feed** (``within_feed_distance_m``; the pipelines default to
-:data:`WITHIN_FEED_DISTANCE_M`, the function itself is opt-in) - ONE feed
-lists a station twice under two id schemes, both scheduled. Observed in the
-wild: a feed publishing its light-rail line as both ``SITEUR_001_025`` and
-``ST_01_025``, so the route renders as two disjoint chains.
-
-* candidate pairs: stops of the **same feed** within ``within_feed_distance_m``;
-* accept rule: **at least one shared route, and nothing else.** Name
-  similarity deliberately cannot rescue a within-feed pair. Two stops of one
-  feed can share a name for ordinary reasons (a corridor, a plaza), whereas
-  two stops of the *same route* at the same spot are a duplicate record.
-* the radius is deliberately **tight** (5 m). Duplicate records sit at
-  0 m, while the same route's stop for the *opposite direction* - across the
-  street, or the other platform of a median station - is typically 20-40 m
-  away and shares every route. A 50 m radius merged those direction pairs
-  (2,697 within-feed pairs on the Guadalajara feeds, median 28.9 m), which
-  turns two platforms into one "station" and gives routing a free U-turn.
-
-Both kinds feed one grouping step:
-
-* groups: connected components over accepted pairs (the same networkx idiom
-  as ``conflation.clustering.cluster_stops``), deterministically ordered by
-  each group's smallest ``stop_uid``, which also becomes the group's
-  ``canonical_uid``.
-
-Each accepted pair records which rule matched it in ``match_kind``, so
-``stop_equivalences.csv`` stays auditable: the two kinds carry different
-evidence and should be reviewable separately.
-
-Stops of a stops-only source (``exclude_feeds``, e.g. MiBici docks) are left
-out of both rules. The within-feed rule could never fire for them anyway (a
-stops CSV has no routes), but the cross-feed *name* rule could: a bike dock
-named after a corner, within 30 m of a bus stop named after the same corner,
-would otherwise become an alias of it. A dock is never the same station as a
-transit stop, so such stops are excluded up front rather than left to chance.
-
-Name matching is stdlib only: NFKD accent stripping + ``casefold`` +
-token-sorted ``difflib.SequenceMatcher`` ratio. Stops without a usable name
-score 0.0 and can only match through shared routes.
-
-Everything here is pure/in-memory; persistence (``stop_equivalences.csv`` and
-the ``stop_equivalences`` table) is wired in ``pipeline_phase2``.
+Accepted pairs are grouped by connected components; the smallest stop_uid of
+a group is its canonical_uid. match_kind records which rule matched.
+Stops-only sources (MiBici) are excluded: a dock is never a transit station.
+Records are never deleted; persistence happens in pipeline_phase2.
 """
 
 from __future__ import annotations
@@ -72,40 +31,33 @@ from . import connectivity
 
 log = logging.getLogger(__name__)
 
-#: Maximum separation for two stops to be alias candidates.
+#: Cross-feed candidate radius (meters).
 DEDUPE_DISTANCE_M = 30.0
 
-#: Pipeline default for the within-feed radius (see the module docstring for
-#: why it is this tight). ``None`` in the configs disables within-feed dedupe.
+#: Within-feed candidate radius used by the pipelines; None in a config turns it off.
 WITHIN_FEED_DISTANCE_M = 5.0
 
-#: Minimum token-sort name similarity to accept on names alone.
+#: Minimum name similarity to accept a cross-feed pair on names alone.
 NAME_SIM_THRESHOLD = 0.75
 
 EQUIVALENCES_NAME = "stop_equivalences.csv"
 
-#: Audit payload - one row per accepted alias pair, tagged with its group.
-#: ``match_kind`` is ``cross_feed`` or ``within_feed``; the two are accepted
-#: on different evidence, so keep them distinguishable in the audit trail.
+#: One row per accepted pair, tagged with its group.
 EQUIVALENCE_COLUMNS = [
     "group_id", "canonical_uid", "stop_uid_a", "stop_uid_b",
     "distance_m", "name_score", "shared_routes", "score", "match_kind",
 ]
 
-#: ``match_kind`` values.
+#: match_kind values.
 CROSS_FEED = "cross_feed"
 WITHIN_FEED = "within_feed"
 
-#: Membership map - one row per stop that belongs to some alias group.
+#: One row per stop that belongs to a group.
 CANONICAL_COLUMNS = ["stop_uid", "canonical_uid", "group_id"]
 
 
 def normalize_name(name: object) -> str:
-    """Accent-stripped, casefolded, token-sorted form of a stop/route name.
-
-    ``None``/NaN/empty inputs normalize to ``""`` so they can never match on
-    name evidence alone.
-    """
+    """Name without accents or punctuation, lowercased, words sorted; "" when missing."""
     if name is None or (isinstance(name, float) and pd.isna(name)):
         return ""
     text = str(name)
@@ -116,11 +68,7 @@ def normalize_name(name: object) -> str:
 
 
 def name_similarity(a: object, b: object) -> float:
-    """Similarity ratio of two names after :func:`normalize_name` (0.0-1.0).
-
-    Either side normalizing to ``""`` yields 0.0 (missing names are not
-    evidence of anything).
-    """
+    """Similarity 0-1 of two normalized names; 0.0 if either is missing."""
     norm_a, norm_b = normalize_name(a), normalize_name(b)
     if not norm_a or not norm_b:
         return 0.0
@@ -128,11 +76,7 @@ def name_similarity(a: object, b: object) -> float:
 
 
 def _route_name_sets(route_stops: pd.DataFrame, routes: pd.DataFrame) -> pd.Series:
-    """Per ``stop_uid``: the set of normalized route short names serving it.
-
-    Routes without a usable ``route_short_name`` contribute nothing (route
-    ids are feed-scoped, so they can never provide cross-feed evidence).
-    """
+    """Per stop_uid, the set of normalized route short names serving it."""
     if route_stops.empty or routes.empty or "route_short_name" not in routes.columns:
         return pd.Series(dtype=object)
     labels = routes[["route_uid"]].copy()
@@ -153,31 +97,11 @@ def find_equivalences(
     within_feed_distance_m: float | None = None,
     exclude_feeds: Collection[str] = (),
 ) -> pd.DataFrame:
-    """Accepted alias pairs among *stops*.
+    """Accepted pairs (stop_uid_a < stop_uid_b), one row each, sorted.
 
-    Args:
-        stops: Phase 1 normalized stops of all feeds (EPSG:4326 GeoDataFrame
-            with ``stop_uid``, ``feed_id``, ``stop_name``, ``geometry``).
-        route_stops: concatenated ``connectivity.route_stop_map`` frames.
-        routes: route metadata with ``route_uid`` and (optionally)
-            ``route_short_name`` - the shared-route evidence source.
-        distance_m: candidate radius in meters for CROSS-feed pairs.
-        name_threshold: minimum :func:`name_similarity` to accept on names
-            (cross-feed only).
-        within_feed_distance_m: candidate radius for pairs of the SAME feed.
-            ``None`` (the default) disables within-feed matching entirely, so
-            the result is exactly the cross-feed behavior. Within-feed pairs
-            are accepted on shared routes alone - see the module docstring.
-        exclude_feeds: feed ids whose stops can never be an alias of anything
-            (stops-only sources). They are dropped before the spatial pass.
-
-    Returns:
-        :data:`EQUIVALENCE_COLUMNS` minus the group fields, i.e. ``stop_uid_a,
-        stop_uid_b, distance_m, name_score, shared_routes, score,
-        match_kind`` with ``stop_uid_a < stop_uid_b``, sorted by the pair key.
-        ``score`` is an audit blend (0.5 distance closeness + 0.5 name score)
-        against the radius that admitted the pair, not a gate. Empty inputs
-        yield an empty frame.
+    within_feed_distance_m=None turns the within-feed rule off. Stops of
+    *exclude_feeds* are never matched. score (half closeness, half name) is
+    for review only, never a filter.
     """
     columns = ["stop_uid_a", "stop_uid_b", "distance_m", "name_score",
                "shared_routes", "score", "match_kind"]
@@ -186,8 +110,7 @@ def find_equivalences(
     if len(stops) < 2:
         return pd.DataFrame(columns=columns)
 
-    # One spatial pass at the wider of the two radii; each branch re-gates
-    # below on the radius that applies to it.
+    # One search at the larger radius; each rule applies its own radius below.
     search_m = max(distance_m, within_feed_distance_m or 0.0)
     candidates = connectivity.proximity_pairs_local(stops, search_m)
     if candidates.empty:
@@ -223,8 +146,7 @@ def find_equivalences(
         for sa, sb in zip(sets_a, sets_b)
     ]
 
-    # Cross-feed: name OR shared route. Within-feed: shared route ONLY - a
-    # shared name between two stops of one feed is not evidence of a duplicate.
+    # Cross-feed: name or shared route. Within-feed: shared route only.
     has_route = candidates["shared_routes"] >= 1
     accept = np.where(
         same_feed, has_route, (candidates["name_score"] >= name_threshold) | has_route
@@ -235,8 +157,7 @@ def find_equivalences(
 
     accepted["name_score"] = accepted["name_score"].round(3)
     accepted["distance_m"] = accepted["distance_m"].astype(float).round(2)
-    # Closeness is relative to the radius that admitted the pair, or a
-    # within-feed pair past 30 m would score negative against the narrower one.
+    # Closeness is measured against the radius of the rule that accepted the pair.
     radius = np.where(
         accepted["match_kind"] == WITHIN_FEED,
         float(within_feed_distance_m or distance_m),
@@ -260,18 +181,7 @@ def find_equivalences(
 
 
 def canonical_map(equivalences: pd.DataFrame) -> pd.DataFrame:
-    """Group membership derived from accepted pairs via connected components.
-
-    Args:
-        equivalences: accepted pairs from :func:`find_equivalences` (only
-            ``stop_uid_a``/``stop_uid_b`` are used).
-
-    Returns:
-        :data:`CANONICAL_COLUMNS` - one row per stop belonging to a group.
-        ``group_id`` enumerates components ordered by their smallest
-        ``stop_uid`` (deterministic); ``canonical_uid`` is that smallest
-        member. Empty input yields an empty frame.
-    """
+    """Group stops by connected components; canonical_uid = smallest member."""
     if equivalences.empty:
         return pd.DataFrame(columns=CANONICAL_COLUMNS)
     graph = nx.Graph()
@@ -286,16 +196,7 @@ def canonical_map(equivalences: pd.DataFrame) -> pd.DataFrame:
 
 
 def attach_groups(equivalences: pd.DataFrame, canonical: pd.DataFrame) -> pd.DataFrame:
-    """Tag each accepted pair with its group - the CSV/DB audit payload.
-
-    Args:
-        equivalences: accepted pairs from :func:`find_equivalences`.
-        canonical: membership map from :func:`canonical_map`.
-
-    Returns:
-        :data:`EQUIVALENCE_COLUMNS`, sorted by ``(group_id, stop_uid_a,
-        stop_uid_b)``. Empty inputs yield an empty frame.
-    """
+    """Add group_id and canonical_uid to each pair (the stop_equivalences output)."""
     if equivalences.empty or canonical.empty:
         return pd.DataFrame(columns=EQUIVALENCE_COLUMNS)
     tagged = equivalences.merge(
@@ -309,17 +210,7 @@ def attach_groups(equivalences: pd.DataFrame, canonical: pd.DataFrame) -> pd.Dat
 
 
 def filter_stop_pairs(stop_pairs: pd.DataFrame, canonical: pd.DataFrame) -> pd.DataFrame:
-    """Drop proximity pairs whose two endpoints are the same physical station.
-
-    Args:
-        stop_pairs: proximity pairs (``stop_uid_a, stop_uid_b, distance_m``
-            and possibly extra columns) from either ``proximity_pairs_*``.
-        canonical: membership map from :func:`canonical_map`.
-
-    Returns:
-        *stop_pairs* minus rows where both endpoints map to one
-        ``canonical_uid``; column set and order preserved.
-    """
+    """Remove proximity pairs whose two stops belong to the same group."""
     if stop_pairs.empty or canonical.empty:
         return stop_pairs
     lookup = canonical.set_index("stop_uid")["canonical_uid"]
@@ -333,18 +224,7 @@ def filter_stop_pairs(stop_pairs: pd.DataFrame, canonical: pd.DataFrame) -> pd.D
 
 
 def write_equivalences(equivalences: pd.DataFrame, out_dir: Path) -> Path:
-    """Write the audit table as ``stop_equivalences.csv`` in *out_dir*.
-
-    Args:
-        equivalences: frame from :func:`attach_groups`.
-        out_dir: report directory (created if needed).
-
-    Returns:
-        The written path.
-
-    Raises:
-        OSError: if the file cannot be written (run-level problem).
-    """
+    """Write stop_equivalences.csv to *out_dir* and return its path."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / EQUIVALENCES_NAME
     equivalences.to_csv(path, index=False, encoding="utf-8")

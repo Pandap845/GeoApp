@@ -1,9 +1,7 @@
-"""Runtime configuration and logging setup.
+"""Runtime settings and logging setup.
 
-Settings resolve in the usual precedence order: explicit CLI flags beat
-environment variables, which beat values from a local ``.env`` file, which
-beat defaults. Credentials are never hardcoded - the database URL comes
-exclusively from ``--db-url`` or the ``DATABASE_URL`` env var.
+Precedence: CLI flags > environment variables > .env file > defaults.
+The database URL only ever comes from --db-url or DATABASE_URL.
 """
 
 from __future__ import annotations
@@ -18,26 +16,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Pipeline configuration.
-
-    Attributes:
-        database_url: SQLAlchemy URL for PostgreSQL/PostGIS. Read from the
-            ``DATABASE_URL`` (or ``GTFS_DATABASE_URL``) environment variable
-            when not passed explicitly. May be ``None`` for dry runs.
-        feed_paths: paths to individual feeds (.zip or directory) or to
-            directories containing multiple feeds.
-        report_dir: directory the JSON + Markdown reports are written to.
-        log_level: root log level name (DEBUG/INFO/WARNING/ERROR).
-        dry_run: when True, validate and report only - no DB writes.
-    """
+    """Pipeline configuration (database, inputs, report folder, logging, OSM tables)."""
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # Each AliasChoices includes the field name itself so explicit keyword
-    # construction (Settings(database_url=...)) keeps working alongside the
-    # environment-variable aliases.
+    # Each alias list includes the field name so Settings(database_url=...) still works.
     database_url: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("database_url", "DATABASE_URL", "GTFS_DATABASE_URL"),
@@ -62,7 +47,7 @@ class Settings(BaseSettings):
     )
     dry_run: bool = False
 
-    # --- OSM layer names (Phase 3 conflation; osm2pgsql classic defaults) ---
+    # OSM tables (osm2pgsql classic defaults)
     osm_line_table: str = Field(
         default="planet_osm_line",
         validation_alias=AliasChoices("osm_line_table", "GTFS_OSM_LINE_TABLE"),
@@ -81,7 +66,7 @@ class Settings(BaseSettings):
         description="Metric CRS like 'EPSG:32618'; default auto-detects a UTM zone.",
     )
 
-    # --- Phase 4 Google QA (env only - never a CLI flag, never hardcoded) ---
+    # Google QA key: environment only, never a CLI flag.
     google_maps_api_key: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("GOOGLE_MAPS_API_KEY", "GTFS_GOOGLE_MAPS_API_KEY"),
@@ -90,12 +75,7 @@ class Settings(BaseSettings):
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """Configure root logging for the pipeline.
-
-    Args:
-        level: log level name; unknown names fall back to INFO rather
-            than raising, so a typo in an env var can't break a run.
-    """
+    """Configure root logging; unknown level names fall back to INFO."""
     resolved = getattr(logging, level.upper(), None)
     if not isinstance(resolved, int):
         resolved = logging.INFO

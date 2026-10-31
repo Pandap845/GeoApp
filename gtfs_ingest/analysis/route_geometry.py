@@ -1,22 +1,8 @@
-"""Route geometry for the GeoPackage: real paths and stop-to-stop links.
+"""Route geometry: real paths from shapes.txt and consecutive-stop links.
 
-Two complementary representations of "the route", both per analyzed feed:
-
-- **Route shapes** — the polylines from ``shapes.txt`` (service-filtered:
-  only shapes referenced by trips active on the analyzed date). This is the
-  honest geometry: it follows the streets. One feature per distinct
-  ``(route, direction, shape_id)`` combination. Feeds without shapes yield
-  an empty frame, never an error.
-- **Route stop links** — one straight segment per distinct pair of
-  *consecutive* stops of a route/direction, derived from ``stop_times``
-  order. This is the route *topology* projected onto the stops: each stop
-  visibly chains to the next stop of its own route (unlike the
-  ``near_links`` walking overlay, which connects anything within the
-  proximity threshold regardless of route).
-
-``linea`` follows the near-stations convention: ``route_short_name``,
-falling back to ``route_id``. Missing/blank ``direction_id`` becomes the
-``-1`` sentinel (same rule as the headway math).
+Shapes follow the streets (one line per route, direction and shape). Stop
+links join each stop to the next stop of the same route and direction.
+linea = route_short_name, else route_id. Missing direction_id becomes -1.
 """
 
 from __future__ import annotations
@@ -31,14 +17,13 @@ from shapely.geometry import LineString
 log = logging.getLogger(__name__)
 
 SHAPE_COLUMNS = ["route_uid", "feed_id", "route_id", "linea", "direction_id", "shape_id"]
-#: ``n_obs`` = trips with a timed gap behind the ``travel_min`` median
-#: (0 exactly when ``travel_min`` is NULL) - quality-sidecar provenance.
+#: n_obs = number of timed trips behind the travel_min median (0 when travel_min is NULL).
 LINK_COLUMNS = ["route_uid", "feed_id", "route_id", "linea", "direction_id",
                 "stop_uid_a", "stop_uid_b", "travel_min", "n_obs"]
 
 
 def _linea_map(feed: Any) -> pd.DataFrame:
-    """``route_id -> linea`` (short name, falling back to the id)."""
+    """Map route_id to linea (short name, else the id)."""
     try:
         routes = feed.routes
     except Exception:  # noqa: BLE001 - metadata is cosmetic, never fatal
@@ -54,24 +39,14 @@ def _linea_map(feed: Any) -> pd.DataFrame:
 
 
 def _direction_series(trips: pd.DataFrame) -> pd.Series:
-    """``direction_id`` as int with the ``-1`` unknown sentinel."""
+    """direction_id as int, -1 when unknown."""
     if "direction_id" not in trips.columns:
         return pd.Series(-1, index=trips.index)
     return pd.to_numeric(trips["direction_id"], errors="coerce").fillna(-1).astype(int)
 
 
 def route_shapes(feed: Any, feed_id: str) -> gpd.GeoDataFrame:
-    """Route path polylines from ``shapes.txt`` (may be empty).
-
-    Args:
-        feed: typed partridge feed filtered to the analyzed service date.
-        feed_id: Phase 1 provenance id.
-
-    Returns:
-        GeoDataFrame (EPSG:4326) with one LINESTRING per distinct
-        ``(route, direction, shape_id)``; empty when the feed ships no
-        usable shapes.
-    """
+    """One line per (route, direction, shape_id) from shapes.txt; empty if there are no shapes."""
     empty = gpd.GeoDataFrame(pd.DataFrame(columns=SHAPE_COLUMNS),
                              geometry=gpd.GeoSeries([], crs="EPSG:4326"))
     try:
@@ -117,23 +92,10 @@ def route_shapes(feed: Any, feed_id: str) -> gpd.GeoDataFrame:
 
 
 def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
-    """Distinct consecutive-stop pairs per route/direction (no geometry).
+    """Consecutive-stop pairs per route and direction, with scheduled travel time.
 
-    ``travel_min`` is the SCHEDULED in-vehicle time between the two stops:
-    the median departure-time difference across all trips serving the pair
-    (minutes, 1 decimal). NULL when the segment has no timed stop_times
-    rows (non-timepoints) - consumers fall back to an estimate. ``n_obs``
-    counts the trips with a timed gap behind that median (0 exactly when
-    ``travel_min`` is NULL) - the quality sidecar's observation count.
-
-    Args:
-        feed: typed partridge feed filtered to the analyzed service date.
-        feed_id: Phase 1 provenance id.
-
-    Returns:
-        Columns :data:`LINK_COLUMNS`; the GeoPackage writer draws the
-        segments from the stops' geometry. Empty inputs yield an empty
-        frame.
+    travel_min is the median departure gap across trips (minutes); NULL when
+    the stops carry no times, in which case consumers estimate it.
     """
     stop_times, trips = feed.stop_times, feed.trips
     if (

@@ -73,9 +73,7 @@ def test_corrupt_zip_yields_load_error_not_exception(tmp_path: Path) -> None:
 
 
 def test_unreadable_table_is_recorded_not_raised(tmp_path: Path) -> None:
-    # Malformed CSV (unclosed quote): pandas raises ParserError on read.
-    # (A zero-byte file is different: partridge returns an empty DataFrame,
-    # which the validators flag as empty_required_file instead.)
+    # Unclosed quote: pandas raises ParserError (an empty file is a different case).
     files = dict(VALID_FEED, **{"stops.txt": 'stop_id,stop_name\n"S1,unclosed quote\nS2,ok\n'})
     path = write_feed_dir(tmp_path, "metro", files)
     (source,) = discover_feeds([path])
@@ -85,10 +83,7 @@ def test_unreadable_table_is_recorded_not_raised(tmp_path: Path) -> None:
     assert "stops.txt" in loaded.table_errors
 
 
-# --------------------------------------------------------------------------
 # Stops-only CSV sources
-# --------------------------------------------------------------------------
-
 def test_discovers_explicit_csv_as_stops_only_feed(tmp_path: Path) -> None:
     path = write_stops_csv(tmp_path, "extra_stops.csv")
 

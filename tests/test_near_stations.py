@@ -198,10 +198,7 @@ def test_walk_minutes_floor_and_rounding() -> None:
     assert minutes.tolist() == [1, 1, 4]   # 0.12 -> floor 1; 1.2 -> 1; 3.6 -> 4
 
 
-# --------------------------------------------------------------------------
 # Quality sidecar (near_stations_quality.csv)
-# --------------------------------------------------------------------------
-
 def _quality_fixture():
     """Three stops: S1-S2 near each other, S3 isolated far away."""
     stops = make_stops(
@@ -240,9 +237,7 @@ def test_walk_source_defaults_straight_line_and_none() -> None:
 
 
 def test_walk_source_unserved_neighbour_counts_as_straight_line() -> None:
-    # S2 is near S1 but unserved. It now renders as a neighbour with the
-    # sentinel line, so S1 genuinely carries a walking estimate and the
-    # provenance must say so rather than "none".
+    # S2 is unserved but still listed, so S1 has a walking estimate (not "none").
     stops = make_stops(
         ("f", "S1", "Stop", 40.0, -75.0),
         ("f", "S2", "Station Node", 40.0009, -75.0),

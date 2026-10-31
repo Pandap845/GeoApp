@@ -53,7 +53,7 @@ extensions = [
 smartquotes = False
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "plans"]
 
 # Both parsers are active: .md goes through MyST, .rst through docutils.
 source_suffix = {".rst": "restructuredtext", ".md": "markdown"}

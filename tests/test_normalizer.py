@@ -107,10 +107,7 @@ def test_missing_optional_columns_are_filled(tmp_path: Path) -> None:
     assert stops["location_type"].tolist() == [0, 0]
 
 
-# --------------------------------------------------------------------------
 # Stops-only CSV sources normalize exactly like GTFS feeds
-# --------------------------------------------------------------------------
-
 def test_stops_csv_normalizes_into_the_common_schema(tmp_path: Path) -> None:
     stops, findings = normalize_stops(load_stops_csv_feed(tmp_path, "extra_stops.csv"))
 

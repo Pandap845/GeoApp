@@ -73,10 +73,7 @@ def departures(*rows: tuple) -> pd.DataFrame:
     )
 
 
-# --------------------------------------------------------------------------
 # Pure headway math
-# --------------------------------------------------------------------------
-
 def test_headways_basic_window() -> None:
     dep = departures(
         ("R1", 0, "S1", parse_hhmm("07:00")),
@@ -153,10 +150,7 @@ def test_window_parsing_and_validation() -> None:
         TimeWindow.parse("bad", "banana")
 
 
-# --------------------------------------------------------------------------
 # Service-date filtering through partridge (calendar + calendar_dates)
-# --------------------------------------------------------------------------
-
 def test_weekday_service_selected(tmp_path: Path) -> None:
     source = analysis_source(tmp_path)
     feed, selection = load_service_feed(source, date(2026, 1, 6))  # Tuesday
@@ -201,10 +195,7 @@ def test_direction_id_blank_becomes_sentinel(tmp_path: Path) -> None:
     assert set(dep["direction_id"]) == {-1}
 
 
-# --------------------------------------------------------------------------
 # Common service date + date ranges
-# --------------------------------------------------------------------------
-
 def test_common_service_date_overlapping_feeds(tmp_path: Path) -> None:
     # Both feeds share 2026 weekdays: the latest common served date wins.
     a = write_feed_dir(tmp_path, "feed_a", ANALYSIS_FEED)
@@ -235,10 +226,7 @@ def test_service_ids_in_range_skips_unserved_days(tmp_path: Path) -> None:
     assert all(ids for ids in served.values())
 
 
-# --------------------------------------------------------------------------
 # frequencies.txt expansion
-# --------------------------------------------------------------------------
-
 def _template(*rows: tuple[str, str, float]) -> pd.DataFrame:
     """stop_times rows of (trip_id, stop_id, departure_s)."""
     return pd.DataFrame(list(rows), columns=["trip_id", "stop_id", "departure_time"])

@@ -1,19 +1,8 @@
-"""Cross-check inferred interchanges against declared transfers.txt.
+"""Compare inferred interchange clusters with the transfers declared in transfers.txt.
 
-For every feed that ships ``transfers.txt``, each (from_stop_id,
-to_stop_id) pair is a *declared* transfer. The check answers, in both
-directions:
-
-- Which declared transfers did the clustering also infer? (both stops in
-  the same cluster -> agreement.)
-- Which declared transfers were NOT inferred? (stops in different clusters
-  or unclustered -> the clustering may be too tight, or the transfer spans
-  more than ``eps``.)
-- Which inferred interchanges are NOT declared anywhere? (candidates the
-  agencies never encoded - often genuinely missing from the data.)
-
-Feeds without ``transfers.txt`` are recorded and skipped - never an error
-(the file is optional in GTFS).
+Counts declared transfers that were inferred, declared ones that were not,
+and inferred clusters that no feed declares. Feeds without transfers.txt are
+simply listed.
 """
 
 from __future__ import annotations
@@ -44,18 +33,7 @@ class TransferCheck(BaseModel):
 
 
 def declared_pairs(feed_id: str, transfers: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Extract declared transfer stop pairs from one feed's transfers.txt.
-
-    Args:
-        feed_id: feed the table belongs to (stop ids get feed-qualified).
-        transfers: raw ``transfers.txt`` table, or ``None`` when absent or
-            unreadable.
-
-    Returns:
-        Columns ``stop_uid_a, stop_uid_b`` (feed-qualified, normalized to
-        ``a < b``, deduplicated, self-transfers dropped). Empty when the
-        table is missing or lacks the from/to columns.
-    """
+    """Declared transfer pairs as stop_uid_a < stop_uid_b, deduplicated, no self-transfers."""
     columns = ["stop_uid_a", "stop_uid_b"]
     if (
         transfers is None
@@ -85,17 +63,7 @@ def check_transfers(
     transfers_by_feed: dict[str, Optional[pd.DataFrame]],
     cluster_members: Sequence[Sequence[str]],
 ) -> TransferCheck:
-    """Compare declared transfers with the inferred clusters.
-
-    Args:
-        transfers_by_feed: feed_id -> raw transfers.txt table (``None`` when
-            the feed does not ship one / it was unreadable).
-        cluster_members: the ``member_stop_uids`` of each inferred cluster.
-
-    Returns:
-        The full :class:`TransferCheck`; all counts are zero-safe, so the
-        result is meaningful even when no feed declares transfers.
-    """
+    """Compare declared transfers (feed_id -> table or None) with the cluster member lists."""
     result = TransferCheck(clusters_total=len(cluster_members))
     all_pairs: list[pd.DataFrame] = []
     for feed_id, table in sorted(transfers_by_feed.items()):

@@ -89,10 +89,7 @@ def test_missing_db_url_without_dry_run_is_exit_1(tmp_path: Path, monkeypatch) -
     assert exit_code == 1
 
 
-# --------------------------------------------------------------------------
 # Stops-only CSV sources merge into the same run as real feeds
-# --------------------------------------------------------------------------
-
 def test_dry_run_ingests_stops_csv_alongside_gtfs(tmp_path: Path) -> None:
     feeds = tmp_path / "feeds"
     feeds.mkdir()

@@ -27,10 +27,24 @@ consume the `stops` table and the JSON report; their contracts — the table
 schema, `feed_id` semantics, and finding codes — are documented here and are
 considered stable.
 
-> **[WORKFLOW.md](WORKFLOW.md)** traces the data end-to-end — every
-> processing stage, normalization rule, and calculation formula in one
-> narrative document. This README focuses on running and operating the
-> pipeline.
+> **[docs/guide/workflow.md](docs/guide/workflow.md)** traces the data
+> end-to-end — every processing stage, normalization rule, and calculation
+> formula in one narrative document. This README focuses on running and
+> operating the pipeline.
+
+### Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `gtfs_ingest/` | the Python package (one subpackage per phase: `analysis/`, `conflation/`, `qa/`, `export/`) |
+| `tests/` | pytest suite |
+| `data/` | inputs: `mexico.osm.pbf` and `feeds/` (the two GTFS zips and `mibici.csv`) |
+| `outputs/` | analysis runs (gitignored): `out_mibici_v2` (before) and `out_mibici_v3` (current) |
+| `docs/` | Sphinx site; `guide/` holds the narrative docs, `plans/` the design notes, `figures/` the charts |
+| `presentations/` | LaTeX decks and their PDFs (compile from inside that folder) |
+| `scripts/` | one-off helpers, e.g. `build_branch_gpkg.py` |
+| `paper/` | the article draft |
+| `init/`, `docker-compose.yaml` | PostGIS container setup |
 
 ---
 
@@ -1222,7 +1236,7 @@ python -m gtfs_ingest.cli locate-stations --stations route.txt \
 ```
 
 A user-facing tool (ported from the Station Locator desktop app, see
-`GetlocationApiGoogle.md`) that reads a list of station names in route
+`docs/guide/google-apis.md`) that reads a list of station names in route
 order from a TXT/CSV file (comma- and/or newline-separated), resolves each
 name to coordinates, computes the travel time between consecutive
 stations, and exports the directed route to an Excel file plus the usual

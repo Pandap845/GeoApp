@@ -174,10 +174,7 @@ def test_optional_file_matrix(valid_feed) -> None:
     assert matrix["transfers.txt"] is False
 
 
-# --------------------------------------------------------------------------
 # Calendar expiry (feed_expired) + calendar_range helper
-# --------------------------------------------------------------------------
-
 def _ymd(d: date) -> str:
     return d.strftime("%Y%m%d")
 
@@ -275,10 +272,7 @@ def test_calendar_range_pure_helper() -> None:
     assert calendar_range(cal, no_type)[1] == date(2024, 6, 1)
 
 
-# --------------------------------------------------------------------------
 # Stops-only CSV sources
-# --------------------------------------------------------------------------
-
 def test_stops_csv_skips_the_required_file_check(tmp_path: Path) -> None:
     findings = validate_feed(load_stops_csv_feed(tmp_path, "extra_stops.csv"))
 

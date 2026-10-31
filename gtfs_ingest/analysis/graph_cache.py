@@ -1,21 +1,8 @@
-"""On-disk cache of the OSM walk graph (``--network-walk``).
+"""On-disk cache of the OSM walk graph used by --network-walk.
 
-Building the walk graph - fetching every walkable way inside the stops'
-buffered hull from PostGIS and assembling the CSR arrays - dominates the
-network-walk wall clock and produces the same result run after run. This
-module persists the built arrays as a compressed ``.npz`` keyed by
-everything that determines them:
-
-* the request: sorted feed ids, hull buffer, OSM line table + geometry
-  column, excluded highway values, and the resolved metric CRS;
-* the database state, probed cheaply: ``count(*)`` + ``max(osm_id)`` of the
-  line table (an osm2pgsql reimport changes both) and ``max(loaded_at)`` of
-  the feeds' stops (a stop reload moves the hull).
-
-Any component changing produces a different key, so staleness handles
-itself for the common cases; ``--no-walk-cache`` (or deleting the cache
-directory) is the escape hatch for in-place edits the probes cannot see.
-A corrupt or unreadable cache file is treated as a miss, never an error.
+The key covers every input that shapes the graph (feeds, buffer, OSM table,
+CRS) plus cheap database probes, so an OSM reimport or a stop reload gives a
+new key. A broken cache file counts as a miss. Use --no-walk-cache to bypass it.
 """
 
 from __future__ import annotations
@@ -30,28 +17,17 @@ from sqlalchemy import Engine, text
 
 log = logging.getLogger(__name__)
 
-#: Bump on any change to the cached format or the graph-building algorithm.
+#: Bump when the cached format or the graph-building algorithm changes.
 CACHE_VERSION = 1
 
-#: (node_xy, indptr, indices, weights) - build_walk_graph's output.
+#: (node_xy, indptr, indices, weights) as returned by build_walk_graph.
 GraphArrays = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 _ARRAY_NAMES = ("node_xy", "indptr", "indices", "weights")
 
 
 def probe_state(engine: Engine, feed_ids: list[str], line_table: str) -> tuple:
-    """Cheap DB-state probes that invalidate the cache when data changes.
-
-    Args:
-        engine: database engine.
-        feed_ids: feeds whose stops define the hull.
-        line_table: OSM line table name (trusted config, interpolated the
-            same way as ``walk_network.fetch_walk_lines``).
-
-    Returns:
-        ``(line_count, max_osm_id, max_loaded_at_iso)`` - any change in the
-        OSM import or a stop reload flips at least one component.
-    """
+    """Return (line_count, max_osm_id, latest stop load time): changes when the data changes."""
     with engine.connect() as conn:
         count, max_id = conn.execute(
             text(f"SELECT count(*), max(osm_id) FROM {line_table}")  # noqa: S608
@@ -72,7 +48,7 @@ def cache_key(
     metric_crs: str,
     probes: tuple,
 ) -> str:
-    """Deterministic key over every input that shapes the graph."""
+    """Deterministic hash of every input that shapes the graph."""
     canonical = "|".join(
         [
             f"v{CACHE_VERSION}",
@@ -93,7 +69,7 @@ def _path(cache_dir: Path, key: str) -> Path:
 
 
 def load(cache_dir: Path, key: str) -> Optional[GraphArrays]:
-    """The cached graph arrays for *key*, or ``None`` on miss/corruption."""
+    """Cached graph arrays for *key*, or None if missing or unreadable."""
     path = _path(cache_dir, key)
     if not path.is_file():
         return None
@@ -113,7 +89,7 @@ def save(
     indices: np.ndarray,
     weights: np.ndarray,
 ) -> Path:
-    """Persist the graph arrays under *key*; returns the written path."""
+    """Save the graph arrays under *key* and return the file path."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = _path(cache_dir, key)
     np.savez_compressed(

@@ -1,4 +1,4 @@
-"""Regenerate every figure used by ``PIPELINE_GUIDE.md``.
+"""Regenerate every figure used by ``docs/guide/pipeline-guide.md``.
 
 Two kinds of figure:
 
@@ -10,8 +10,8 @@ Two kinds of figure:
 Usage (from the repo root; needs matplotlib, which is not a runtime
 dependency)::
 
-    python docs/figures/make_figures.py                     # reads ./out_mibici_v2
-    python docs/figures/make_figures.py --run ./out_mibici_v2 --out docs/figures
+    python docs/figures/make_figures.py                     # reads ./outputs/out_mibici_v2
+    python docs/figures/make_figures.py --run ./outputs/out_mibici_v2 --out docs/figures
 
 The measured figures expect a run made with ``--network-walk``, with the
 ``detect-interchanges`` and ``conflate-osm`` reports in the same directory.
@@ -673,7 +673,7 @@ def r10_osm_match_outcomes(run: Run, out: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--run", type=Path, default=Path("out_mibici_v2"))
+    parser.add_argument("--run", type=Path, default=Path("outputs/out_mibici_v2"))
     parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)

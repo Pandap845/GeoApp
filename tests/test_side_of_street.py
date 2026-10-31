@@ -94,10 +94,7 @@ def test_compute_sides_flags_stops_without_street() -> None:
     assert s2["side_confidence"] == "low"
 
 
-# --------------------------------------------------------------------------
 # OSM match scoring (Part B, pure parts)
-# --------------------------------------------------------------------------
-
 def test_match_confidence_formula() -> None:
     matches = pd.DataFrame(
         [
