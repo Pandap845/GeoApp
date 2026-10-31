@@ -19,7 +19,7 @@ from gtfs_ingest.export.neo4j import (
 )
 
 from test_headways import ANALYSIS_FEED
-from conftest import write_feed_dir
+from conftest import write_feed_dir, write_stops_csv
 
 
 def _inputs(equivalences: pd.DataFrame | None = None) -> Neo4jInputs:
@@ -171,3 +171,21 @@ def test_export_neo4j_cli_e2e(tmp_path: Path) -> None:
     assert len(stops) == len(nodes)                       # one :Stop per node
     cypher = (package / "load.cypher").read_text(encoding="utf-8")
     assert all(f"file:///{name}" in cypher for name in FRAME_FILES.values())
+
+
+def test_export_neo4j_includes_stops_only_csv_stops(tmp_path: Path) -> None:
+    """The Neo4j package is built from Phase 2 outputs, so CSV stops must reach it."""
+    from gtfs_ingest import cli
+
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    csv_path = write_stops_csv(tmp_path, "extra_stops.csv")
+    out = tmp_path / "out"
+    assert cli.main(
+        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"), str(csv_path),
+         "--report", str(out), "--service-date", "2026-01-06", "--dry-run"]
+    ) == 0
+    assert cli.main(["export-neo4j", "--report", str(out)]) == 0
+
+    stops = pd.read_csv(out / "neo4j" / "stops.csv")
+    uid_column = next(c for c in stops.columns if c.startswith("stop_uid"))
+    assert "extra_stops:C1" in set(stops[uid_column])

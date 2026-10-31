@@ -96,7 +96,7 @@ Docker service):
 cp .env.example .env     # PowerShell: Copy-Item .env.example .env
 ```
 
-```dotenv
+```ini
 DATABASE_URL=postgresql+psycopg://transit:cambia_esto@localhost:5432/transit
 ```
 
@@ -121,6 +121,9 @@ python -m gtfs_ingest.cli ingest --feeds feedA.zip ./feedB_dir --report ./out --
 # Phase 2 - headways + route connectivity (see Phase 2 docs below)
 python -m gtfs_ingest.cli analyze-frequency --feeds ./data/feeds \
     --db-url $DATABASE_URL --service-date 2025-06-10 --report ./out
+
+# A stops-only CSV merged in alongside real feeds (see "Stops-only CSV sources")
+python -m gtfs_ingest.cli ingest --feeds ./data/feeds ./data/extra_stops.csv --report ./out
 ```
 
 (For backward compatibility, `python -m gtfs_ingest.cli --feeds ...` without
@@ -133,6 +136,13 @@ a subcommand is treated as `ingest`.)
 | `metro.zip` | one feed |
 | `./metro_dir/` (contains `agency.txt`/`stops.txt`) | one feed |
 | `./data/feeds/` (contains zips and/or feed folders) | every `*.zip` + every feed-like subfolder inside |
+| `extra_stops.csv` | one **stops-only** feed — see [Stops-only CSV sources](#stops-only-csv-sources) |
+
+A `.csv` is only picked up when you **name it explicitly**. Collection
+directories are never scanned for CSVs, because this pipeline's own
+`near_stations.csv` output would itself be a valid stops CSV — globbing would
+let a previous run's output be silently re-ingested as a second copy of the
+network.
 
 Each feed gets a deterministic `feed_id` derived from its filename
 (`My Feed (2026).zip` → `my_feed_2026`; see [design notes](#design-notes)).
@@ -245,22 +255,83 @@ GTFS route_type codes (basic or extended, e.g. `3`, `700`); routes match
 filter. The filter cascades to everything trip-derived (headways,
 connectivity, near/same-line stations, route shapes/links); the stop
 inventory itself stays complete. Feeds with no matching route are reported
-as `filtered_out`.
+as `filtered_out`. [Stops-only CSV](#stops-only-csv-sources) sources are
+**exempt** from both flags — they have no route attributes to match, so
+filtering them would delete their stops from every output for no gain.
 
-`analyze-frequency` and `detect-interchanges` (**cross-feed station
-deduplication**, on by default):
+`analyze-frequency` and `detect-interchanges` (**station deduplication**, on
+by default):
 
 | Flag | Description |
 | --- | --- |
-| `--dedupe` / `--no-dedupe` | Merge cross-feed duplicate stations (the same physical stop under different stop_ids, e.g. `improved:SITEUR_x` vs `mdb:TL_x`) before connectivity/near-stations/clustering. Default **on**; `--no-dedupe` restores the raw behavior. |
-| `--dedupe-distance-m METERS` | Alias candidate radius (stops of *different* feeds only). Default `30`. |
-| `--dedupe-name-threshold RATIO` | Minimum normalized-name similarity (0–1) to accept a pair on names alone; pairs sharing a `route_short_name` match regardless. Default `0.75`. |
+| `--dedupe` / `--no-dedupe` | Merge duplicate stations (the same physical stop under different stop_ids) before connectivity/near-stations/clustering. Default **on**; `--no-dedupe` restores the raw behavior. |
+| `--dedupe-distance-m METERS` | **Cross-feed** alias candidate radius (stops of *different* feeds). Default `30`. |
+| `--dedupe-name-threshold RATIO` | Minimum normalized-name similarity (0–1) to accept a *cross-feed* pair on names alone; pairs sharing a `route_short_name` match regardless. Default `0.75`. |
+| `--dedupe-within-feed-distance-m METERS` | **Within-feed** alias candidate radius (stops of the *same* feed). Default `5` (also the `AnalysisConfig`/`InterchangeConfig` default); `0` disables. |
+
+Two kinds of duplicate, with deliberately different evidence:
+
+- **Cross-feed** — two feeds describe one station differently
+  (`improved:SITEUR_x` vs `mdb:TL_x`). Accepted on name similarity **or** a
+  shared route.
+- **Within-feed** — one feed publishes a station twice under two id schemes,
+  both scheduled (observed in the wild: a light-rail line appearing as both
+  `SITEUR_001_025` and `ST_01_025`, which also splits the rendered route into
+  two disjoint chains). Accepted on a **shared route and nothing else** — a
+  shared name between two stops of one feed is not evidence. The radius is
+  deliberately tight (**5 m**): duplicate records sit at 0 m, while the same
+  route's stop for the *opposite direction* (across the street, or the other
+  platform of a median station) is 20–40 m away and shares every route. The
+  former 50 m default merged 2,697 such pairs (median 28.9 m), turning two
+  platforms into one station and giving routing a free U-turn.
+
+`stop_equivalences.csv` records which rule matched each pair in `match_kind`
+(`cross_feed` / `within_feed`), so the two are reviewable separately.
+
+[Stops-only CSV](#stops-only-csv-sources) stops (e.g. MiBici docks) take part
+in **neither** rule. The within-feed rule could never fire for them (no
+routes), but the cross-feed *name* rule could: a dock named after a corner,
+within 30 m of a bus stop named after the same corner, would otherwise become
+its alias. A dock is never the same station as a transit stop, so they are
+excluded up front.
+
+Known limit: the cross-feed rule can still pair one feed's platform with the
+*other* feed's opposite-direction platform when both carry the station name
+and sit within 30 m (e.g. `improved:ST_02_018` ↔ `mdb:ST_02_027`, 28.6 m).
+Of 4,376 cross-feed pairs, 3,295 are within 5 m and 1,081 lie 5–30 m apart;
+tighten `--dedupe-distance-m` if direction-level stations matter.
 
 Aliases stop appearing in each other's `near_stations` lists (row set and
 `ID` sequence of the CSV are unchanged), their links vanish from the
 GeoPackage, their routes connect as `same_station_dedup`, and interchange
 clusters report `physical_stop_count`. The audit trail is
 `stop_equivalences.csv` + the `stop_equivalences` table.
+
+### Counting stations, not stop records
+
+**Deduplication records equivalences; it never deletes rows.** Every stop
+record stays in `stops`, in `near_stations.csv` and in the GeoPackage, so a
+raw `COUNT(*)` counts *records*, not physical stations. To count stations,
+resolve each record to its canonical station using `station_dedup` from
+`near_stations_quality.csv`:
+
+```sql
+COUNT(DISTINCT COALESCE(NULLIF("station_dedup",''), "stop_uid"))
+```
+
+On the two Guadalajara feeds plus MiBici this is not a rounding difference:
+
+| Level | Stations |
+| --- | ---: |
+| Raw stop records (incl. 484 MiBici docks) | 14,349 |
+| Cross-feed dedupe only | 10,534 |
+| \+ within-feed dedupe at 5 m (default) | **10,533** |
+| *for reference: within-feed at the former 50 m* | *8,877* |
+
+Within-feed at 5 m adds a single group: almost every 0 m `SITEUR_*`/`ST_*`
+duplicate is already joined through its cross-feed twin. Any density, coverage
+or accessibility figure computed on the raw record count is inflated by
+~1.36×.
 
 `detect-interchanges` only: `--eps METERS` (DBSCAN radius, default 120),
 `--min-samples N` (default 2), `--crs EPSG:XXXXX` (metric CRS override).
@@ -319,7 +390,35 @@ $env:GTFS_TEST_DATABASE_URL = "postgresql+psycopg://transit:cambia_esto@localhos
 pytest tests/test_db.py
 ```
 
-## 10. Troubleshooting
+## 10. Documentation site
+
+A Sphinx site combines this README and the other narrative documents with an API
+reference generated from the docstrings:
+
+```bash
+pip install -e ".[docs]"
+python -m sphinx -b html docs docs/_build/html   # or: cd docs && make html
+```
+
+Open `docs/_build/html/index.html`. Because `autodoc` imports every module to
+read its docstrings, the package and its runtime dependencies must be installed
+— the docs extra alone is not enough.
+
+CI builds the same site with `-W`, so malformed docstring markup fails the
+pipeline. Two conventions keep that build green:
+
+- **an attribute doc comment (`#:`) must not put a plain colon in its first
+  line.** Napoleon reads everything before that colon as the attribute's *type*,
+  so `#: Safety cap: max runs...` renders with the type "Safety cap". Use `-`
+  instead.
+- **an indented block needs `::` on the line above it**, and a bullet or
+  numbered list needs a blank line before and after it — otherwise docutils
+  reads the indentation as an error.
+
+Set `DOCS_NO_INTERSPHINX=1` to skip the external inventory downloads (offline
+builds; CI does this so third-party docs outages cannot turn the build red).
+
+## 11. Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
@@ -338,6 +437,7 @@ gtfs_ingest/
   config.py      pydantic-settings config (env/.env/CLI), logging setup
   models.py      pydantic models + GTFS schema constants (single source of truth)
   loader.py      feed discovery, feed_id derivation, partridge loading
+  stops_csv.py   stops-only CSV reader: header aliases, encoding, delimiter
   validators.py  all integrity checks -> structured Finding list
   normalizer.py  raw stops.txt -> common-schema GeoDataFrame (EPSG:4326)
   db.py          engine, DDL, idempotent per-feed load
@@ -365,6 +465,11 @@ gtfs_ingest/
     pipeline_phase4.py  gating, budget enforcement, QA report
     station_locator.py  station list -> coords + travel times -> Excel route
 tests/           pytest suite with synthetic fixture feeds
+docs/            Sphinx site (see "Documentation site" above)
+  conf.py        autodoc + napoleon + MyST configuration
+  index.md       landing page and toctrees
+  api/           API reference, one page per package, grouped by phase
+  guide/         thin stubs that include the root Markdown docs verbatim
 docker-compose.yaml  local PostGIS (postgis/postgis:16-3.4)
 init/            optional first-boot SQL/shell scripts for the DB container
 ```
@@ -457,6 +562,79 @@ always reconstructible from the report.
 | 7 | Deduplication | Duplicate `stop_id`: **first occurrence wins** (file order — deterministic); rest dropped (`dropped_duplicate_stop_id`) |
 | 8 | Provenance & key | `feed_id` column added; `stop_uid = "{feed_id}:{stop_id}"` |
 | 9 | Geometry | shapely `POINT(stop_lon stop_lat)` built via geopandas, CRS `EPSG:4326` |
+
+## Stops-only CSV sources
+
+Not every stop inventory arrives as GTFS. A field survey, an agency
+spreadsheet or a manually digitized list can be ingested directly as a
+four-column CSV and **merges into the same `stops` table and the same output
+files** as a real feed:
+
+```text
+id,name,latitude,longitude
+C1,Plaza Universidad,20.6736,-103.3440
+C2,Mercado Corona,20.6772,-103.3495
+```
+
+Coordinates are WGS84 decimal degrees. `name` is optional; `id`, `latitude`
+and `longitude` are required.
+
+**Header matching is forgiving.** Column names are compared
+case-insensitively, accent-insensitively and against an alias table, so files
+exported from any locale usually just work:
+
+| Canonical | Accepted spellings |
+| --- | --- |
+| `stop_id` | `id`, `stop_id`, `stopid`, `codigo`, `clave` |
+| `stop_name` | `name`, `stop_name`, `stopname`, `nombre`, `estacion` |
+| `stop_lat` | `latitude`, `lat`, `stop_lat`, `latitud` |
+| `stop_lon` | `longitude`, `lon`, `lng`, `long`, `stop_lon`, `longitud` |
+
+UTF-8 (with or without BOM), UTF-16 and CP1252 are decoded automatically, as
+are `,`, `;`, tab and `|` delimiters — the Excel-on-Spanish-Windows default
+(semicolon-delimited UTF-8 with BOM) is the expected case, not an exotic one.
+Unrecognized columns are ignored. A header that cannot be resolved is a single
+`unresolved_csv_header` **ERROR** naming the columns found, the fields still
+missing and the spellings that would have worked; the feed is marked `failed`
+rather than partially read.
+
+**What the relaxation does and does not cover.** A stops-only source is
+exempt from the *required-files* check only — it is not a GTFS feed and never
+claimed to be, so `agency.txt`/`routes.txt`/`trips.txt`/`stop_times.txt`/
+calendar are reported once as an INFO `stops_only_source` instead of five
+ERRORs. Everything else runs unchanged: coordinates are range-checked, null
+and duplicate `stop_id`s are dropped with the *same* finding codes as a real
+feed, `location_type` defaults to `0`, and `stop_uid = "{feed_id}:{stop_id}"`
+is built the same way — so a CSV `S1` and a GTFS `S1` never collide.
+
+**What it contributes, and what it cannot.** Having no schedule, such a feed
+takes no part in anything route-derived, and it is reported as `stops_only`:
+
+| Contributes | Does not contribute |
+| --- | --- |
+| `stops` table rows, GeoPackage `stops`/`near_links` layers | headways (`route_stop_headways`, `route_headways`) |
+| proximity pairs and `near_stations.csv` entries | route connectivity edges of any type |
+| `station_network.graphml` nodes, flagged `stops_only` (so they reach the Neo4j package) | `route_connectivity.graphml` nodes |
+| | station deduplication of any kind — a dock is never an alias of a transit stop |
+| | station-network `walk`/`same_station` arcs — an unlinked node can never be a waypoint between two transit stops; `n_weak_components` counts transit stops only and `n_stops_only` reports the rest |
+| | `in_vehicle` edges, `same_line_stations` |
+| OSM conflation and side-of-street (Phase 3B/C read the `stops` table) | interchange *modality* — it can join a cluster but never make it multimodal |
+
+Because such a stop serves no line, it appears in other stops' `near_stations`
+lists with `-` in the `linea` slot (see [Phase 2 outputs](#phase-2-outputs)),
+and its own `system` and `stop_line_ids` columns stay empty.
+
+Two things to watch:
+
+- **Dedup may merge a CSV stop into a GTFS stop.** Within
+  `--dedupe-distance-m` (30 m), a name similarity of ≥ 0.75 is enough on its
+  own. That is usually what you want when the CSV annotates an existing
+  network, and not what you want when it adds genuinely new stops — check
+  `stop_equivalences.csv`, or use `--no-dedupe`.
+- **Coordinates that are valid but wrong cannot be detected.** Swapped
+  lat/lon and `(0, 0)` from a blank-as-zero export are both legal WGS84.
+  Coordinates written with a decimal comma (`20,6736`) *are* caught: they are
+  flagged `csv_decimal_comma` and dropped as invalid.
 
 ## Design notes
 
@@ -597,8 +775,10 @@ Tables (created automatically, idempotent):
 - `route_connections` — PK `(route_a, route_b)`; `feed_id_a`, `feed_id_b`,
   `connection_type`, `shared_stop_count`, `min_stop_distance_m`.
 - `stop_equivalences` — PK `(stop_uid_a, stop_uid_b)`; `group_id`,
-  `canonical_uid`, `distance_m`, `name_score`, `shared_routes`, `score` —
-  the cross-feed dedupe audit (empty after a `--no-dedupe` run).
+  `canonical_uid`, `distance_m`, `name_score`, `shared_routes`, `score`,
+  `match_kind` — the dedupe audit (empty after a `--no-dedupe` run).
+  `match_kind` is `cross_feed` or `within_feed`. Databases created before
+  `match_kind` existed gain the column automatically on the next run.
 
 Idempotency: the headway tables use **per-feed delete-and-reload** in one
 transaction (same strategy and rationale as Phase 1 stops).
@@ -630,8 +810,14 @@ Files in `--report DIR`:
   system(s) (agency names, e.g. `Mi Macro, Sitren`). `stop_line_ids` is
   the row's own `"{ID}-{line}"` combos (e.g. `17-C98`). `linea` is
   `route_short_name` (falling back to `route_id`), restricted to lines
-  active on the analyzed service date — an unserved station node is
-  omitted from neighbour lists. All times are bare numbers in **minutes**:
+  active on the analyzed service date. A near stop that **no route serves**
+  that day — a bare parent-station node, or a stop from a
+  [stops-only CSV](#stops-only-csv-sources) — is still listed as a neighbour,
+  with `-` in the `linea` slot: it is genuinely there and genuinely walkable.
+  **Consumers parsing `linea` must tolerate `-`.** This affects only how a
+  stop appears in *other* stops' lists; an unserved stop's own `system` and
+  `stop_line_ids` stay empty, because it still serves no line.
+  All times are bare numbers in **minutes**:
   `near_stations` uses walking time at ~5 km/h (`max(1, round(m/83))`,
   straight-line, or along the OSM street network with `--network-walk`);
   `same_line_stations` uses the **scheduled in-vehicle minutes** between
@@ -705,6 +891,14 @@ Files in `--report DIR`:
 - A feed that fails anywhere in analysis is recorded `failed` with the
   exception message in its notes; the run continues (same isolation
   contract as Phase 1).
+- A [stops-only CSV](#stops-only-csv-sources) source is recorded
+  `stops_only` with a null service date, so it never enters the cross-feed
+  service-date coherence check. It is exempt from `--transport-mode`/
+  `--route` (filtering on route attributes it cannot have would delete its
+  stops from every output) and is excluded from `--common-date` resolution
+  (it has no calendar to share). Its stops still take part in proximity,
+  near-stations and the GeoPackage, and appear as unlinked `stops_only` nodes
+  in the station network; they are excluded from deduplication.
 
 ---
 
@@ -901,6 +1095,11 @@ low-confidence count).
   topological node degree.
 - Modes come from `routes.txt route_type`; feeds lacking the column yield
   clusters with unknown modes (`is_multimodal = false`, noted per feed).
+- A [stops-only CSV](#stops-only-csv-sources) source is recorded
+  `stops_only` in Part A: its stops cluster normally (clustering is geometry
+  plus `parent_station`), but they carry no route evidence, so they can join
+  a multimodal cluster without ever making one. Parts B and C read the
+  `stops` table directly and conflate such stops with no special handling.
 - The live-DB path is covered by an integration test gated on
   `GTFS_TEST_DATABASE_URL` (synthetic OSM tables built on the fly); all
   geometry/clustering math is unit-tested without a database.

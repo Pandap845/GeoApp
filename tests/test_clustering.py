@@ -15,7 +15,7 @@ from gtfs_ingest.conflation.clustering import (
 )
 from gtfs_ingest.conflation.transfers_check import check_transfers
 
-from conftest import feed_files, write_feed_dir
+from conftest import VALID_FEED, feed_files, write_feed_dir, write_stops_csv
 
 
 def stops_gdf(*rows: tuple[str, str, float, float, str | None]) -> gpd.GeoDataFrame:
@@ -284,3 +284,24 @@ def test_detect_interchanges_cli_dry_run(tmp_path: Path) -> None:
     assert report["transfers"]["declared_co_clustered"] == 1
     md = (out / "interchanges_report.md").read_text(encoding="utf-8")
     assert "bus+rail" in md
+
+
+def test_detect_interchanges_degrades_on_stops_only_csv(tmp_path: Path) -> None:
+    """Phase 3A is not a target for CSV input, but it must not report a failure."""
+    from gtfs_ingest import cli
+
+    write_feed_dir(tmp_path / "feeds", "alpha", VALID_FEED)
+    csv_path = write_stops_csv(tmp_path, "extra_stops.csv")
+    out = tmp_path / "out"
+
+    exit_code = cli.main(
+        ["detect-interchanges", "--feeds", str(tmp_path / "feeds"), str(csv_path),
+         "--report", str(out), "--dry-run"]
+    )
+
+    assert exit_code == 0
+    report = json.loads((out / "interchanges_report.json").read_text(encoding="utf-8"))
+    by_id = {f["feed_id"]: f for f in report["feeds"]}
+    assert by_id["extra_stops"]["status"] == "stops_only"   # not "failed"
+    assert by_id["extra_stops"]["stops"] == 2
+    assert by_id["extra_stops"]["routes"] == 0

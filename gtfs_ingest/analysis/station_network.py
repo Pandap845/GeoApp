@@ -5,9 +5,14 @@ adjacency, no times, no stops. But the pipeline already computes everything
 a shortest-path network needs; this module assembles it into one
 ``nx.MultiDiGraph``:
 
-* **nodes** - every analyzed stop (key ``stop_uid``), carrying the
+* **nodes** - every analyzed transit stop (key ``stop_uid``), carrying the
   near_stations.csv ``ID``, name, feed, dedupe ``canonical_uid`` and
-  coordinates;
+  coordinates. Stops of stops-only sources (``exclude_feeds``, e.g. MiBici
+  docks) are kept as nodes flagged ``stops_only`` but get **no** walk or
+  same_station arcs: a node with walk arcs is a waypoint any shortest path may
+  pass through, and a dock between two bus stops would chain two walks into
+  one the proximity radius never allowed. Their transit neighbours remain in
+  ``near_stations.csv``;
 * **``in_vehicle`` edges** (directed) - consecutive-stop segments from
   ``route_geometry.route_stop_links``, weighted by scheduled ``travel_min``;
 * **``walk`` edges** (reciprocal arc pairs) - the dedupe-filtered proximity
@@ -31,6 +36,7 @@ yEd, igraph and networkx read the multigraph natively.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any, Optional
 
@@ -64,6 +70,7 @@ def build_station_graph(
     stop_pairs: pd.DataFrame,
     equivalences: pd.DataFrame,
     canonical: Optional[pd.DataFrame] = None,
+    exclude_feeds: Collection[str] = (),
 ) -> nx.MultiDiGraph:
     """Assemble the routable stop-level network.
 
@@ -78,6 +85,9 @@ def build_station_graph(
         equivalences: dedupe alias pairs (``stop_uid_a/b`` used).
         canonical: dedupe membership map for the ``canonical_uid`` node
             attribute; ``None``/empty -> each stop is its own canonical.
+        exclude_feeds: feed ids of stops-only sources; their stops become
+            ``stops_only`` nodes and every walk/same_station pair touching one
+            is dropped, so they can never sit in the middle of a path.
 
     Returns:
         The MultiDiGraph described in the module docstring. Deterministic
@@ -87,6 +97,20 @@ def build_station_graph(
     graph = nx.MultiDiGraph()
     if stops.empty:
         return graph
+
+    stops_only: set[str] = set()
+    if exclude_feeds:
+        stops_only = set(stops.loc[stops["feed_id"].isin(list(exclude_feeds)), "stop_uid"])
+    if stops_only:
+        def _without_stops_only(pairs: pd.DataFrame) -> pd.DataFrame:
+            if pairs.empty:
+                return pairs
+            touches = pairs["stop_uid_a"].isin(stops_only) | pairs["stop_uid_b"].isin(stops_only)
+            return pairs[~touches]
+
+        stop_pairs = _without_stops_only(stop_pairs)
+        equivalences = _without_stops_only(equivalences)
+        log.info("Station network: %d stops-only stop(s) kept as unlinked nodes", len(stops_only))
 
     near_id = (
         near.set_index("stop_uid")["ID"] if not near.empty else pd.Series(dtype=object)
@@ -111,6 +135,8 @@ def build_station_graph(
                 }
             ),
         )
+        if uid in stops_only:
+            graph.nodes[uid]["stops_only"] = True
 
     # in_vehicle: one directed arc per link row (per route/direction).
     if not stop_links.empty:
@@ -178,13 +204,21 @@ def _edges_by_type(graph: nx.MultiDiGraph) -> dict[str, int]:
 
 
 def station_graph_stats(graph: nx.MultiDiGraph) -> dict[str, Any]:
-    """Summary stats for the report (weakly-connected: valid for digraphs)."""
+    """Summary stats for the report (weakly-connected: valid for digraphs).
+
+    Stops-only nodes are unlinked by construction, so counting each as its own
+    component would bury the transit network's real connectivity under one
+    singleton per dock. They are left out of ``n_weak_components`` and counted
+    separately in ``n_stops_only``.
+    """
+    transit = [u for u, d in graph.nodes(data=True) if not d.get("stops_only")]
     return {
         "n_stops": graph.number_of_nodes(),
+        "n_stops_only": graph.number_of_nodes() - len(transit),
         "n_edges": graph.number_of_edges(),
         "edges_by_type": _edges_by_type(graph),
         "n_weak_components": (
-            len(list(nx.weakly_connected_components(graph))) if len(graph) else 0
+            len(list(nx.weakly_connected_components(graph.subgraph(transit)))) if transit else 0
         ),
     }
 

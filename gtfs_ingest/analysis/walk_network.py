@@ -56,7 +56,7 @@ EXCLUDED_HIGHWAYS: tuple[str, ...] = ("motorway", "motorway_link", "proposed", "
 #: the rounding just guards float noise.
 _MERGE_M = 0.1
 
-#: Classification-only threshold for the quality sidecar: a stop farther
+#: Classification-only threshold for the quality sidecar - a stop farther
 #: than this from any walkable way is labeled ``unsnapped``. Routing
 #: behavior is unchanged (snapping itself has no upper bound).
 MAX_SNAP_M = 200.0

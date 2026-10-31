@@ -5,10 +5,19 @@ Discovery accepts any mix of:
   * a path to a single unzipped feed directory (detected by the presence of
     ``agency.txt`` or ``stops.txt``),
   * a path to a *collection* directory, whose ``*.zip`` files and feed-like
-    subdirectories are each treated as one feed.
+    subdirectories are each treated as one feed,
+  * a path to a single stops-only ``.csv`` file (see
+    :mod:`gtfs_ingest.stops_csv`), which becomes a feed carrying stop
+    geometry and nothing else.
+
+A ``.csv`` is only ever picked up when named **explicitly**; collection
+directories are never scanned for them. This is deliberate: this pipeline's own
+``near_stations.csv`` output carries ``stop_id``/``stop_lat``/``stop_lon`` and
+would therefore be a perfectly valid stops CSV, so globbing would let a
+previous run's output be silently re-ingested as a second copy of the network.
 
 feed_id derivation (deterministic, documented contract):
-  1. Take the zip filename without extension, or the directory name.
+  1. Take the zip or csv filename without extension, or the directory name.
   2. Lowercase it and replace every run of non ``[a-z0-9]`` characters with
      a single underscore; strip leading/trailing underscores.
   3. If the result is empty, use ``"feed"``.
@@ -29,6 +38,7 @@ from typing import Iterable, Sequence
 
 import partridge as ptg
 
+from . import stops_csv
 from .models import FeedSource, LoadedFeed
 
 log = logging.getLogger(__name__)
@@ -53,7 +63,7 @@ def derive_feed_id(path: Path, taken: Iterable[str] = ()) -> str:
         A slug as documented in the module docstring. Same path (and same
         set of sibling collisions) always yields the same id.
     """
-    stem = path.stem if path.suffix.lower() == ".zip" else path.name
+    stem = path.stem if path.suffix.lower() in (".zip", ".csv") else path.name
     slug = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_") or "feed"
     if slug in set(taken):
         digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:8]
@@ -74,34 +84,39 @@ def discover_feeds(paths: Sequence[Path]) -> list[FeedSource]:
         name). Paths that don't exist or don't look like feeds are logged
         and skipped - discovery never raises for bad inputs.
     """
-    candidates: list[Path] = []
+    # The kind is decided here, where the layout is actually known. Deriving it
+    # later from the suffix would mislabel a *directory* named "foo.zip".
+    candidates: list[tuple[Path, str]] = []
     for raw in paths:
         p = Path(raw)
         if p.is_file() and p.suffix.lower() == ".zip":
-            candidates.append(p)
+            candidates.append((p, "zip"))
+        elif p.is_file() and p.suffix.lower() == ".csv":
+            candidates.append((p, "csv"))
         elif _looks_like_feed_dir(p):
-            candidates.append(p)
+            candidates.append((p, "dir"))
         elif p.is_dir():
+            # Collection directory: zips and feed-like subdirectories only.
+            # Never *.csv - see the module docstring for why.
             found = sorted(p.glob("*.zip")) + sorted(
                 c for c in p.iterdir() if _looks_like_feed_dir(c)
             )
             if not found:
                 log.warning("No feeds found under directory %s", p)
-            candidates.extend(found)
+            candidates.extend((c, "zip" if c.is_file() else "dir") for c in found)
         else:
-            log.warning("Skipping %s: not a .zip file or feed directory", p)
+            log.warning("Skipping %s: not a .zip/.csv file or feed directory", p)
 
     sources: list[FeedSource] = []
     seen_paths: set[Path] = set()
     taken_ids: set[str] = set()
-    for path in candidates:
+    for path, kind in candidates:
         resolved = path.resolve()
         if resolved in seen_paths:
             continue
         seen_paths.add(resolved)
         feed_id = derive_feed_id(path, taken_ids)
         taken_ids.add(feed_id)
-        kind = "zip" if path.suffix.lower() == ".zip" else "dir"
         sources.append(FeedSource(feed_id=feed_id, path=resolved, kind=kind))
         log.info("Discovered feed %s (%s: %s)", feed_id, kind, resolved)
     return sources
@@ -125,6 +140,9 @@ def list_feed_files(source: FeedSource) -> set[str]:
         OSError / zipfile.BadZipFile: if the container itself is unreadable.
         (``load_feed`` catches these and turns them into a load_error.)
     """
+    if source.kind == "csv":
+        # A stops CSV presents exactly one logical table, whatever it is named.
+        return {"stops.txt"}
     if source.kind == "zip":
         with zipfile.ZipFile(source.path) as zf:
             return {
@@ -147,7 +165,13 @@ def load_feed(source: FeedSource) -> LoadedFeed:
         the pipeline then records the failure and moves on. Per-table parse
         problems are *not* detected here - they surface lazily through
         ``LoadedFeed.table()``.
+
+        A stops-only CSV source takes a separate path that never involves
+        partridge (see :func:`_load_stops_csv`).
     """
+    if source.kind == "csv":
+        return _load_stops_csv(source)
+
     try:
         files_present = list_feed_files(source)
     except Exception as exc:  # noqa: BLE001 - bad zip, permissions, ...
@@ -172,3 +196,46 @@ def load_feed(source: FeedSource) -> LoadedFeed:
 
     log.info("Feed %s: opened with %d .txt files", source.feed_id, len(files_present))
     return LoadedFeed(source=source, feed=feed, files_present=files_present)
+
+
+def _load_stops_csv(source: FeedSource) -> LoadedFeed:
+    """Open a stops-only CSV as a feed carrying just ``stops.txt``.
+
+    The parsed frame is seeded straight into ``_tables``, which
+    ``LoadedFeed.table()`` consults before it looks at ``feed`` - so the
+    validators, the normalizer and every downstream consumer read this source
+    exactly as they read a real feed, with ``feed`` left as ``None``.
+
+    An unresolvable header is both a ``load_error`` (so the feed reports as
+    failed and ``--fail-on-error`` gates on it) and a precise finding carried
+    in ``load_findings`` (so the report says which column to rename).
+    """
+    try:
+        stops, findings = stops_csv.read_stops_csv(source.path)
+    except Exception as exc:  # noqa: BLE001 - unreadable file is a finding, not a crash
+        log.error("Feed %s: cannot read stops CSV %s: %s", source.feed_id, source.path, exc)
+        return LoadedFeed(
+            source=source,
+            feed=None,
+            files_present=set(),
+            load_error=f"cannot read stops CSV: {type(exc).__name__}: {exc}",
+        )
+
+    if stops is None:
+        log.error("Feed %s: unresolvable header in %s", source.feed_id, source.path)
+        return LoadedFeed(
+            source=source,
+            feed=None,
+            files_present=set(),
+            load_error="stops CSV header could not be resolved",
+            load_findings=findings,
+        )
+
+    log.info("Feed %s: opened stops CSV with %d row(s)", source.feed_id, len(stops))
+    return LoadedFeed(
+        source=source,
+        feed=None,
+        files_present={"stops.txt"},
+        load_findings=findings,
+        _tables={"stops.txt": stops},
+    )

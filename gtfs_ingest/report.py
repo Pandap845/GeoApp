@@ -91,12 +91,12 @@ def render_markdown(report: RunReport) -> str:
         "",
         "## Summary",
         "",
-        "| Feed | Status | Errors | Warnings | Stops normalized | Stops loaded |",
-        "| --- | --- | ---: | ---: | ---: | ---: |",
+        "| Feed | Kind | Status | Errors | Warnings | Stops normalized | Stops loaded |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for f in report.feeds:
         lines.append(
-            f"| {f.feed_id} | {f.status} | {f.count(Severity.ERROR)} "
+            f"| {f.feed_id} | {f.source_kind} | {f.status} | {f.count(Severity.ERROR)} "
             f"| {f.count(Severity.WARNING)} | {f.stops_normalized} | {f.stops_loaded} |"
         )
 

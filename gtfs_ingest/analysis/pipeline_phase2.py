@@ -4,12 +4,14 @@ Flow per run:
 
 1. Discover feeds (Phase 1 loader — reused, not re-implemented).
 2. Per feed, inside a failure boundary (one broken feed never aborts the run):
+
    a. service-date filtering (calendar + calendar_dates via partridge),
    b. headway statistics per (route, direction, stop) and window + rollup,
    c. route/stop maps for connectivity,
    d. Phase 1 raw load + normalize of stops (parent_station links, local
       proximity fallback, and — on non-dry runs — a refresh of the PostGIS
       ``stops`` table so proximity queries match the analyzed feeds).
+
 3. Cross-feed station deduplication (``dedupe``, on by default): aliases of
    one physical station across feeds are merged, removed from the proximity
    pairs, and connected as ``same_station_dedup`` edges.
@@ -40,7 +42,7 @@ from .. import db, loader, normalizer
 from ..models import FeedSource
 from ..validators import calendar_range
 from . import connectivity, dedupe, geopackage, graph_export, near_stations, route_filter, route_geometry, station_network, storage
-from .dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD
+from .dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD, WITHIN_FEED_DISTANCE_M
 from .headways import DEFAULT_WINDOWS, TimeWindow, compute_stop_headways, route_rollup, stop_departures
 from .service_filter import (
     common_service_date,
@@ -76,11 +78,16 @@ class AnalysisConfig(BaseModel):
         route_specs: restrict to these route_id/route_short_name values;
             ``None`` = all routes. A route passes when it matches either
             filter (union with ``mode_codes``).
-        dedupe: merge cross-feed duplicate stations (``analysis.dedupe``)
-            before connectivity / near-stations; on by default.
-        dedupe_distance_m: alias candidate radius in meters.
-        dedupe_name_threshold: minimum name similarity (0-1) to accept an
-            alias pair on names alone.
+        dedupe: merge duplicate stations (``analysis.dedupe``) before
+            connectivity / near-stations; on by default.
+        dedupe_distance_m: cross-feed alias candidate radius in meters.
+        dedupe_name_threshold: minimum name similarity (0-1) to accept a
+            cross-feed alias pair on names alone.
+        dedupe_within_feed_distance_m: candidate radius for aliases inside a
+            SINGLE feed (one station published under two id schemes),
+            default 5 m - same as the CLI. ``None`` disables it; such pairs
+            are accepted on shared routes alone, never on names. Stops-only
+            sources take part in neither dedupe rule.
         dry_run: skip all database writes (and use local proximity math).
     """
 
@@ -103,6 +110,8 @@ class AnalysisConfig(BaseModel):
     dedupe: bool = True
     dedupe_distance_m: float = Field(default=DEDUPE_DISTANCE_M, gt=0)
     dedupe_name_threshold: float = Field(default=NAME_SIM_THRESHOLD, ge=0.0, le=1.0)
+    # Same default as the CLI; None = off (cross-feed aliases only).
+    dedupe_within_feed_distance_m: Optional[float] = Field(default=WITHIN_FEED_DISTANCE_M, gt=0)
     dry_run: bool = False
 
 
@@ -111,7 +120,7 @@ class FeedAnalysis(BaseModel):
 
     feed_id: str
     source_path: str
-    status: str  # "analyzed" | "no_service" | "filtered_out" | "failed"
+    status: str  # "analyzed" | "stops_only" | "no_service" | "filtered_out" | "failed"
     service_date: Optional[str] = None          # ISO date, or "START..END" for ranges
     service_date_source: Optional[str] = None   # "explicit" | "busiest" | "common" | "range"
     days_analyzed: Optional[int] = None         # served days (range runs only)
@@ -135,19 +144,28 @@ class AnalysisReport(BaseModel):
     route_filter: list[str] = Field(default_factory=list)  # route specs; [] = all
     dedupe: bool = True
     dedupe_distance_m: float = DEDUPE_DISTANCE_M
-    station_groups: int = 0        # cross-feed alias groups found
+    # None = within-feed dedupe was off (and in reports written before the
+    # field existed, whose radius was not recorded).
+    dedupe_within_feed_distance_m: Optional[float] = None
+    # Alias groups found - cross-feed, plus within-feed when
+    # dedupe_within_feed_distance_m is set. stop_equivalences.match_kind splits them.
+    station_groups: int = 0
     stops_deduplicated: int = 0    # stops belonging to some alias group
     windows: dict[str, str]  # name -> "HH:MM-HH:MM"
     # False when analyzed feeds resolved to different service days - the
     # cross-feed outputs then mix non-contemporaneous schedules.
     service_dates_coherent: bool = True
     service_dates: list[str] = Field(default_factory=list)
+    # Sources that contributed stop geometry but no schedule (stops-only CSVs).
+    stops_only_feeds: list[str] = Field(default_factory=list)
+    stops_only_stops: int = 0
     feeds: list[FeedAnalysis]
     connections_by_type: dict[str, int]
     isolated_routes: list[str]
     graph: dict[str, Any]  # n_routes / n_edges / n_components / component_sizes
     # Routable stop-level network (station_network.graphml):
-    # n_stops / n_edges / edges_by_type / n_weak_components
+    # n_stops / n_stops_only / n_edges / edges_by_type / n_weak_components
+    # (components counted over transit stops; stops-only nodes are unlinked)
     station_graph: dict[str, Any] = Field(default_factory=dict)
     # Stop counts by provenance label (near_stations_quality.csv):
     # {"walk_source": {...}, "travel_source": {...}}
@@ -290,6 +308,35 @@ def _analyze_feed(
     result = FeedAnalysis(feed_id=source.feed_id, source_path=str(source.path), status="analyzed")
     try:
         raw = loader.load_feed(source)
+
+        # A stops-only source has no calendar and no trips, so every
+        # service-date path below would raise inside partridge. Branch out
+        # here, BEFORE the route filter and the service resolution, so the
+        # stops are assigned unconditionally: `data.stops` is otherwise set
+        # near the end of this function, downstream of every early return and
+        # inside the try, and a feed that never reaches it is silently dropped
+        # from all_stops and therefore from PostGIS, near_stations, the
+        # GeoPackage, the station network and the Neo4j inputs.
+        if source.is_stops_only:
+            data.stops, _ = normalizer.normalize_stops(raw)
+            result.status = "stops_only"
+            # service_date stays None: this feed has no schedule, so it must
+            # not participate in the cross-feed service-date coherence check.
+            result.notes.append(
+                f"stops-only CSV source: {len(data.stops)} stop(s) contribute geometry "
+                "(proximity, near-stations, GeoPackage, unlinked station-network nodes); "
+                "no routes, trips, headways, connectivity edges, dedupe or walk links"
+            )
+            if config.mode_codes or config.route_specs:
+                # Filtering on route attributes a stops-only source cannot have
+                # would exclude it entirely and delete its stops from every
+                # output. Stops are never filtered - see route_filter's docstring.
+                result.notes.append(
+                    "--transport-mode/--route not applicable to a stops-only source"
+                )
+            if engine is not None:
+                db.load_feed_stops(engine, source.feed_id, data.stops)
+            return result, data
 
         # Optional --mode/--route restriction, resolved against raw routes.txt
         # and pushed into the partridge view so everything trip-derived
@@ -437,8 +484,15 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         log.warning("No feeds discovered under: %s", ", ".join(map(str, config.feed_paths)))
 
     # --common-date: one shared service day for every feed, or fail loudly.
-    if config.common_date and sources:
-        common = common_service_date([str(s.path) for s in sources])
+    # Stops-only sources are excluded first: they have no calendar, so
+    # resolving a service date against them raises inside partridge - and this
+    # call sits outside every per-feed failure boundary, so one extra CSV in
+    # --feeds would abort the whole run.
+    schedule_sources = [s for s in sources if not s.is_stops_only]
+    if config.common_date and sources and not schedule_sources:
+        log.warning("--common-date ignored: every discovered source is stops-only")
+    elif config.common_date and schedule_sources:
+        common = common_service_date([str(s.path) for s in schedule_sources])
         if common is None:
             raise ValueError(
                 "--common-date: the discovered feeds share no calendar date "
@@ -494,21 +548,35 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
     all_stops = pd.concat(stops_frames, ignore_index=True) if stops_frames else normalizer.empty_stops_frame()
 
     stations = connectivity.station_map(all_stops)
-    analyzed_feed_ids = [r.feed_id for r in feed_results if r.status == "analyzed"]
-    if engine is not None and analyzed_feed_ids:
-        stop_pairs = connectivity.proximity_pairs_postgis(engine, analyzed_feed_ids, config.proximity_m)
+    # Every feed that contributed STOPS, which is a superset of the feeds that
+    # contributed a schedule. The spatial queries below must use this one:
+    # keyed on "analyzed" alone, a stops-only feed's rows sit in PostGIS but
+    # match no proximity pair, so its stops end up with no neighbours at all.
+    # Dry runs cannot catch that - they take the local branch below, which
+    # works off all_stops and ignores the feed-id list entirely.
+    geographic_feed_ids = [
+        r.feed_id for r in feed_results if r.status in ("analyzed", "stops_only")
+    ]
+    if engine is not None and geographic_feed_ids:
+        stop_pairs = connectivity.proximity_pairs_postgis(engine, geographic_feed_ids, config.proximity_m)
     else:
         stop_pairs = connectivity.proximity_pairs_local(all_stops, config.proximity_m)
 
-    # Cross-feed station deduplication: aliases of one physical station must
-    # not count as "near" each other, and their routes connect via the
-    # canonical station rather than mere proximity.
+    # Stops-only sources contribute geometry, never station identity or
+    # routing: they are kept out of dedupe and of the station network.
+    stops_only_ids = [r.feed_id for r in feed_results if r.status == "stops_only"]
+
+    # Station deduplication: aliases of one physical station must not count
+    # as "near" each other, and their routes connect via the canonical
+    # station rather than mere proximity.
     equivalences = pd.DataFrame(columns=dedupe.EQUIVALENCE_COLUMNS)
     canonical = pd.DataFrame(columns=dedupe.CANONICAL_COLUMNS)
     if config.dedupe:
         accepted = dedupe.find_equivalences(
             all_stops, route_stops, routes,
             config.dedupe_distance_m, config.dedupe_name_threshold,
+            within_feed_distance_m=config.dedupe_within_feed_distance_m,
+            exclude_feeds=stops_only_ids,
         )
         canonical = dedupe.canonical_map(accepted)
         equivalences = dedupe.attach_groups(accepted, canonical)
@@ -524,7 +592,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
 
         try:
             stop_pairs = walk_network.network_distances(
-                engine, all_stops, stop_pairs, analyzed_feed_ids,
+                engine, all_stops, stop_pairs, geographic_feed_ids,
                 metric_crs=None,
                 line_table=config.osm_line_table,
                 geom_column=config.osm_geom_column,
@@ -547,8 +615,8 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
 
     # Quality sidecar: same rows/IDs as near_stations.csv, provenance only.
     osm_matches = None
-    if engine is not None and analyzed_feed_ids:
-        osm_matches = storage.fetch_osm_matches(engine, analyzed_feed_ids)
+    if engine is not None and geographic_feed_ids:
+        osm_matches = storage.fetch_osm_matches(engine, geographic_feed_ids)
     quality = near_stations.build_quality(
         near, route_stops, routes, stop_pairs,
         stop_links=all_links, osm_matches=osm_matches, canonical=canonical,
@@ -560,7 +628,8 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
 
     # Routable station network: the same frames, exposed as a graph.
     station_graph = station_network.build_station_graph(
-        all_stops, near, all_links, stop_pairs, equivalences, canonical=canonical
+        all_stops, near, all_links, stop_pairs, equivalences, canonical=canonical,
+        exclude_feeds=stops_only_ids,
     )
     station_network.write_station_graphml(
         station_graph, config.report_dir / station_network.STATION_GRAPHML_NAME
@@ -601,6 +670,11 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
 
     # ---- report ------------------------------------------------------------
     by_type = edges["connection_type"].value_counts().to_dict() if not edges.empty else {}
+    stops_only_stops = (
+        int(all_stops["feed_id"].isin(stops_only_ids).sum())
+        if stops_only_ids and not all_stops.empty
+        else 0
+    )
     report = AnalysisReport(
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         analysis_date=config.analysis_date.isoformat(),
@@ -610,11 +684,16 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         route_filter=sorted(config.route_specs) if config.route_specs else [],
         dedupe=config.dedupe,
         dedupe_distance_m=config.dedupe_distance_m,
+        dedupe_within_feed_distance_m=(
+            config.dedupe_within_feed_distance_m if config.dedupe else None
+        ),
         station_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
         stops_deduplicated=int(len(canonical)),
         windows={w.name: w.label for w in config.windows},
         service_dates_coherent=service_dates_coherent,
         service_dates=analyzed_dates,
+        stops_only_feeds=stops_only_ids,
+        stops_only_stops=stops_only_stops,
         feeds=feed_results,
         connections_by_type={k: int(v) for k, v in by_type.items()},
         isolated_routes=metrics["isolated_routes"],
@@ -666,7 +745,13 @@ def _render_markdown(report: AnalysisReport) -> str:
         + "  ",
         "Station deduplication: "
         + (
-            f"on ({report.dedupe_distance_m:g} m) - {report.station_groups} group(s), "
+            f"on (cross-feed {report.dedupe_distance_m:g} m, within-feed "
+            + (
+                f"{report.dedupe_within_feed_distance_m:g} m"
+                if report.dedupe_within_feed_distance_m is not None
+                else "off"
+            )
+            + f") - {report.station_groups} group(s), "
             f"{report.stops_deduplicated} stop(s) merged; see `{dedupe.EQUIVALENCES_NAME}`"
             if report.dedupe
             else "off (--no-dedupe)"
@@ -690,6 +775,18 @@ def _render_markdown(report: AnalysisReport) -> str:
             f"| {f.routes_analyzed} | {f.trips_analyzed} | {f.stop_headway_rows} | {notes} |"
         )
 
+    if report.stops_only_feeds:
+        lines += [
+            "",
+            f"> **Stops-only sources:** `{'`, `'.join(report.stops_only_feeds)}` - "
+            f"{report.stops_only_stops} stop(s) contributing geometry only. They appear in "
+            "`near_stations.csv`, `near_stations_quality.csv` and `transit_analysis.gpkg`, "
+            "and can be neighbours of scheduled stops (rendered with line `-`). They are "
+            "never deduplicated, sit in the station network as unlinked nodes (no walk "
+            "arcs, so no route passes through them), and contribute no route connectivity "
+            "edges, headways or same-line topology.",
+        ]
+
     if not report.service_dates_coherent:
         lines += [
             "",
@@ -710,7 +807,12 @@ def _render_markdown(report: AnalysisReport) -> str:
         f"Station network: {report.station_graph.get('n_stops', 0)} stops · "
         f"{report.station_graph.get('n_edges', 0)} edges "
         f"({', '.join(f'{k}={v}' for k, v in report.station_graph.get('edges_by_type', {}).items()) or 'none'}) · "
-        f"{report.station_graph.get('n_weak_components', 0)} weak component(s)",
+        f"{report.station_graph.get('n_weak_components', 0)} weak component(s) among transit stops"
+        + (
+            f" · {report.station_graph['n_stops_only']} unlinked stops-only node(s)"
+            if report.station_graph.get("n_stops_only")
+            else ""
+        ),
         "",
         "| Connection type | Route pairs |",
         "| --- | ---: |",

@@ -1,0 +1,2 @@
+# Keeps docs/_templates/ in git; see docs/_static/.gitkeep for why.
+# Theme template overrides go here.

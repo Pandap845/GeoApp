@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 LOCATOR_JSON = "station_locator_report.json"
 LOCATOR_MD = "station_locator_report.md"
 
-#: Text Search mask: exactly what the locator consumes, nothing more.
+#: Text Search mask - exactly what the locator consumes, nothing more.
 TEXT_SEARCH_FIELD_MASK: tuple[str, ...] = (
     "places.id",
     "places.displayName",

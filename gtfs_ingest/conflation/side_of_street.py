@@ -9,7 +9,7 @@ Sign convention (documented in the README with a worked example):
     Take the segment of the centerline nearest to the stop. Let ``d`` be
     the segment's direction vector *in travel direction* and ``v`` the
     vector from the stop's perpendicular foot on the segment to the stop.
-    The z component of the 2D cross product
+    The z component of the 2D cross product::
 
         cross = d.x * v.y - d.y * v.x
 
@@ -29,6 +29,7 @@ Sign convention (documented in the README with a worked example):
     With ``oneway = -1`` travel is -x, so the same stop is right.
 
 Confidence: ``low`` when the answer is geometrically fragile -
+
 - the stop is within ``on_tolerance_m`` (1 m) of the centerline
   (side reported as ``"on"``),
 - the perpendicular foot lies within ``endpoint_tolerance_m`` (10 m) of
@@ -36,6 +37,7 @@ Confidence: ``low`` when the answer is geometrically fragile -
   is ambiguous), or
 - the perpendicular distance is under 2 m (nearly collinear digitization
   noise dominates).
+
 Otherwise ``high``.
 """
 

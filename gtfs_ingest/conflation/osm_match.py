@@ -21,13 +21,13 @@ stop_position, station)``, ``railway in (station, halt, tram_stop)``) is
 found with the PostGIS KNN operator (``<->``, index-assisted) in a LATERAL
 join; the true geodesic distance is then measured on ``geography``.
 
-Confidence formula (documented in the README):
+Confidence formula (documented in the README)::
 
     distance_score = max(0, 1 - distance_m / threshold_m)
     confidence     = round(distance_score * type_score, 3)
 
 where ``type_score`` reflects tag/type compatibility between the stop's
-GTFS ``location_type`` and the OSM element kind:
+GTFS ``location_type`` and the OSM element kind::
 
     location_type = 1 (station):  station-ish OSM kind -> 1.0, else 0.6
     location_type = 0/other:      platform-ish kind    -> 1.0,

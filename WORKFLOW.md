@@ -13,6 +13,14 @@ exports, and the reports — organized in four stages:
 4. **[Outputs](#4-outputs--what-is-stored)** — every table and file
    produced, and exactly what information each one stores.
 
+Inputs are GTFS feeds (`.zip` or unzipped directories), an OSM extract in
+PostGIS, and optionally **stops-only CSVs** (`id, name, latitude, longitude`)
+named explicitly on `--feeds`. A CSV is renamed to GTFS column names at load
+time and then follows exactly the same normalization, validation and storage
+path as a real feed, so it merges into the same tables and files; having no
+schedule, it contributes geometry only. See
+[Stops-only CSV sources](README.md#stops-only-csv-sources).
+
 For install/run instructions see [README.md](README.md); this file is about
 what happens to the data. Orchestrators: `pipeline_phase1.py` (ingest),
 `analysis/pipeline_phase2.py` (analyze-frequency),
@@ -23,7 +31,9 @@ locate-stations).
 ```
                   ┌──────────────────────── PHASE 1: ingest ─────────────────────────┐
  GTFS feeds ─────→ discover → load raw → VALIDATE → normalize stops → PostGIS `stops`
- (.zip / dir)     └────────────────────────────┬──────────────────────────────────────┘
+ (.zip / dir)                    ↑
+ stops CSV ──────→ header aliases┘  (id, name, latitude, longitude; stops-only)
+ (.csv, explicit) └────────────────────────────┬──────────────────────────────────────┘
                                                │ validation_report.json/.md
                   ┌──────────────────── PHASE 2: analyze-frequency ──────────────────┐
  same feeds ─────→ [--transport-mode/--route filter] → service-date filter

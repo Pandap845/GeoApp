@@ -12,8 +12,9 @@ Idempotency strategies (documented in the README):
   edges can span feeds, so rows aren't attributable to a single feed;
   the table is cheap derived data recomputed from the analyzed feed set.
 - ``stop_equivalences``: **full truncate-and-reload per run**, for the same
-  reason - every row pairs stops of two different feeds (cross-feed station
-  deduplication, ``analysis.dedupe``).
+  reason - a row pairs two stops that describe one physical station, either
+  across feeds or within a single feed (``analysis.dedupe``; the ``match_kind``
+  column says which), so rows aren't attributable to a single feed either.
 """
 
 from __future__ import annotations
@@ -125,10 +126,14 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         name_score    double precision NOT NULL,
         shared_routes integer NOT NULL,
         score         double precision NOT NULL,
+        match_kind    text,
         loaded_at     timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY (stop_uid_a, stop_uid_b)
     )
     """,
+    # Databases created before within-feed dedupe lack match_kind; without
+    # this the next replace_all_rows fails on a column mismatch.
+    "ALTER TABLE stop_equivalences ADD COLUMN IF NOT EXISTS match_kind text",
     "CREATE INDEX IF NOT EXISTS ix_rsh_feed ON route_stop_headways (feed_id)",
     "CREATE INDEX IF NOT EXISTS ix_rh_feed ON route_headways (feed_id)",
     "CREATE INDEX IF NOT EXISTS ix_stop_equiv_group ON stop_equivalences (group_id)",

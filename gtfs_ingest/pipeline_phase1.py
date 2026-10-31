@@ -71,6 +71,7 @@ def process_feed(
         return FeedReport(
             feed_id=source.feed_id,
             source_path=str(source.path),
+            source_kind=source.kind,
             status="failed" if loaded.load_error else "loaded",
             row_counts=loaded.row_counts(),
             optional_files=validators.optional_file_matrix(loaded),
@@ -90,6 +91,7 @@ def process_feed(
         return FeedReport(
             feed_id=source.feed_id,
             source_path=str(source.path),
+            source_kind=source.kind,
             status="failed",
             findings=findings,
         )

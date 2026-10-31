@@ -84,6 +84,10 @@ def validate_feed(loaded: LoadedFeed, analysis_date: Optional[date] = None) -> l
             )
         )
 
+    # Problems detected while opening the source itself (CSV encoding, delimiter,
+    # header resolution) are findings like any other and belong in the report.
+    findings.extend(loaded.load_findings)
+
     def _calendar_expiry(inner: LoadedFeed, out: list[Finding]) -> None:
         _check_calendar_expiry(inner, out, analysis_date)
 
@@ -118,7 +122,32 @@ def validate_feed(loaded: LoadedFeed, analysis_date: Optional[date] = None) -> l
 # --------------------------------------------------------------------------
 
 def _check_required_files(loaded: LoadedFeed, findings: list[Finding]) -> None:
-    """ERROR for each missing required file; calendar handled as either/or."""
+    """ERROR for each missing required file; calendar handled as either/or.
+
+    This is the only check that is not gated on a file being present, so it is
+    also the only one a stops-only source has to opt out of: such a source is
+    not a GTFS feed and never claimed to be, and reporting five ERRORs for
+    files it cannot have would both drown its real findings and make
+    ``--fail-on-error`` reject a perfectly good stop list. Every other check
+    self-gates and still runs in full - coordinates, duplicate ids and null ids
+    are validated exactly as they are for a real feed.
+    """
+    if loaded.is_stops_only:
+        findings.append(
+            Finding(
+                severity=Severity.INFO,
+                code="stops_only_source",
+                message=(
+                    "Stops-only CSV source: the GTFS required files (agency, routes, "
+                    "trips, stop_times, calendar) do not apply. This feed contributes "
+                    "stop geometry only - no routes, trips, headways, connectivity "
+                    "edges or same-line topology."
+                ),
+                file="stops.txt",
+            )
+        )
+        return
+
     for name in REQUIRED_FILES:
         if name not in loaded.files_present:
             findings.append(

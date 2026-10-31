@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from gtfs_ingest.models import Finding, Severity
+from gtfs_ingest.models import REQUIRED_FILES, Finding, Severity
 from gtfs_ingest.validators import calendar_range, optional_file_matrix, validate_feed
 
-from conftest import feed_files, load_dir_feed
+from conftest import feed_files, load_dir_feed, load_stops_csv_feed
 
 
 def by_code(findings: list[Finding], code: str) -> list[Finding]:
@@ -163,7 +163,7 @@ def test_unreadable_feed_container_reported(tmp_path: Path) -> None:
     findings = validate_feed(load_feed(source))
     assert by_code(findings, "feed_unreadable")
     # All required files also reported missing - the report shows full impact.
-    assert len(by_code(findings, "missing_required_file")) == 5
+    assert len(by_code(findings, "missing_required_file")) == len(REQUIRED_FILES)
 
 
 def test_optional_file_matrix(valid_feed) -> None:
@@ -273,3 +273,48 @@ def test_calendar_range_pure_helper() -> None:
     # Missing exception_type column: every date counts (tolerant).
     no_type = pd.DataFrame({"date": ["20240601"]})
     assert calendar_range(cal, no_type)[1] == date(2024, 6, 1)
+
+
+# --------------------------------------------------------------------------
+# Stops-only CSV sources
+# --------------------------------------------------------------------------
+
+def test_stops_csv_skips_the_required_file_check(tmp_path: Path) -> None:
+    findings = validate_feed(load_stops_csv_feed(tmp_path, "extra_stops.csv"))
+
+    assert not by_code(findings, "missing_required_file")
+    assert not by_code(findings, "missing_calendar")
+    assert not errors(findings)
+    (info,) = by_code(findings, "stops_only_source")
+    assert info.severity is Severity.INFO
+
+
+def test_stops_csv_is_still_validated_for_coordinates_and_duplicates(tmp_path: Path) -> None:
+    """The relaxation is scoped to required *files*; row checks still run."""
+    content = (
+        "id,name,latitude,longitude\n"
+        "C1,Ok,40.0,-75.0\n"
+        "C1,Duplicate,40.1,-75.1\n"
+        "C2,Bad lat,999.0,-75.0\n"
+    )
+    findings = validate_feed(load_stops_csv_feed(tmp_path, "messy.csv", content))
+
+    assert by_code(findings, "duplicate_stop_ids")
+    assert by_code(findings, "invalid_coordinates")
+
+
+def test_header_only_stops_csv_is_an_empty_required_file(tmp_path: Path) -> None:
+    findings = validate_feed(
+        load_stops_csv_feed(tmp_path, "empty.csv", "id,name,latitude,longitude\n")
+    )
+
+    assert by_code(findings, "empty_required_file")
+
+
+def test_unresolvable_csv_header_reaches_the_report(tmp_path: Path) -> None:
+    findings = validate_feed(
+        load_stops_csv_feed(tmp_path, "bad.csv", "ID_PARADA,DESC,X,Y\n1,Centro,20.6,-103.3\n")
+    )
+
+    assert by_code(findings, "feed_unreadable")          # generic: the feed failed
+    assert by_code(findings, "unresolved_csv_header")    # specific: which column to rename

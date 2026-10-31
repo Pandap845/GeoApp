@@ -30,7 +30,7 @@ from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
 from ..analysis import dedupe
-from ..analysis.dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD
+from ..analysis.dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD, WITHIN_FEED_DISTANCE_M
 from ..analysis.connectivity import route_stop_map
 from . import clustering, coverage, osm_match, side_of_street, storage
 from .transfers_check import TransferCheck, check_transfers
@@ -59,6 +59,8 @@ class InterchangeConfig(BaseModel):
     dedupe: bool = True
     dedupe_distance_m: float = Field(default=DEDUPE_DISTANCE_M, gt=0)
     dedupe_name_threshold: float = Field(default=NAME_SIM_THRESHOLD, ge=0.0, le=1.0)
+    # Same default as the CLI; None = off (cross-feed aliases only).
+    dedupe_within_feed_distance_m: Optional[float] = Field(default=WITHIN_FEED_DISTANCE_M, gt=0)
     dry_run: bool = False
 
 
@@ -87,7 +89,7 @@ class FeedNote(BaseModel):
     """Per-feed outcome in the interchange report."""
 
     feed_id: str
-    status: str  # "ok" | "failed"
+    status: str  # "ok" | "stops_only" | "failed"
     stops: int = 0
     routes: int = 0
     has_transfers_txt: bool = False
@@ -102,7 +104,10 @@ class InterchangeReport(BaseModel):
     eps_m: float
     min_samples: int
     dedupe: bool = True
-    equivalence_groups: int = 0       # cross-feed alias groups found
+    dedupe_distance_m: float = DEDUPE_DISTANCE_M
+    # None = within-feed dedupe was off (or the report predates the field).
+    dedupe_within_feed_distance_m: Optional[float] = None
+    equivalence_groups: int = 0       # alias groups found (cross- + within-feed)
     stops_deduplicated: int = 0       # stops belonging to some alias group
     single_physical_station_clusters: int = 0  # clusters that are one station's aliases
     feeds: list[FeedNote]
@@ -149,6 +154,20 @@ def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]
             raise RuntimeError(loaded.load_error)
         stops, _ = normalizer.normalize_stops(loaded)
         data["stops"] = stops
+
+        # A stops-only source has no partridge feed to build route maps from.
+        # Its stops still cluster normally (clustering is geometry plus
+        # parent_station), they just carry no route evidence, so such a
+        # cluster gets empty modes and is never multimodal.
+        if source.is_stops_only:
+            note.status = "stops_only"
+            note.stops = int(len(stops))
+            note.notes.append(
+                "stops-only CSV source: no routes or transfers.txt; "
+                "contributes stop positions to clustering only"
+            )
+            return note, data
+
         data["route_stops"] = route_stop_map(loaded.feed, source.feed_id)
 
         routes_raw = loaded.table("routes.txt")
@@ -206,16 +225,22 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
     route_stops = _concat("route_stops", ["feed_id", "route_id", "route_uid", "stop_id", "stop_uid"])
     routes = _concat("routes", ["route_uid", "route_type"])
 
-    # Cross-feed station dedupe: recomputed here (not read from the Phase 2
-    # table) so the pipelines stay independently runnable; distance + name
-    # evidence is schedule-independent, so results match Phase 2 except for
-    # pairs rescued only by shared routes (full feed here vs service-day
-    # filtered there).
+    # Station dedupe: recomputed here (not read from the Phase 2 table) so the
+    # pipelines stay independently runnable; distance + name evidence is
+    # schedule-independent, so results match Phase 2 except for pairs rescued
+    # only by shared routes (full feed here vs service-day filtered there).
+    #
+    # That divergence is MAXIMAL for within-feed pairs, which are accepted on
+    # shared routes and nothing else: a duplicate whose stops run on some other
+    # date merges here but not in Phase 2. Expect this phase to report more
+    # within-feed groups than Phase 2 on the same feeds - by design, not a bug.
     canonical = pd.DataFrame(columns=dedupe.CANONICAL_COLUMNS)
     if config.dedupe and len(stops):
         accepted = dedupe.find_equivalences(
             stops, route_stops, routes,
             config.dedupe_distance_m, config.dedupe_name_threshold,
+            within_feed_distance_m=config.dedupe_within_feed_distance_m,
+            exclude_feeds=[n.feed_id for n in notes if n.status == "stops_only"],
         )
         canonical = dedupe.canonical_map(accepted)
 
@@ -242,6 +267,10 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
         eps_m=config.eps_m,
         min_samples=config.min_samples,
         dedupe=config.dedupe,
+        dedupe_distance_m=config.dedupe_distance_m,
+        dedupe_within_feed_distance_m=(
+            config.dedupe_within_feed_distance_m if config.dedupe else None
+        ),
         equivalence_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
         stops_deduplicated=int(len(canonical)),
         single_physical_station_clusters=(
@@ -362,7 +391,13 @@ def _interchange_markdown(report: InterchangeReport) -> str:
         "(parent_station groups always merged)  ",
         "Station deduplication: "
         + (
-            f"on - {report.equivalence_groups} cross-feed group(s), "
+            f"on (cross-feed {report.dedupe_distance_m:g} m, within-feed "
+            + (
+                f"{report.dedupe_within_feed_distance_m:g} m"
+                if report.dedupe_within_feed_distance_m is not None
+                else "off"
+            )
+            + f") - {report.equivalence_groups} group(s), "
             f"{report.stops_deduplicated} stop(s) merged"
             if report.dedupe
             else "off (--no-dedupe)"

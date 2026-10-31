@@ -31,9 +31,15 @@ Identifier conventions (documented in the README):
   back to straight-line distance at ~25 km/h when the segment carries no
   departure times.
 - ``linea`` is the route's ``route_short_name`` when present, otherwise its
-  ``route_id``; only lines active on the analyzed service date appear, so a
-  near stop served by no route that day (e.g. a bare parent-station node)
-  is omitted from neighbour lists.
+  ``route_id``; only lines active on the analyzed service date appear. A near
+  stop that no route serves that day - a bare parent-station node, or a stop
+  from a stops-only CSV source - is still listed as a neighbour, with
+  :data:`UNSERVED_LINE` (``-``) in the ``linea`` slot: it is genuinely there
+  and genuinely walkable, and omitting it would make whole stop inventories
+  invisible to their neighbours. Consumers parsing the ``linea`` field must
+  tolerate that value. Note this affects only how a stop appears in *other*
+  stops' lists; an unserved stop's own ``system`` and ``stop_line_ids``
+  columns stay empty, because it still serves no line.
 - ``time to reach`` is straight-line distance divided by a 5 km/h walking
   speed (~83 m/min), rounded to whole minutes with a 1-minute floor. It is
   an estimate - no street network is consulted (that is Phase 3 territory).
@@ -82,12 +88,22 @@ WALK_M_PER_MIN = 83.0
 NEAR_STATIONS_NAME = "near_stations.csv"
 QUALITY_NAME = "near_stations_quality.csv"
 
+#: ``linea`` placeholder for a near stop that no analyzed route serves - a
+#: stops-only CSV stop, or a bare parent-station node. Chosen over ``""``,
+#: which renders the ambiguous ``(12, Foo, , 3)``, and over a word like
+#: ``none``, which could collide with a real ``route_short_name``; ``-`` is
+#: already this pipeline's "not applicable" convention in the reports.
+UNSERVED_LINE = "-"
+
 #: Columns of the quality sidecar - one row per stop, same ``ID`` key and
 #: row order as :data:`COLUMNS`. Vocabularies:
-#: ``walk_source``   network / straight_line / mixed / unsnapped / none
-#: ``travel_source`` observed / estimated / mixed / none
-#: ``coord_confidence`` "0.812"-style score / needs_review / no_match /
-#:                      unavailable
+#:
+#: ``walk_source``
+#:     network / straight_line / mixed / unsnapped / none
+#: ``travel_source``
+#:     observed / estimated / mixed / none
+#: ``coord_confidence``
+#:     "0.812"-style score / needs_review / no_match / unavailable
 QUALITY_COLUMNS = [
     "ID", "stop_uid", "walk_source", "travel_source", "travel_n_obs",
     "coord_confidence", "station_dedup",
@@ -265,7 +281,10 @@ def _near_entries(
     defaulted to ``straight_line``. It never reaches the rendered tuples.
     """
     columns = ["stop_uid", "near_num_id", "near_station", "line", "minutes", "walk_source"]
-    if stop_pairs.empty or lines_at.empty:
+    # Only stop_pairs is required: neighbours that no line serves are rendered
+    # with UNSERVED_LINE rather than dropped, so a run whose stops are entirely
+    # unserved (a stops-only CSV on its own) still produces neighbour lists.
+    if stop_pairs.empty:
         return pd.DataFrame(columns=columns)
 
     # Pairs are stored once per unordered pair; neighbourhood is symmetric.
@@ -278,9 +297,16 @@ def _near_entries(
     )
     if "walk_source" not in both.columns:
         both["walk_source"] = "straight_line"
-    entries = both.merge(
-        lines_at.rename(columns={"stop_uid": "near_uid", "combo_line": "line"}), on="near_uid"
+    # LEFT join: a neighbour with no serving line keeps its row and gets the
+    # UNSERVED_LINE sentinel. The typed empty frame keeps the merge dtypes
+    # stable when no stop in the run is served at all.
+    served = (
+        lines_at.rename(columns={"stop_uid": "near_uid", "combo_line": "line"})
+        if not lines_at.empty
+        else pd.DataFrame(columns=["near_uid", "line"], dtype=object)
     )
+    entries = both.merge(served, on="near_uid", how="left")
+    entries["line"] = entries["line"].fillna(UNSERVED_LINE)
     if entries.empty:
         return pd.DataFrame(columns=columns)
     entries = entries.merge(

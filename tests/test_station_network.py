@@ -145,6 +145,39 @@ def test_stats_and_flat_frames() -> None:
     assert len(nodes) == 4
 
 
+def test_stops_only_feed_is_left_out_with_its_walk_arcs() -> None:
+    """A stops-only stop must not become a walking waypoint between transit stops."""
+    stops, near, links, pairs, equiv, canonical = _fixture()
+    # Dock D sits between fa:A and fa:B, walkable from both, while A and B are
+    # too far apart to walk directly: D would chain the two walks into one.
+    dock = make_stops(("mibici", "D", "Dock", 40.0045, -75.0))
+    stops = pd.concat([stops, dock], ignore_index=True)
+    pairs = pd.concat(
+        [pairs, pd.DataFrame({
+            "stop_uid_a": ["fa:A", "fa:B"], "stop_uid_b": ["mibici:D", "mibici:D"],
+            "distance_m": [250.0, 250.0],
+        })],
+        ignore_index=True,
+    )
+
+    # Without the exclusion D is a waypoint: B -> D -> A is a walking path.
+    linked = build_station_graph(stops, near, links, pairs, equiv, canonical)
+    assert nx.has_path(linked, "fa:B", "fa:A")
+
+    graph = build_station_graph(
+        stops, near, links, pairs, equiv, canonical, exclude_feeds=["mibici"]
+    )
+    # D stays a node (it is still exported), but carries no arc at all...
+    assert graph.nodes["mibici:D"]["stops_only"] is True
+    assert graph.degree("mibici:D") == 0
+    assert not nx.has_path(graph, "fa:B", "fa:A")                 # ...so no shortcut
+    assert graph.has_edge("fa:B", "fb:X2", "walk")                # transit walks intact
+    # Components are counted over transit stops; the dock is reported apart.
+    stats = station_graph_stats(graph)
+    assert stats["n_weak_components"] == 1
+    assert stats["n_stops_only"] == 1
+
+
 def test_empty_inputs_yield_empty_graph(tmp_path: Path) -> None:
     import geopandas as gpd
 

@@ -97,11 +97,13 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 class Severity(str, enum.Enum):
     """Severity classification for a validation finding.
 
-    ERROR   - the feed violates the GTFS spec or is unusable in a way that
-              loses data (missing required file, unparseable table, bad ids).
-    WARNING - suspicious but recoverable; affected rows are skipped or the
-              condition does not block loading (e.g. dangling parent_station).
-    INFO    - purely informational (e.g. which optional files are present).
+    Levels::
+
+        ERROR   - the feed violates the GTFS spec or is unusable in a way that
+                  loses data (missing required file, unparseable table, bad ids).
+        WARNING - suspicious but recoverable; affected rows are skipped or the
+                  condition does not block loading (e.g. dangling parent_station).
+        INFO    - purely informational (e.g. which optional files are present).
     """
 
     ERROR = "ERROR"
@@ -140,13 +142,25 @@ class FeedSource(BaseModel):
     Attributes:
         feed_id: deterministic identifier derived from the file/directory
             name (see ``loader.derive_feed_id`` for the exact rules).
-        path: absolute path to the .zip file or feed directory.
-        kind: ``"zip"`` or ``"dir"``.
+        path: absolute path to the .zip file, feed directory, or stops CSV.
+        kind: ``"zip"``, ``"dir"``, or ``"csv"`` for a stops-only CSV
+            (see :mod:`gtfs_ingest.stops_csv`).
     """
 
     feed_id: str
     path: Path
-    kind: Literal["zip", "dir"]
+    kind: Literal["zip", "dir", "csv"]
+
+    @property
+    def is_stops_only(self) -> bool:
+        """True for a source that carries stop geometry and nothing else.
+
+        Such a source has no routes, trips, stop_times or calendar, so it
+        contributes stops to the inventory, proximity, deduplication and the
+        spatial exports, but no headways, route connectivity or same-line
+        topology. Every phase branches on this one predicate.
+        """
+        return self.kind == "csv"
 
 
 @dataclass
@@ -159,13 +173,25 @@ class LoadedFeed:
     validators run every check on a broken feed instead of dying on the
     first bad file.
 
+    A stops-only CSV source is represented here with ``feed=None`` and a
+    **pre-seeded** ``_tables["stops.txt"]``: :meth:`table` consults that cache
+    before it ever looks at ``feed``, so every consumer that reads GTFS tables
+    through :meth:`table` works on such a source unchanged, with no partridge
+    object in play.
+
     Attributes:
         source: the discovered feed this was loaded from.
         feed: the partridge raw feed object, or ``None`` if the container
-            itself could not be opened (see ``load_error``).
-        files_present: basenames of ``.txt`` members found in the zip/dir.
+            itself could not be opened (see ``load_error``) or the source is
+            a stops-only CSV.
+        files_present: basenames of the ``.txt`` members found in the zip/dir;
+            ``{"stops.txt"}`` for a stops-only CSV, which presents exactly one
+            logical table.
         load_error: message if the feed container could not be opened.
         table_errors: filename -> error message for tables that failed to parse.
+        load_findings: findings produced while opening the source itself
+            (encoding, delimiter and header resolution for a CSV), replayed by
+            ``validators.validate_feed`` so they reach the report.
     """
 
     source: FeedSource
@@ -173,12 +199,18 @@ class LoadedFeed:
     files_present: set[str]
     load_error: Optional[str] = None
     table_errors: dict[str, str] = field(default_factory=dict)
+    load_findings: list[Finding] = field(default_factory=list)
     _tables: dict[str, Optional[pd.DataFrame]] = field(default_factory=dict, repr=False)
 
     @property
     def feed_id(self) -> str:
         """Shortcut for ``source.feed_id``."""
         return self.source.feed_id
+
+    @property
+    def is_stops_only(self) -> bool:
+        """Shortcut for ``source.is_stops_only``."""
+        return self.source.is_stops_only
 
     def table(self, filename: str) -> Optional[pd.DataFrame]:
         """Return a GTFS table as a DataFrame, or ``None`` if unavailable.
@@ -262,6 +294,9 @@ class FeedReport(BaseModel):
     feed_id: str
     source_path: str
     status: Literal["loaded", "failed"]
+    #: Source layout this feed came from - "zip", "dir", or "csv" for a
+    #: stops-only CSV. Defaulted so older reports deserialize unchanged.
+    source_kind: str = "dir"
     row_counts: dict[str, int] = Field(default_factory=dict)
     optional_files: dict[str, bool] = Field(default_factory=dict)
     findings: list[Finding] = Field(default_factory=list)

@@ -9,7 +9,7 @@ import pandas as pd
 from gtfs_ingest.models import STOP_COLUMNS
 from gtfs_ingest.normalizer import CRS, normalize_stops
 
-from conftest import feed_files, load_dir_feed
+from conftest import feed_files, load_dir_feed, load_stops_csv_feed
 
 
 def codes(findings) -> set[str]:
@@ -105,3 +105,37 @@ def test_missing_optional_columns_are_filled(tmp_path: Path) -> None:
     assert len(stops) == 2
     assert set(STOP_COLUMNS) <= set(stops.columns)
     assert stops["location_type"].tolist() == [0, 0]
+
+
+# --------------------------------------------------------------------------
+# Stops-only CSV sources normalize exactly like GTFS feeds
+# --------------------------------------------------------------------------
+
+def test_stops_csv_normalizes_into_the_common_schema(tmp_path: Path) -> None:
+    stops, findings = normalize_stops(load_stops_csv_feed(tmp_path, "extra_stops.csv"))
+
+    assert list(stops.columns) == list(STOP_COLUMNS) + ["geometry"]
+    assert stops["stop_uid"].tolist() == ["extra_stops:C1", "extra_stops:C2"]
+    assert stops["feed_id"].tolist() == ["extra_stops", "extra_stops"]
+    assert stops["location_type"].tolist() == [0, 0]      # defaulted, as for GTFS
+    assert stops["parent_station"].isna().all()
+    assert stops.crs == CRS
+    assert not findings
+
+
+def test_stops_csv_drops_bad_rows_with_the_same_finding_codes(tmp_path: Path) -> None:
+    content = (
+        "id,name,latitude,longitude\n"
+        "C1,Ok,40.0,-75.0\n"
+        "C2,Out of range,999.0,-75.0\n"
+        "C1,Duplicate id,40.1,-75.1\n"
+        ",No id,40.2,-75.2\n"
+    )
+    stops, findings = normalize_stops(load_stops_csv_feed(tmp_path, "messy.csv", content))
+
+    assert stops["stop_id"].tolist() == ["C1"]
+    assert {
+        "dropped_invalid_coordinates",
+        "dropped_duplicate_stop_id",
+        "dropped_null_stop_id",
+    } <= codes(findings)

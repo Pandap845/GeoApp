@@ -82,6 +82,29 @@ def load_dir_feed(base: Path, name: str, files: dict[str, str]) -> LoadedFeed:
     return load_feed(source)
 
 
+#: A stops-only CSV whose two stops sit ~35 m and ~90 m from VALID_FEED's S1
+#: (40.0, -75.0), close enough to become proximity neighbours of it.
+STOPS_CSV: str = (
+    "id,name,latitude,longitude\n"
+    "C1,Main St Kiosk,40.0003,-75.0\n"
+    "C2,Market Corner,40.0,-75.001\n"
+)
+
+
+def write_stops_csv(base: Path, name: str, content: str = STOPS_CSV) -> Path:
+    """Write a stops-only CSV under *base* and return its path."""
+    path = base / name
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def load_stops_csv_feed(base: Path, name: str, content: str = STOPS_CSV) -> LoadedFeed:
+    """Write a stops CSV and load it through the real loader path."""
+    path = write_stops_csv(base, name, content)
+    (source,) = discover_feeds([path])
+    return load_feed(source)
+
+
 @pytest.fixture
 def valid_feed(tmp_path: Path) -> LoadedFeed:
     """A fully valid, loaded feed (directory form)."""

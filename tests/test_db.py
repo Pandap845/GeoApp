@@ -130,3 +130,49 @@ def test_live_bulk_copy_nan_becomes_null() -> None:
     assert row.trip_count == 1
     assert row.mean_headway_s is None            # NaN arrived as NULL
     engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GTFS_TEST_DATABASE_URL"),
+    reason="GTFS_TEST_DATABASE_URL not set; skipping live PostGIS test",
+)
+def test_live_csv_and_gtfs_stops_coexist_under_colliding_ids(tmp_path, valid_feed) -> None:
+    """stop_uid namespaces each feed, so identical stop_ids cannot collide."""
+    from sqlalchemy import text
+
+    from gtfs_ingest.db import ensure_schema, load_feed_stops
+
+    from conftest import load_stops_csv_feed
+
+    # The CSV reuses VALID_FEED's stop ids on purpose.
+    csv_feed = load_stops_csv_feed(
+        tmp_path, "extra_stops.csv",
+        "id,name,latitude,longitude\nS1,Other Network S1,20.67,-103.34\n",
+    )
+    engine = make_engine(os.environ["GTFS_TEST_DATABASE_URL"])
+    ensure_schema(engine)
+
+    gtfs_stops, _ = normalize_stops(valid_feed)
+    csv_stops, _ = normalize_stops(csv_feed)
+    load_feed_stops(engine, valid_feed.feed_id, gtfs_stops)
+    load_feed_stops(engine, csv_feed.feed_id, csv_stops)
+
+    with engine.begin() as conn:
+        uids = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT stop_uid FROM stops WHERE feed_id IN (:a, :b)"),
+                {"a": valid_feed.feed_id, "b": csv_feed.feed_id},
+            )
+        }
+    assert f"{valid_feed.feed_id}:S1" in uids
+    assert f"{csv_feed.feed_id}:S1" in uids
+
+    # Reloading one feed must leave the other's rows untouched.
+    load_feed_stops(engine, csv_feed.feed_id, csv_stops)
+    with engine.begin() as conn:
+        remaining = conn.execute(
+            text("SELECT count(*) FROM stops WHERE feed_id = :f"),
+            {"f": valid_feed.feed_id},
+        ).scalar_one()
+    assert remaining == 3

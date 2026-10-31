@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field, model_validator
 
 log = logging.getLogger(__name__)
 
-#: Safety cap: max synthetic runs generated from ONE frequencies.txt row
+#: Safety cap - max synthetic runs generated from ONE frequencies.txt row
 #: (a corrupt row like headway_secs=1 over 24 h must not explode memory).
 MAX_FREQUENCY_RUNS = 1000
 
@@ -115,7 +115,7 @@ def _fmt(seconds: int) -> str:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
 
 
-#: Default windows (spec): AM peak, midday, PM peak, evening.
+#: Default windows (spec) - AM peak, midday, PM peak, evening.
 DEFAULT_WINDOWS: tuple[TimeWindow, ...] = (
     TimeWindow.parse("am_peak", "06:00-09:00"),
     TimeWindow.parse("midday", "09:00-15:00"),

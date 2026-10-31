@@ -6,7 +6,13 @@ from pathlib import Path
 
 from gtfs_ingest.loader import derive_feed_id, discover_feeds, load_feed
 
-from conftest import VALID_FEED, write_feed_dir, write_feed_zip
+from conftest import (
+    VALID_FEED,
+    load_stops_csv_feed,
+    write_feed_dir,
+    write_feed_zip,
+    write_stops_csv,
+)
 
 
 def test_discovers_zips_and_dirs_in_collection_dir(tmp_path: Path) -> None:
@@ -77,3 +83,56 @@ def test_unreadable_table_is_recorded_not_raised(tmp_path: Path) -> None:
 
     assert loaded.table("stops.txt") is None
     assert "stops.txt" in loaded.table_errors
+
+
+# --------------------------------------------------------------------------
+# Stops-only CSV sources
+# --------------------------------------------------------------------------
+
+def test_discovers_explicit_csv_as_stops_only_feed(tmp_path: Path) -> None:
+    path = write_stops_csv(tmp_path, "extra_stops.csv")
+
+    (source,) = discover_feeds([path])
+
+    assert source.kind == "csv"
+    assert source.is_stops_only is True
+    assert source.feed_id == "extra_stops"   # extension dropped, like a .zip
+
+
+def test_csv_in_collection_dir_is_not_discovered(tmp_path: Path) -> None:
+    """Globbing *.csv would let a previous run's near_stations.csv be re-ingested."""
+    write_feed_dir(tmp_path, "cityB", VALID_FEED)
+    write_stops_csv(tmp_path, "near_stations.csv")
+
+    sources = discover_feeds([tmp_path])
+
+    assert [s.feed_id for s in sources] == ["cityb"]
+
+
+def test_directory_named_like_a_zip_is_still_a_dir(tmp_path: Path) -> None:
+    """The kind is decided by layout, not by suffix."""
+    write_feed_dir(tmp_path, "cityA.zip", VALID_FEED)
+
+    (source,) = discover_feeds([tmp_path / "cityA.zip"])
+
+    assert source.kind == "dir"
+
+
+def test_load_csv_seeds_stops_table_without_partridge(tmp_path: Path) -> None:
+    loaded = load_stops_csv_feed(tmp_path, "extra_stops.csv")
+
+    assert loaded.feed is None            # no partridge object in play
+    assert loaded.load_error is None
+    assert loaded.files_present == {"stops.txt"}
+    stops = loaded.table("stops.txt")
+    assert stops is not None
+    assert list(stops.columns) == ["stop_id", "stop_name", "stop_lat", "stop_lon"]
+    assert loaded.row_counts() == {"stops.txt": 2}
+
+
+def test_csv_with_bad_header_is_load_error_not_exception(tmp_path: Path) -> None:
+    loaded = load_stops_csv_feed(tmp_path, "bad.csv", "ID_PARADA,DESC,X,Y\n1,Centro,20.6,-103.3\n")
+
+    assert loaded.load_error is not None
+    assert loaded.table("stops.txt") is None
+    assert [f.code for f in loaded.load_findings] == ["unresolved_csv_header"]

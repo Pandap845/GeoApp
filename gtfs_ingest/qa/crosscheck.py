@@ -16,6 +16,7 @@ needs no mode data, so its mask is only ``places.id, places.types``
 Verdict definitions:
 
 Interchange (compare Google's observed mode set with ours):
+
 - ``CONFIRMED`` - Google's modes cover every mode we inferred,
 - ``PARTIAL``   - some overlap, but not all our modes observed,
 - ``CONFLICT``  - Google reports transit modes with zero overlap,
@@ -23,6 +24,7 @@ Interchange (compare Google's observed mode set with ours):
   usable mode evidence.
 
 Stop existence:
+
 - ``STATION_FOUND`` - a transit-typed place within the radius,
 - ``NOT_FOUND``     - Google answered and nothing transit was there,
 - ``NO_DATA``       - the call failed (no answer to interpret).
@@ -69,7 +71,8 @@ VEHICLE_TYPE_TO_MODE: dict[str, int] = {
     "CABLE_CAR": 5, "GONDOLA_LIFT": 6, "FUNICULAR": 7, "MONORAIL": 12,
 }
 
-#: Fallback: Google place type -> basic mode (generic transit_station: none).
+#: Fallback - Google place type -> basic mode (generic ``transit_station``
+#: -> none).
 PLACE_TYPE_TO_MODE: dict[str, int] = {
     "bus_station": 3, "bus_stop": 3,
     "train_station": 2, "subway_station": 1,

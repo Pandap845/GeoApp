@@ -14,11 +14,24 @@ out2/
 .gtfs_cache/
 .env
 
-# Markdown docs (keep only README.md, WORKFLOW.md and Plans/)
+# Markdown docs: scratch notes at the root are ignored by default; everything
+# the Sphinx site builds from is explicitly kept, or `docs/` cannot build from
+# a fresh clone.
 *.md
 !README.md
 !WORKFLOW.md
+!PIPELINE_GUIDE.md
 !Plans/*.md
+!docs/**/*.md
+# Narrative chapters included by docs/guide/*.md
+!diccionario_datos.md
+!future_project.md
+!references.md
+!command.md
+!GetlocationApiGoogle.md
+
+# Sphinx build output
+docs/_build/
 
 # LaTeX presentation & build artifacts
 *.tex

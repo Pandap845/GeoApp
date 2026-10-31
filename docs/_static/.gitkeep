@@ -1,0 +1,3 @@
+# Keeps docs/_static/ in git. Sphinx warns when an html_static_path entry is
+# missing, and the CI docs build runs with -W, so an empty untracked directory
+# would break the build on a fresh clone. Drop custom CSS/images here.

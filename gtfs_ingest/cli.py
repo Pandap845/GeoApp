@@ -1,6 +1,7 @@
 """Command-line entry point with subcommands.
 
-Usage:
+Usage::
+
     # Phase 1 - ingest & validate
     python -m gtfs_ingest.cli ingest --feeds ./data/feeds --report ./out [--dry-run]
 
@@ -21,10 +22,15 @@ Usage:
     python -m gtfs_ingest.cli locate-stations --stations route.txt \\
         --enable-google-api --transport-type SITREN --line 2 --report ./out [--dry-run]
 
+    # Stops-only CSV (id, name, latitude, longitude) merged alongside GTFS feeds
+    python -m gtfs_ingest.cli ingest --feeds ./data/feeds ./data/extra_stops.csv \\
+        --report ./out [--dry-run]
+
 Backward compatibility: invoking without a subcommand but with flags
 (``python -m gtfs_ingest.cli --feeds ...``) is treated as ``ingest``.
 
-Exit codes (both subcommands):
+Exit codes (both subcommands)::
+
     0 - run completed (individual feeds may still have findings/failures;
         consult the reports, or use ingest's --fail-on-error for a gate)
     1 - fatal run-level problem (no feeds found, DB unreachable/missing
@@ -61,7 +67,9 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         required=True,
         type=Path,
         metavar="PATH",
-        help="Feed .zip files, feed directories, or directories containing multiple feeds.",
+        help="Feed .zip files, feed directories, directories containing multiple "
+        "feeds, or stops-only .csv files (columns: id, name, latitude, longitude; "
+        "named explicitly, never picked up by scanning a directory).",
     )
     parser.add_argument(
         "--db-url",
@@ -111,9 +119,21 @@ def _add_dedupe_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.75,
         metavar="RATIO",
-        help="Minimum normalized-name similarity (0-1) to accept an alias pair "
-        "on names alone; pairs sharing a route short name match regardless "
-        "(default: 0.75).",
+        help="Minimum normalized-name similarity (0-1) to accept a cross-feed "
+        "alias pair on names alone; pairs sharing a route short name match "
+        "regardless (default: 0.75).",
+    )
+    parser.add_argument(
+        "--dedupe-within-feed-distance-m",
+        type=float,
+        default=5.0,
+        metavar="METERS",
+        help="Max separation for two stops of the SAME feed to be alias "
+        "candidates - one station published under two id schemes. Accepted "
+        "ONLY when both stops share a route (never on names alone). Kept "
+        "tight on purpose: duplicate records sit at ~0 m, while the same "
+        "route's opposite-direction stop (20-40 m away) must stay distinct. "
+        "Pass 0 to disable within-feed deduplication (default: 5).",
     )
 
 
@@ -522,6 +542,7 @@ def _run_analyze(args: argparse.Namespace) -> int:
             dedupe=args.dedupe,
             dedupe_distance_m=args.dedupe_distance_m,
             dedupe_name_threshold=args.dedupe_name_threshold,
+            dedupe_within_feed_distance_m=args.dedupe_within_feed_distance_m or None,
             dry_run=settings.dry_run,
         )
     except ValueError as exc:
@@ -556,6 +577,7 @@ def _run_detect_interchanges(args: argparse.Namespace) -> int:
         dedupe=args.dedupe,
         dedupe_distance_m=args.dedupe_distance_m,
         dedupe_name_threshold=args.dedupe_name_threshold,
+        dedupe_within_feed_distance_m=args.dedupe_within_feed_distance_m or None,
         dry_run=settings.dry_run,
     )
     try:

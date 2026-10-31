@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import geopandas as gpd
@@ -11,10 +12,11 @@ import pandas as pd
 
 from gtfs_ingest.analysis import connectivity
 from gtfs_ingest.analysis.graph_export import build_graph, graph_metrics, write_graphml
+from gtfs_ingest.analysis.near_stations import UNSERVED_LINE
 from gtfs_ingest.analysis.pipeline_phase2 import GRAPHML_NAME, JSON_NAME, MARKDOWN_NAME
 
 from test_headways import ANALYSIS_FEED
-from conftest import feed_files, write_feed_dir
+from conftest import feed_files, write_feed_dir, write_stops_csv
 
 
 def rs(*rows: tuple[str, str, str]) -> pd.DataFrame:
@@ -209,9 +211,10 @@ def test_analyze_frequency_cli_dry_run(tmp_path: Path) -> None:
     s2 = near.loc[near["stop_uid"] == "metro:S2", "near_stations"].item()
     assert s2.startswith(f"[({s3_id}, Central Platform, ")
     assert ", 1)" in s2
-    # S2 is an unserved station node, so it appears in no one's list.
+    # S2 is an unserved station node: still a neighbour, with the sentinel line.
     s3 = near.loc[near["stop_uid"] == "metro:S3", "near_stations"].item()
-    assert s3 == "[]"
+    s2_id = int(near.loc[near["stop_uid"] == "metro:S2", "ID"].item())
+    assert s3.startswith(f"[({s2_id}, Central Station, {UNSERVED_LINE}, ")
     # The sequential node ids start at 1 and cover every row.
     assert sorted(near["ID"]) == list(range(1, len(near) + 1))
 
@@ -476,3 +479,253 @@ def test_new_csv_and_station_network_outputs(tmp_path: Path) -> None:
     assert report["station_graph"]["n_stops"] == len(near)
     # New gpkg layer alongside the existing four.
     assert len(gpd.read_file(out / "transit_analysis.gpkg", layer="station_network")) == len(edges)
+
+
+# --------------------------------------------------------------------------
+# Stops-only CSV sources in Phase 2
+# --------------------------------------------------------------------------
+
+def _run_analysis(tmp_path: Path, out_name: str, *extra: str) -> dict:
+    """Run analyze-frequency over the feeds dir plus *extra* args; return the JSON."""
+    from gtfs_ingest import cli
+
+    out = tmp_path / out_name
+    assert cli.main(
+        [
+            "analyze-frequency",
+            "--feeds", str(tmp_path / "feeds"), *extra,
+            "--report", str(out),
+            "--service-date", "2026-01-06",
+            "--dry-run",
+        ]
+    ) == 0
+    return json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
+
+
+def test_analyze_frequency_with_stops_only_csv(tmp_path: Path) -> None:
+    """A CSV feed contributes geometry everywhere and schedule nowhere."""
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    csv_path = write_stops_csv(tmp_path, "extra_stops.csv")
+
+    baseline = _run_analysis(tmp_path, "out_baseline")
+    report = _run_analysis(tmp_path, "out", str(csv_path))
+    out = tmp_path / "out"
+
+    by_id = {f["feed_id"]: f for f in report["feeds"]}
+    assert set(by_id) == {"metro", "extra_stops"}
+
+    csv_feed = by_id["extra_stops"]
+    assert csv_feed["status"] == "stops_only"
+    assert csv_feed["service_date"] is None      # must not enter the coherence check
+    assert csv_feed["routes_analyzed"] == 0
+    assert csv_feed["trips_analyzed"] == 0
+    assert csv_feed["stop_headway_rows"] == 0
+    assert report["stops_only_feeds"] == ["extra_stops"]
+    assert report["stops_only_stops"] == 2
+
+    # A dateless feed must not make the run look incoherent.
+    assert report["service_dates_coherent"] is True
+    assert report["service_dates"] == ["2026-01-06"]
+
+    # Zero contamination of the route-level analysis.
+    assert report["connections_by_type"] == baseline["connections_by_type"]
+    assert report["graph"] == baseline["graph"]
+
+    near = pd.read_csv(out / "near_stations.csv", keep_default_na=False)
+    c1 = near.loc[near["stop_uid"] == "extra_stops:C1"].iloc[0]
+    s1_id = int(near.loc[near["stop_uid"] == "metro:S1", "ID"].item())
+    c1_id = int(c1["ID"])
+
+    # The CSV stop serves no line, so its own line columns stay empty...
+    assert c1["stop_line_ids"] == ""
+    assert c1["system"] == ""
+    assert c1["same_line_stations"] == "[]"
+    # ...but it lists the scheduled stop with that stop's real line...
+    assert f"({s1_id}, Main St, 10, " in c1["near_stations"]
+    # ...and, crucially, the scheduled stop lists it back with the sentinel.
+    s1_near = near.loc[near["stop_uid"] == "metro:S1", "near_stations"].item()
+    assert f"({c1_id}, Main St Kiosk, {UNSERVED_LINE}, " in s1_near
+
+    quality = pd.read_csv(out / "near_stations_quality.csv", keep_default_na=False)
+    q = quality.loc[quality["stop_uid"] == "extra_stops:C1"].iloc[0]
+    assert q["walk_source"] == "straight_line"
+    assert q["travel_source"] == "none"
+    assert int(q["travel_n_obs"]) == 0
+
+    # Present in the GeoPackage and as a station-network node (the Neo4j
+    # input), but never a dedupe alias and never on a walk arc - which would
+    # make it a waypoint between transit stops.
+    layer = gpd.read_file(out / "transit_analysis.gpkg", layer="stops")
+    assert "extra_stops:C1" in set(layer["stop_uid"])
+    nodes = pd.read_csv(out / "station_network_nodes.csv")
+    assert "extra_stops:C1" in set(nodes["stop_uid"])
+    assert report["station_graph"]["n_stops_only"] == 2
+    edges = pd.read_csv(out / "station_network_edges.csv")
+    assert not edges[["stop_uid_a", "stop_uid_b"]].stack().str.startswith("extra_stops:").any()
+    equiv = pd.read_csv(out / "stop_equivalences.csv")
+    assert not equiv[["stop_uid_a", "stop_uid_b"]].stack().astype(str).str.startswith("extra_stops:").any()
+    assert report["dedupe_within_feed_distance_m"] == 5.0
+
+
+def test_common_date_ignores_stops_only_feeds(tmp_path: Path) -> None:
+    """--common-date resolves against schedule feeds only; a CSV must not abort the run."""
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    csv_path = write_stops_csv(tmp_path, "extra_stops.csv")
+    from gtfs_ingest import cli
+
+    out = tmp_path / "out"
+    exit_code = cli.main(
+        [
+            "analyze-frequency",
+            "--feeds", str(tmp_path / "feeds"), str(csv_path),
+            "--report", str(out), "--common-date", "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
+    by_id = {f["feed_id"]: f for f in report["feeds"]}
+    assert by_id["metro"]["status"] == "analyzed"
+    assert by_id["extra_stops"]["status"] == "stops_only"
+
+
+def test_mode_filter_does_not_drop_stops_only_feed(tmp_path: Path) -> None:
+    """A route filter must not silently delete stops from a feed that has no routes."""
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    csv_path = write_stops_csv(tmp_path, "extra_stops.csv")
+
+    report = _run_analysis(tmp_path, "out", str(csv_path), "--transport-mode", "bus")
+    near = pd.read_csv(tmp_path / "out" / "near_stations.csv", keep_default_na=False)
+
+    by_id = {f["feed_id"]: f for f in report["feeds"]}
+    assert by_id["extra_stops"]["status"] == "stops_only"
+    assert "extra_stops:C1" in set(near["stop_uid"])
+
+
+def test_stops_only_feed_is_included_in_the_postgis_proximity_query(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Guards the one defect a dry run cannot catch.
+
+    On a live run the proximity pairs come from PostGIS, filtered by an
+    explicit feed-id list; dry runs take the local branch and ignore that list
+    entirely. If the list were keyed on "analyzed" alone, a stops-only feed's
+    rows would sit in the database matching nothing, and every one of its
+    stops would silently come out with no neighbours.
+    """
+    from gtfs_ingest import db
+    from gtfs_ingest.analysis import pipeline_phase2, storage
+
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    csv_path = write_stops_csv(tmp_path, "extra_stops.csv")
+
+    seen: dict[str, list[str]] = {}
+
+    def fake_postgis(engine, feed_ids, threshold_m):
+        seen["feed_ids"] = list(feed_ids)
+        return pd.DataFrame(columns=["stop_uid_a", "stop_uid_b", "distance_m"])
+
+    monkeypatch.setattr(db, "make_engine", lambda url: object())
+    monkeypatch.setattr(db, "ensure_schema", lambda engine: None)
+    monkeypatch.setattr(db, "load_feed_stops", lambda engine, feed_id, stops: len(stops))
+    monkeypatch.setattr(storage, "ensure_analysis_schema", lambda engine: None)
+    monkeypatch.setattr(storage, "replace_feed_rows", lambda *a, **k: 0)
+    monkeypatch.setattr(storage, "replace_all_rows", lambda *a, **k: 0)
+    monkeypatch.setattr(storage, "fetch_osm_matches", lambda engine, feed_ids: None)
+    monkeypatch.setattr(connectivity, "proximity_pairs_postgis", fake_postgis)
+
+    pipeline_phase2.run_analysis(
+        pipeline_phase2.AnalysisConfig(
+            feed_paths=[tmp_path / "feeds", csv_path],
+            database_url="postgresql+psycopg://unused",
+            report_dir=tmp_path / "out",
+            service_date=date(2026, 1, 6),
+        )
+    )
+
+    assert "extra_stops" in seen["feed_ids"]
+    assert "metro" in seen["feed_ids"]
+
+
+# --------------------------------------------------------------------------
+# Within-feed dedupe: one line published under two id schemes
+# --------------------------------------------------------------------------
+
+#: A feed that lists route R1's stops twice - once as SITEUR_*, once as ST_* -
+#: the shape observed in real Guadalajara feeds, where it splits the rendered
+#: route into two disjoint chains.
+DUAL_SCHEME_FEED = feed_files(
+    replace={
+        "stops.txt": (
+            "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
+            "SITEUR_01,Capuchina,40.0,-75.0,0,\n"
+            "ST_01,Capuchina,40.00002,-75.0,0,\n"         # ~2 m: same platform
+            "S9,Lejos,40.05,-75.05,0,\n"
+        ),
+        "trips.txt": "route_id,service_id,trip_id\nR1,WK,T1\nR1,WK,T2\n",
+        "stop_times.txt": (
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+            "T1,08:00:00,08:00:00,SITEUR_01,1\n"
+            "T1,08:10:00,08:10:00,S9,2\n"
+            "T2,09:00:00,09:00:00,ST_01,1\n"
+            "T2,09:10:00,09:10:00,S9,2\n"
+        ),
+    }
+)
+
+
+def test_within_feed_duplicate_ids_are_merged_end_to_end(tmp_path: Path) -> None:
+    write_feed_dir(tmp_path / "feeds", "metro", DUAL_SCHEME_FEED)
+
+    report = _run_analysis(tmp_path, "out")
+    equiv = pd.read_csv(tmp_path / "out" / "stop_equivalences.csv")
+
+    (row,) = equiv.to_dict("records")
+    assert (row["stop_uid_a"], row["stop_uid_b"]) == ("metro:SITEUR_01", "metro:ST_01")
+    assert row["match_kind"] == "within_feed"
+    assert row["shared_routes"] == 1
+    assert report["station_groups"] == 1
+
+    # The two records now resolve to one physical station...
+    quality = pd.read_csv(tmp_path / "out" / "near_stations_quality.csv", keep_default_na=False)
+    canon = quality.apply(lambda r: r["station_dedup"] or r["stop_uid"], axis=1)
+    assert canon.nunique() == 2                      # Capuchina + Lejos, not 3
+    # ...but nothing is dropped: every record still has its own row.
+    assert len(quality) == 3
+
+
+def test_within_feed_dedupe_does_not_change_route_topology(tmp_path: Path) -> None:
+    """Duplicates serve the same route, so no route may appear or vanish."""
+    write_feed_dir(tmp_path / "feeds", "metro", DUAL_SCHEME_FEED)
+
+    on = _run_analysis(tmp_path, "out_on")
+    off = _run_analysis(tmp_path, "out_off", "--dedupe-within-feed-distance-m", "0")
+
+    assert off["station_groups"] == 0                # the flag really is off
+    assert on["graph"]["n_routes"] == off["graph"]["n_routes"]
+    assert on["graph"]["n_edges"] == off["graph"]["n_edges"]
+
+
+def test_within_feed_default_is_the_same_in_cli_and_configs() -> None:
+    """The CLI and the Python API must not silently run different dedupe rules."""
+    from gtfs_ingest import cli
+    from gtfs_ingest.analysis.dedupe import WITHIN_FEED_DISTANCE_M
+    from gtfs_ingest.analysis.pipeline_phase2 import AnalysisConfig
+    from gtfs_ingest.conflation.pipeline_phase3 import InterchangeConfig
+
+    parser = cli.build_parser()
+    for command in ("analyze-frequency", "detect-interchanges"):
+        args = parser.parse_args([command, "--feeds", "x", "--dry-run"])
+        assert args.dedupe_within_feed_distance_m == WITHIN_FEED_DISTANCE_M
+    assert AnalysisConfig(feed_paths=[]).dedupe_within_feed_distance_m == WITHIN_FEED_DISTANCE_M
+    assert InterchangeConfig(feed_paths=[]).dedupe_within_feed_distance_m == WITHIN_FEED_DISTANCE_M
+
+
+def test_within_feed_dedupe_can_be_disabled(tmp_path: Path) -> None:
+    write_feed_dir(tmp_path / "feeds", "metro", DUAL_SCHEME_FEED)
+
+    report = _run_analysis(tmp_path, "out", "--dedupe-within-feed-distance-m", "0")
+    equiv = pd.read_csv(tmp_path / "out" / "stop_equivalences.csv")
+
+    assert equiv.empty
+    assert report["station_groups"] == 0

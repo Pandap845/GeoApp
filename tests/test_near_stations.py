@@ -11,6 +11,7 @@ from gtfs_ingest.analysis.near_stations import (
     NEAR_STATIONS_NAME,
     QUALITY_COLUMNS,
     QUALITY_NAME,
+    UNSERVED_LINE,
     build_near_stations,
     build_quality,
     walk_minutes,
@@ -149,8 +150,9 @@ def test_stops_without_neighbours_get_empty_list() -> None:
     assert row_of(result, "f:S9")["near_stations"] == "[]"
 
 
-def test_unserved_near_stop_is_omitted_from_lists() -> None:
-    # S2 is within range but no route serves it (e.g. a bare station node).
+def test_unserved_near_stop_is_listed_with_the_sentinel_line() -> None:
+    # S2 is within range but no route serves it (a bare station node, or a
+    # stop from a stops-only CSV). It is still a real, walkable neighbour.
     stops = make_stops(
         ("f", "S1", "Stop", 40.0, -75.0),
         ("f", "S2", "Station Node", 40.0009, -75.0),
@@ -160,10 +162,12 @@ def test_unserved_near_stop_is_omitted_from_lists() -> None:
     pairs = connectivity.proximity_pairs_local(stops, threshold_m=150.0)
 
     result = build_near_stations(stops, route_stops, routes, pairs)
-    assert row_of(result, "f:S1")["near_stations"] == "[]"          # S2 has no line
+    assert row_of(result, "f:S1")["near_stations"] == f"[(2, Station Node, {UNSERVED_LINE}, 1)]"
     assert row_of(result, "f:S2")["near_stations"] == "[(1, Stop, 10, 1)]"
-    assert row_of(result, "f:S2")["stop_line_ids"] == ""            # unserved itself
-    assert row_of(result, "f:S2")["system"] == ""                   # unserved -> no system
+    # The sentinel must not leak into the unserved stop's OWN columns: it is
+    # a valid neighbour, but it still serves no line.
+    assert row_of(result, "f:S2")["stop_line_ids"] == ""
+    assert row_of(result, "f:S2")["system"] == ""
 
 
 def test_system_joins_distinct_agency_names() -> None:
@@ -235,9 +239,10 @@ def test_walk_source_defaults_straight_line_and_none() -> None:
     assert row_of(quality, "f:S1")["travel_n_obs"] == 0
 
 
-def test_walk_source_unserved_neighbour_counts_as_none() -> None:
-    # S2 is near S1 but unserved: it renders in no lists, so S2 has no
-    # rendered near tuples of its own either way -> both sides consistent.
+def test_walk_source_unserved_neighbour_counts_as_straight_line() -> None:
+    # S2 is near S1 but unserved. It now renders as a neighbour with the
+    # sentinel line, so S1 genuinely carries a walking estimate and the
+    # provenance must say so rather than "none".
     stops = make_stops(
         ("f", "S1", "Stop", 40.0, -75.0),
         ("f", "S2", "Station Node", 40.0009, -75.0),
@@ -248,8 +253,8 @@ def test_walk_source_unserved_neighbour_counts_as_none() -> None:
     near = build_near_stations(stops, route_stops, routes, pairs)
     quality = build_quality(near, route_stops, routes, pairs)
 
-    assert row_of(near, "f:S1")["near_stations"] == "[]"    # S2 unserved
-    assert row_of(quality, "f:S1")["walk_source"] == "none"
+    assert UNSERVED_LINE in row_of(near, "f:S1")["near_stations"]
+    assert row_of(quality, "f:S1")["walk_source"] == "straight_line"
 
 
 def test_walk_source_mixed_and_unsnapped_override() -> None:

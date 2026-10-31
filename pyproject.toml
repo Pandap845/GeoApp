@@ -27,6 +27,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+docs = [
+    "sphinx>=7.0",
+    "furo>=2024.1",
+    "myst-parser>=2.0",
+    "linkify-it-py>=2.0",   # required by MyST's "linkify" extension
+    "sphinx-copybutton>=0.5",
+    "sphinxcontrib-mermaid>=1.0",  # renders the ```mermaid diagrams in the guides
+]
 
 [project.scripts]
 gtfs-ingest = "gtfs_ingest.cli:main"
