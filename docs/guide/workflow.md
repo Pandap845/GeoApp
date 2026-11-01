@@ -257,6 +257,8 @@ mean/median/min/max_headway_s = statistics over gaps      # seconds
 - `N < 2` → headway **undefined**: row kept with `trip_count` and NULL
   statistics; zero departures → no row.
 - Blank `direction_id` → sentinel `-1`; opposite directions never merged.
+- A route whose `direction_id` holds trips of both senses is relabelled
+  from stop order (`--fix-directions`, default on; `direction_fixes.csv`).
 - Non-timepoints (no `departure_time`) excluded.
 - **`frequencies.txt` IS expanded** (`headways.expand_frequencies`): each
   frequency row generates one synthetic run per `headway_secs` interval,
@@ -601,12 +603,15 @@ file only, never the database).
 | `near_stations_quality.csv` | analyze-frequency | provenance sidecar, always written: same rows and `ID` key as `near_stations.csv`. Per stop: `walk_source` (network / straight_line / mixed / unsnapped >200 m snap / none), `travel_source` (observed / estimated / mixed / none), `travel_n_obs` (worst-case trips behind the scheduled medians), `coord_confidence` (numeric score / needs_review / no_match from Phase 3 `stop_osm_matches`; `unavailable` in dry runs or before conflate-osm), `station_dedup` (dedupe `canonical_uid`, empty when unaliased). The main CSV's format never changes because of it |
 | `station_network.graphml` | analyze-frequency | the **routable** stop-level network (nx.MultiDiGraph): nodes = stops (`stop_uid` key, `near_id`/`name`/`feed`/`canonical_uid`/lat/lon), edges typed `in_vehicle` (directed, scheduled `travel_min`), `walk` (reciprocal, walking minutes) and `same_station` (reciprocal, 0 min, dedupe alias links) — `nx.shortest_path(..., weight="time_min")` works directly |
 | `station_network_nodes.csv` / `station_network_edges.csv` | analyze-frequency | the same network flattened for pandas/Excel: nodes with the attributes above; edges with `edge_type, stop_uid_a, stop_uid_b, time_min, linea, direction_id, route_uid, distance_m` (reciprocal arcs deduped to one row per pair) |
+| `direction_fixes.csv` | analyze-frequency | trips whose `direction_id` was relabelled from stop order: `feed_id, route_id, trip_id, direction_id_feed, direction_id_used` |
 | `route_stop_headways.csv` / `route_headways.csv` | analyze-frequency | the headway tables as files, written on every run incl. dry runs — same columns as the DB tables (with `service_date`; one row set per served day on range runs) |
 | `transit_analysis.gpkg` | analyze-frequency | 5 EPSG:4326 layers: **`stops`** (points + the CSV attributes), **`near_links`** (walking lines: both num ids, `distance_m`, `walk_min`), **`route_shapes`** (real route polylines: route_uid, linea, direction, shape_id), **`route_stop_links`** (directed consecutive-stop segments: route_uid, linea, direction, both stop_uids, `travel_min` scheduled minutes), **`station_network`** (the routable network's edges as lines, typed + time-weighted) |
 | `route_connectivity.graphml` | analyze-frequency | the undirected route graph: nodes = route_uid (+ short/long name, route_type, feed), edges = connections (+ type, shared stops, min distance) — for Gephi/yEd/networkx |
 | `route_connections.csv` | analyze-frequency | the route graph as a table: `route_a`, `route_b`, feeds, strongest `connection_type`, `shared_stop_count`, `min_stop_distance_m` |
 | `route_connection_stops.csv` | analyze-frequency | where routes connect: one row per route pair and stop pair (`stop_uid_a` on `route_a`, `stop_uid_b` on `route_b`), `connection_type`, `distance_m`; strongest evidence per stop pair |
-| `routes.csv` / `route_stops.csv` | analyze-frequency | route metadata (`route_uid`, names, `route_type`, `modalidad`) and the stops each route serves |
+| `routes.csv` / `route_stops.csv` | analyze-frequency | route metadata (`route_uid`, names, `route_type`, `modalidad`, `duplicate_of` when route dedupe left the route out of routing) and the stops each route serves |
+| `route_equivalences.csv` / `duplicate_trips.csv` | analyze-frequency | route dedupe: lines in two feeds (kept/dropped route, stop Jaccard, rule) and trips a feed lists twice over alias stops |
+| `connections.csv.gz` / `footpaths.csv` | analyze-frequency | the timetable for CSA/RAPTOR: every vehicle hop of the day (frequencies expanded, sorted by `dep_s`), and footpaths (`self` change time, `same_station`, `walk`) |
 | `interchanges_report.json/.md` | detect-interchanges | cluster totals, mode combinations, per-feed notes, transfers.txt agreement (declared vs inferred, with examples) |
 | `conflation_report.json/.md` | conflate-osm | match rate, needs-review count, side distribution, low-confidence count, reverse-coverage summary (gap count by kind) |
 | `osm_coverage_gaps.gpkg` | conflate-osm | layer `osm_only_stops`: OSM transit nodes with no GTFS stop nearby — `osm_id`, `kind`, `osm_name`, `nearest_stop_m`, position (worst-first) |

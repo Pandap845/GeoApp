@@ -158,8 +158,11 @@ def _add_ingest_parser(subparsers: Any) -> None:
 
 
 def _add_analyze_parser(subparsers: Any) -> None:
+    from .analysis.directions import FIX_DIRECTIONS
+    from .analysis.route_dedupe import ROUTE_DEDUPE
     from .analysis.service_filter import DATE_RULES, DEFAULT_DATE_RULE
     from .analysis.station_network import PRUNE_STATION_NETWORK
+    from .analysis.timetable import MIN_TRANSFER_S
 
     analyze = subparsers.add_parser(
         "analyze-frequency",
@@ -275,6 +278,31 @@ def _add_analyze_parser(subparsers: Any) -> None:
         help="Leave out walk and same_station arcs that change no shortest travel "
         "time in the station network (another walking path is as fast). The "
         "report always counts them. Off by default.",
+    )
+    analyze.add_argument(
+        "--fix-directions",
+        action=argparse.BooleanOptionalAction,
+        default=FIX_DIRECTIONS,
+        help="Relabel direction_id from stop order on routes whose direction_id holds "
+        "trips of both senses (headways would count both ways together). On by "
+        "default; changes are listed in direction_fixes.csv.",
+    )
+    analyze.add_argument(
+        "--route-dedupe",
+        action=argparse.BooleanOptionalAction,
+        default=ROUTE_DEDUPE,
+        help="Keep one source per physical line in the routing inputs (station network, "
+        "route graph): a route present in two feeds keeps the newer feed's copy, and "
+        "trips listed twice over alias stops keep one copy. Per-feed outputs keep "
+        "everything. On by default; see route_equivalences.csv and duplicate_trips.csv.",
+    )
+    analyze.add_argument(
+        "--min-transfer-s",
+        type=int,
+        default=MIN_TRANSFER_S,
+        metavar="SECONDS",
+        help="Minimum change time written to footpaths.csv, at every stop and between "
+        f"alias stops of one station (default: {MIN_TRANSFER_S}).",
     )
 
 
@@ -756,6 +784,9 @@ def _analysis_config(args: argparse.Namespace, settings: Settings) -> Any:
         osm_geom_column=settings.osm_geom_column,
         **_stop_options(args),
         prune_station_network=args.prune_station_network,
+        fix_directions=args.fix_directions,
+        route_dedupe=args.route_dedupe,
+        min_transfer_s=args.min_transfer_s,
         dry_run=settings.dry_run,
     )
 

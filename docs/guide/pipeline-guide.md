@@ -460,6 +460,7 @@ for one `(route, direction)`, inside one half-open window `[start, end)`.
 ```text
 departures = stop_times ⋈ trips  →  (route_id, direction_id, stop_id, departure_s)
              blank direction_id → -1 ;  rows without departure_time dropped
+             mixed-sense routes: direction_id from stop order (below)
 
 for each window w in [am_peak 06-09, midday 09-15, pm_peak 15-19, evening 19-23]:
     rows = departures where w.start <= departure_s < w.end
@@ -510,7 +511,8 @@ polyline per distinct `(route, direction, shape_id)`.
 
 ```text
 for each trip:
-    order rows by numeric stop_sequence (non-numeric sequence rows dropped)
+    order rows by numeric stop_sequence, then stop_id (non-numeric dropped)
+    keep one stop per stop_sequence     # alias stops listed under one sequence
     next_stop = following row's stop_id
     seg_s     = following departure_time - this departure_time
     seg_s < 0 → NULL                                  # broken sequence, not a time
@@ -522,6 +524,16 @@ group by (route_id, direction_id, stop_id, next_stop_id):
 
 Links use the **un-expanded** template `stop_times` from Step 7 — the pattern
 already holds the correct segment times.
+
+Each link then gets a `time_quality` label (the time itself is kept):
+
+```text
+untimed   travel_min is NULL
+zero      travel_min == 0
+too_fast  straight-line km/h between the stops > 80   # the real path is longer
+too_slow  route direction: max shape km / median trip minutes < 5 km/h
+ok        otherwise
+```
 
 ### Step 10. Find proximity pairs
 
@@ -643,6 +655,38 @@ the same-feed conflict rule rejected 1,077 cross-feed pairs (768 at 15–30 m,
 station is not "near" itself); routes serving aliased stops connect as
 `same_station_dedup`; interchange clustering treats each group as
 unsplittable.
+
+### Step 11b. One source per line (route dedupe)
+
+**Module** `route_dedupe.match_routes`, `route_dedupe.duplicate_trips`.
+
+A line published by two feeds would run twice in a timetable: double the
+frequency, half the waiting time. Route ids and short names can't tell: the
+improved feed prefixes mdb's ids (`2215-C98` vs `C98`), and `L1` names both
+Mi Tren and Sitren. Stop sets can:
+
+```text
+station(stop)   = canonical_uid from Step 11, else stop_uid
+jaccard(r1, r2) = |stations(r1) ∩ stations(r2)| / |stations(r1) ∪ stations(r2)|
+candidates      = route pairs of different feeds with jaccard >= 0.8
+accept best first (jaccard desc, then uids), each route at most once
+kept route      = the feed with the later calendar_end
+                  (ties: later service date, then smaller feed_id)
+
+inside one feed, per route:
+    two trips with the same arrival/departure times and frequencies.txt rows,
+    whose stops are pairwise within the within-feed radius (5 m)
+    → one trip listed twice; the smallest trip_id is kept
+```
+
+True twins score ≥ 0.91 in Guadalajara and every other pair ≤ 0.53; express
+variants (`MC-L1E` inside `MC-L1`) score below 0.5, so containment is never
+used. Only the **routing inputs** drop the duplicates: the station network
+(Step 16), the route graph and its CSVs (Step 12) and the timetable (Step
+16b). `routes.csv` keeps every route with `duplicate_of`; headways,
+near-stations and `route_stops.csv` keep both feeds. `--no-route-dedupe`
+turns it off. The choices are in `route_equivalences.csv` and
+`duplicate_trips.csv`.
 
 ### Step 12. Build route connectivity
 
@@ -877,6 +921,33 @@ Some `in_vehicle` arcs carry no time (untimed segments); filter or impute them
 before shortest-path work. The flattened CSVs and GeoPackage layer store one
 row per pair, so their counts are lower than the graph's arc count.
 
+### Step 16b. Export the timetable
+
+**Module** `timetable.feed_connections`, `timetable.footpaths`.
+
+Timetable algorithms (CSA, RAPTOR, time-dependent Dijkstra) need every
+departure, not a median per stop pair.
+
+```text
+per trip (one stop per stop_sequence, Step 9):
+    hop = (stop_i → stop_i+1, dep_s = departure_i, arr_s = arrival_i+1)
+frequency trips: one copy of the template's hops per run (Step 7 runs),
+    trip_id = "{feed_id}:{trip_id}@HH:MM:SS" of the run start
+drop hops that arrive before they depart; leave out route-dedupe losers
+sort by dep_s, arr_s, trip_id, from_stop          # the CSA scan order
+time_quality = the label of the hop's station-network arc (Step 9)
+
+footpaths:
+    self          stop → same stop      --min-transfer-s (default 120)
+    same_station  alias → alias          --min-transfer-s
+    walk          both ways per proximity pair, walking minutes × 60
+```
+
+Times are seconds after midnight of the service day and may pass 86,400.
+Footpaths are one hop (not transitively closed). `exact_times=0` runs are
+treated as scheduled. Date-range runs write no timetable (a timetable is one
+day). The connections file is gzip-compressed: millions of rows.
+
 ### Step 17. Export and persist
 
 | Output | Contents |
@@ -887,6 +958,9 @@ row per pair, so their counts are lower than the graph's arc count.
 | `near_stations.csv`, `near_stations_quality.csv` | Steps 14–15 |
 | `stop_equivalences.csv` | Step 11, with `match_kind` |
 | `route_stop_headways.csv`, `route_headways.csv` | Step 8 |
+| `direction_fixes.csv` | Step 8, trips relabelled from stop order |
+| `route_equivalences.csv`, `duplicate_trips.csv` | Step 11b |
+| `connections.csv.gz`, `footpaths.csv` | Step 16b |
 | `analysis_report.json/.md` | service dates, per-feed counts, connectivity, station graph, quality summary, stops-only sources |
 
 Database writes (skipped with `--dry-run`): headway tables per feed;
@@ -1184,14 +1258,17 @@ erDiagram
 | Step | Result |
 | --- | --- |
 | 6 Service date | typical weekday per feed: 2021-05-04 (improved) and 2024-06-27 (mdb); the calendars don't overlap, so **not coherent** (the old "busiest" rule picked the holidays 2020-01-01 and 2024-01-01) |
-| 8 Headways | 106,174 stop-level rows, 2,076 route rollups, 287 routes (84 + 511 trips) |
+| 8 Headways | 107,398 stop-level rows, 2,152 route rollups, 287 routes (84 + 511 trips); 19 trips on 19 routes relabelled from stop order (e.g. `MT_L3`: 420 s per direction at peak, not 230–330 s) |
+| 9 Links | mdb `MT_L1`/`MT_L2` list 60 alias stops under a shared `stop_sequence` (0 m apart); one kept per sequence, so 0-minute arcs drop from 31 to 1 |
 | 11 Dedupe | 3,584 pairs accepted among served stops; 772 rejected as same-feed conflicts |
 | 11 Stations | 12,768 served records → **10,203** physical stations (11,054 keeping unserved stops, 10,533 before the conflict rule) |
-| 12 Connectivity | 10,255 route pairs: 3,887 `same_stop`, 1,619 `same_station_dedup`, 4,749 `proximity` |
+| 11b Route dedupe | 38 lines in both feeds (Jaccard ≥ 0.909), all kept from mdb; improved keeps `MP-A05-2` and `ST_L1B`; 8 Sitren trips listed twice in mdb |
+| 12 Connectivity | 249 routes, 7,902 route pairs: 3,810 `same_stop`, 830 `same_station_dedup`, 3,262 `proximity` (287 routes and 10,255 pairs without route dedupe) |
 | 13 Walk graph | 129,039 ways → 512,420 vertices, 1,186,804 directed edges |
 | 13 Routing | 87,708 of 91,773 pairs on streets; typical walk 1.33× the straight line |
 | 15 `walk_source` | network 12,252 · mixed 1,356 · none 451 · straight_line 290 |
-| 16 Station network | 12,768 nodes (1,581 never-served stops left out); 26,418 in_vehicle + 144,572 walk + 5,624 same_station arcs; **1 weak component** among transit stops, 9 stops one-way reachable (route terminals); 42,557 walk + 247 same_station pairs redundant (with `--prune-station-network`: 59,458 walk + 5,130 same_station arcs, same shortest times) |
+| 16 Station network | 12,768 nodes (1,581 never-served stops left out); 24,036 in_vehicle + 144,572 walk + 5,624 same_station arcs; **1 weak component** among transit stops, 9 stops one-way reachable (route terminals); in_vehicle `time_quality`: ok 24,013 · too_fast 18 · too_slow 4 (T16B-C07-C, T16B-C08-M) · zero 1; 42,557 walk + 247 same_station pairs redundant (with `--prune-station-network`: 59,458 walk + 5,130 same_station arcs, same shortest times) |
+| 16b Timetable | 3,290,920 connections in 66,568 runs over 10,499 served stops (`connections.csv.gz`, 61 MB); footpaths: 101,018 walk · 10,499 self · 226 same_station (120 s change time); a CSA scan from 08:00 reaches 99.8–99.9 % of stops |
 
 ### Phase 3
 
@@ -1241,8 +1318,11 @@ Measured on the October 2026 runs (busiest date, unserved stops kept):
 | `--dedupe-distance-m` | 30 | 11 | cross-feed radius |
 | `--dedupe-name-threshold` | 0.75 | 11 | cross-feed name similarity |
 | `--dedupe-within-feed-distance-m` | 5 (0 = off) | 11 | within-feed radius |
+| `--route-dedupe` / `--no-route-dedupe` | on | 11b | one source per line in routing inputs |
 | `--network-walk` | off | 13 | walking on OSM streets |
 | `--walk-cache` / `--walk-cache-dir` | on / `.gtfs_cache` | 13 | walk-graph cache |
+| `--fix-directions` / `--no-fix-directions` | on | 8 | direction_id from stop order on mixed routes |
+| `--min-transfer-s` | 120 | 16b | change time in `footpaths.csv` |
 | `--eps`, `--min-samples`, `--crs` | 120, 2, auto UTM | 18 | DBSCAN |
 | `--match-threshold-m` | 50 | 20 | OSM match radius |
 | `--street-threshold-m` | 50 | 21 | centerline radius |
@@ -1269,7 +1349,10 @@ side-of-street tolerances 1 m / 10 m / 2 m.
    mean cross-feed outputs mix schedules. Pin one with `--service-date`.
 
 4. **`direction_id` is unreliable in these feeds.** Several trunk lines use
-   `0` for both directions, so their route–stop links render as disjoint chains.
+   `0` for both directions. By default the pipeline relabels those routes from
+   their stop order (`direction_fixes.csv`); without it, headways count both
+   ways together. `ST_L3` keeps its labels: its two senses use different
+   platform ids, so no stop mixes them.
 
 5. **Empty `system` has several causes** — a stops-only source, a stop unserved
    on the analyzed date, a parent station, or missing agency metadata. Identify

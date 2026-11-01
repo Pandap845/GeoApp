@@ -85,20 +85,11 @@ DEFAULT_WINDOWS: tuple[TimeWindow, ...] = (
 )
 
 
-def expand_frequencies(
-    stop_times: pd.DataFrame,
-    frequencies: pd.DataFrame,
-    max_runs: int = MAX_FREQUENCY_RUNS,
-) -> pd.DataFrame:
-    """Departure rows for frequency-based trips: one run every headway_secs until end_time.
-
-    Each run repeats the trip's stop offsets from its first departure. Only
-    those trips are returned; the caller must drop their template rows.
-    """
-    columns = ["trip_id", "stop_id", "departure_time"]
-    if frequencies.empty or stop_times.empty:
+def frequency_runs(frequencies: pd.DataFrame, max_runs: int = MAX_FREQUENCY_RUNS) -> pd.DataFrame:
+    """(trip_id, run_start) per run of frequencies.txt: one every headway_secs until end_time."""
+    columns = ["trip_id", "run_start"]
+    if frequencies.empty:
         return pd.DataFrame(columns=columns)
-
     freq = frequencies[["trip_id", "start_time", "end_time", "headway_secs"]].copy()
     for col in ("start_time", "end_time", "headway_secs"):
         freq[col] = pd.to_numeric(freq[col], errors="coerce")
@@ -114,7 +105,6 @@ def expand_frequencies(
     freq = freq[valid]
     if freq.empty:
         return pd.DataFrame(columns=columns)
-
     n_runs = np.ceil((freq["end_time"] - freq["start_time"]) / freq["headway_secs"]).astype(int)
     if (n_runs > max_runs).any():
         log.warning(
@@ -125,7 +115,7 @@ def expand_frequencies(
         n_runs = n_runs.clip(upper=max_runs)
 
     # run_start = start_time + k * headway, one row per run.
-    runs = pd.DataFrame(
+    return pd.DataFrame(
         {
             "trip_id": np.repeat(freq["trip_id"].to_numpy(), n_runs),
             "run_start": np.repeat(freq["start_time"].to_numpy(), n_runs)
@@ -134,8 +124,26 @@ def expand_frequencies(
         }
     )
 
+
+def expand_frequencies(
+    stop_times: pd.DataFrame,
+    frequencies: pd.DataFrame,
+    max_runs: int = MAX_FREQUENCY_RUNS,
+) -> pd.DataFrame:
+    """Departure rows for frequency-based trips: one run every headway_secs until end_time.
+
+    Each run repeats the trip's stop offsets from its first departure. Only
+    those trips are returned; the caller must drop their template rows.
+    """
+    columns = ["trip_id", "stop_id", "departure_time"]
+    if frequencies.empty or stop_times.empty:
+        return pd.DataFrame(columns=columns)
+    runs = frequency_runs(frequencies, max_runs)
+    if runs.empty:
+        return pd.DataFrame(columns=columns)
+
     # Offsets of each stop from the trip's first departure.
-    template = stop_times[stop_times["trip_id"].isin(set(freq["trip_id"]))][
+    template = stop_times[stop_times["trip_id"].isin(set(runs["trip_id"]))][
         ["trip_id", "stop_id", "departure_time"]
     ].dropna(subset=["departure_time"])
     if template.empty:

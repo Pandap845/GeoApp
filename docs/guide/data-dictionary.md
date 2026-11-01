@@ -350,7 +350,7 @@ directamente — incluso entre feeds.
 ### Tipos de arista
 | `edge_type` | Dirección | `time_min` | Otros atributos |
 | --- | --- | --- | --- |
-| `in_vehicle` | DIRIGIDA, una por línea y sentido | Minutos EN VEHÍCULO programados (`travel_min`); ausente si el segmento no tiene horario | `linea`, `direction_id`, `route_uid`, `feed_id` |
+| `in_vehicle` | DIRIGIDA, una por línea y sentido | Minutos EN VEHÍCULO programados (`travel_min`); ausente si el segmento no tiene horario | `linea`, `direction_id`, `route_uid`, `feed_id`, `time_quality` |
 | `walk` | Recíproca (dos arcos) | Minutos a pie (línea recta, o por calles de OSM con `--network-walk`) | `distance_m`, `walk_source` |
 | `same_station` | Recíproca (dos arcos) | `0.0` — alias de la misma estación física entre feeds (sección 2b); es lo que conecta las redes de los dos feeds | — |
 
@@ -362,6 +362,25 @@ por par (`in_vehicle` conserva una fila por sentido).
 
 ---
 
+`time_quality` (solo `in_vehicle`) dice si el tiempo programado es creíble; el
+tiempo nunca se cambia: `ok`; `zero` (0 s); `too_fast` (más de 80 km/h en línea
+recta entre las paradas); `too_slow` (la línea y sentido recorre su trazado a
+menos de 5 km/h: horarios de relleno, p. ej. los ramales T16B a 70 min);
+`untimed` (sin horario).
+
+### direction_fixes.csv — sentidos corregidos
+
+Una fila por viaje cuyo `direction_id` se reasignó porque su ruta tenía
+viajes de ambos sentidos bajo el mismo `direction_id` (p. ej. Mi Tren L3).
+El sentido sale del orden de paradas comparado con el viaje más largo de la
+ruta. `--no-fix-directions` conserva los valores del feed.
+
+| Columna | Significado |
+| --- | --- |
+| `feed_id`, `route_id`, `trip_id` | El viaje |
+| `direction_id_feed` | Valor del feed (−1 si venía vacío) |
+| `direction_id_used` | Valor usado en headways, segmentos y red |
+
 ## 6. Conexiones entre rutas (CSV)
 
 Cuatro archivos planos que acompañan a `route_connectivity.graphml`:
@@ -370,9 +389,62 @@ Cuatro archivos planos que acompañan a `route_connectivity.graphml`:
 | --- | --- | --- |
 | `route_connections.csv` | par de rutas conectadas | `route_a`, `route_b` (`route_uid`, `route_a < route_b`), `feed_id_a`, `feed_id_b`, `connection_type` (la evidencia más fuerte), `shared_stop_count`, `min_stop_distance_m` |
 | `route_connection_stops.csv` | par de rutas **y** par de paradas | `route_a`, `route_b`, `stop_uid_a` (de `route_a`), `stop_uid_b` (de `route_b`), `connection_type`, `distance_m` (0 si comparten parada). Dice **dónde** se conectan dos rutas |
-| `routes.csv` | ruta | `route_uid`, `feed_id`, `route_id`, `route_short_name`, `route_long_name`, `route_type`, `modalidad` |
+| `routes.csv` | ruta | `route_uid`, `feed_id`, `route_id`, `route_short_name`, `route_long_name`, `route_type`, `modalidad`, `duplicate_of` (la ruta gemela que se conserva cuando la misma línea viene en dos feeds; vacío si no) |
 | `route_stops.csv` | ruta y parada servida | `route_uid`, `stop_uid` (paradas que la ruta atiende el día analizado) |
+
+El grafo de rutas, `route_connections.csv` y `route_connection_stops.csv` solo
+incluyen rutas sin `duplicate_of` (sección 7).
 
 Orden de fuerza: `same_stop` > `same_parent_station` > `same_station_dedup` >
 `proximity`. Cada par de paradas conserva solo su evidencia más fuerte, y el
 tipo más fuerte de cada par de rutas coincide con el del grafo de rutas.
+
+## 7. Deduplicación de rutas y horario (routing)
+
+### route_equivalences.csv — la misma línea en dos feeds
+
+Dos rutas de feeds distintos son la misma línea si sus conjuntos de paradas,
+llevados a estaciones (sección 2b), coinciden con un índice de Jaccard ≥ 0.8.
+Se conserva la del feed con calendario más reciente; la otra queda fuera de la
+red de estaciones, del grafo de rutas y del horario (sigue en `routes.csv`,
+headways y near_stations). Los nombres cortos no sirven: `L1` es Mi Tren y
+también SiTren.
+
+| Columna | Significado |
+| --- | --- |
+| `kept_route_uid` | Ruta conservada |
+| `dropped_route_uid` | Ruta gemela retirada del routing |
+| `stop_jaccard` | Coincidencia de paradas (0–1) |
+| `same_short_name` | Si los nombres cortos coinciden (solo informativo) |
+| `rule` | `newer_calendar`, `later_service_date` o `feed_id` |
+
+### duplicate_trips.csv — viajes repetidos dentro de un feed
+
+Viajes de la misma ruta con los mismos horarios y frecuencias sobre paradas
+alias (a ≤ 5 m), p. ej. SiTren en mdb (`SITEUR_T_xx` y `ST_xx`). Se conserva
+el `trip_id` menor. Columnas: `feed_id`, `route_uid`, `kept_trip_id`,
+`dropped_trip_id`.
+
+### connections.csv.gz — el horario completo del día
+
+Comprimido con gzip (millones de filas; `pd.read_csv` lo lee directo). Una
+fila por tramo de vehículo entre paradas consecutivas, con `frequencies.txt`
+expandido, ordenado por salida (el orden de CSA).
+
+| Columna | Significado |
+| --- | --- |
+| `trip_id` | `{feed_id}:{trip_id}`; una corrida de frecuencia añade `@HH:MM:SS` (su salida) |
+| `route_uid`, `direction_id` | Ruta y sentido |
+| `from_stop`, `to_stop` | `stop_uid` de salida y de llegada |
+| `dep_s`, `arr_s` | Segundos desde la medianoche del día de servicio (pueden pasar de 86 400) |
+| `time_quality` | La etiqueta del arco `in_vehicle` (sección 5) |
+
+### footpaths.csv — transbordos y caminatas
+
+| Columna | Significado |
+| --- | --- |
+| `from_stop`, `to_stop` | Paradas |
+| `walk_s` | Segundos |
+| `kind` | `self` (tiempo mínimo de transbordo en la parada, `--min-transfer-s`, 120 s por defecto), `same_station` (entre alias de una estación, también `--min-transfer-s`), `walk` (por cada par cercano, en ambos sentidos) |
+
+No es transitivamente cerrado: cada caminata es un solo tramo.

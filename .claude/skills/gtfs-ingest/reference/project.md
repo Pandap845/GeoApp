@@ -39,13 +39,17 @@ Ignore `gtfs_ingest/.venv` (a stray second virtualenv); the project env is the r
 | Module | Role |
 | --- | --- |
 | `service_filter.py` | pick the service date (explicit, typical weekday (default), busiest, common, or a range) and filter the feed to it |
+| `directions.py` | relabel `direction_id` from stop order where a route mixes both senses |
 | `headways.py` | headways per (route, direction, stop, window); expands `frequencies.txt` |
 | `connectivity.py` | route–stop map, proximity pairs, route-to-route edges |
 | `dedupe.py` | station deduplication (cross-feed + within-feed) |
 | `walk_network.py`, `graph_cache.py` | walking distances on OSM streets (`--network-walk`), cached on disk |
 | `near_stations.py` | `near_stations.csv` and the quality sidecar |
+| `route_dedupe.py` | one source per line: cross-feed route twins, trips listed twice |
 | `station_network.py` | routable stop-level graph (in_vehicle, walk, same_station arcs) |
-| `route_geometry.py`, `geopackage.py`, `graph_export.py` | GeoPackage and GraphML exports |
+| `timetable.py` | `connections.csv.gz` and `footpaths.csv` for timetable algorithms |
+| `route_geometry.py` | route shapes, consecutive-stop links (one stop per stop_sequence), trip durations, `time_quality` |
+| `geopackage.py`, `graph_export.py` | GeoPackage and GraphML exports |
 | `route_filter.py` | `--transport-mode` / `--route` |
 | `storage.py` | Phase 2 tables |
 | `pipeline_phase2.py` | orchestration (`AnalysisConfig`, `AnalysisReport`) |

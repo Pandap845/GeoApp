@@ -271,7 +271,12 @@ graph is cached on disk in `.gtfs_cache/` keyed by feeds + OSM state
 (`--walk-cache-dir DIR` to relocate, `--no-walk-cache` to force a rebuild —
 an OSM reimport or stop reload invalidates automatically);
 `--prune-station-network` leaves out station-network arcs that change no
-shortest time (see the station network output below); `--transport-mode
+shortest time (see the station network output below); `--no-fix-directions`
+keeps the feed's `direction_id` where it mixes both senses of a route (see
+the headway definition); `--no-route-dedupe` keeps both copies of a line
+published by two feeds in the routing inputs (see `route_equivalences.csv`
+below); `--min-transfer-s` sets the timetable's change time (default 120);
+`--transport-mode
 MODE` and `--route ROUTE` (both repeatable or
 comma-separated) restrict the analysis to certain transport modes and/or
 routes — **default: everything**. Modes accept names (bus, tram, metro,
@@ -778,6 +783,16 @@ headway **in seconds** plus `trip_count` (departures in the window):
   not negative.
 - `direction_id` is optional in GTFS; blank values become `-1` ("unknown")
   so they group separately rather than merging opposite directions.
+- **Mixed directions are relabelled** (`--fix-directions`, on by default).
+  Some feeds put both senses of a route under one `direction_id` (mdb
+  `MT_L3` runs 101→118 and 118→101, both as `0`); grouping by direction
+  would then count both ways together and understate the headway (`MT_L3`
+  publishes 420 s per direction at peak; mixed, it read 230–330 s). On such
+  routes each trip's direction comes from its stop order compared with the
+  route's longest trip (sign of the rank correlation over shared stops);
+  routes whose labels already agree with their senses keep the feed's
+  labels. Every change is listed in `direction_fixes.csv`;
+  `--no-fix-directions` keeps the feed's labels.
 - **`frequencies.txt` is expanded**: each frequency row generates one
   synthetic run per `headway_secs` interval (start times
   `start_time + k·headway`, strictly before `end_time`), replaying the
@@ -865,7 +880,29 @@ Files in `--report DIR`:
   evidence; the strongest type per route pair equals the route graph's.
 - `routes.csv` — route metadata to decode the `route_uid`s: `route_uid`,
   `feed_id`, `route_id`, `route_short_name`, `route_long_name`, `route_type`,
-  `modalidad` (agency name).
+  `modalidad` (agency name), `duplicate_of` (the kept twin when route dedupe
+  left this route out of the routing inputs; empty otherwise). The route graph
+  and its CSVs list only routes without `duplicate_of`.
+- `route_equivalences.csv` — lines present in two feeds (route dedupe):
+  `kept_route_uid`, `dropped_route_uid`, `stop_jaccard` (stop-set overlap after
+  station dedupe; ≥ 0.8 to match), `same_short_name`, `rule`
+  (`newer_calendar` / `later_service_date` / `feed_id`). The dropped twin is
+  left out of the station network, the route graph and the timetable.
+- `duplicate_trips.csv` — trips a feed lists twice over alias stops (same
+  times, stops within the within-feed radius): `feed_id`, `route_uid`,
+  `kept_trip_id`, `dropped_trip_id`. Left out of the same routing inputs.
+- `connections.csv.gz` — the **timetable** for CSA/RAPTOR/time-dependent
+  Dijkstra (gzip; `pd.read_csv` reads it as is): one row per vehicle hop,
+  frequencies expanded, sorted by departure. `trip_id`
+  (`{feed_id}:{trip_id}`, a frequency run adds `@HH:MM:SS`), `route_uid`,
+  `direction_id`, `from_stop`, `to_stop`, `dep_s`, `arr_s` (seconds after
+  midnight of the service day; may pass 86,400), `time_quality`. Single-day
+  runs only.
+- `footpaths.csv` — `from_stop`, `to_stop`, `walk_s`, `kind`: `self` (the
+  minimum change time at a stop, `--min-transfer-s`, default 120 s),
+  `same_station` (between dedupe aliases, also `--min-transfer-s`) and `walk`
+  (both ways per proximity pair, the station network's walking minutes × 60).
+  One hop, not transitively closed.
 - `route_stops.csv` — `route_uid`, `stop_uid`: the stops each route serves
   on the analyzed day.
 - `analysis_report.json` / `analysis_report.md` — per feed: status, the
@@ -942,6 +979,16 @@ Files in `--report DIR`:
   | `same_station` | reciprocal arcs | `0.0` — cross-feed alias links from the dedupe stage, so routing crosses feeds |
 
   `nx.shortest_path(g, a, b, weight="time_min")` works out of the box.
+  `in_vehicle` rows also carry `time_quality` — the scheduled time is kept,
+  the label says whether to trust it: `ok`; `zero` (0 s); `too_fast` (the
+  straight line between the stops is faster than 80 km/h, so the real path
+  is even faster); `too_slow` (the route direction's shape length over its
+  median trip duration is below 5 km/h — placeholder times); `untimed`.
+  The report counts them in `station_graph.in_vehicle_time_quality`.
+  When a feed lists two stops under one `stop_sequence` of a trip (mdb
+  `MT_L1`/`MT_L2` alias platforms, 0 m apart), one stop is kept per
+  sequence (the smallest `stop_id`), so the line no longer zig-zags
+  between aliases; the per-feed notes count those rows.
   **Redundant arcs.** Many walk arcs never change a shortest time: another
   walking path is as fast (A→B→C in 1 + 1 minutes matches A→C in 2). The
   report always counts them in `station_graph` as `redundant_walk_pairs` and
@@ -956,6 +1003,9 @@ Files in `--report DIR`:
   Gephi merges parallel edges unless "parallel edges" is enabled on import;
   yEd/igraph/networkx read the multigraph natively. The CSVs are the same
   graph flattened (reciprocal arcs deduped to one row per pair).
+- `direction_fixes.csv` — one row per relabelled trip: `feed_id`,
+  `route_id`, `trip_id`, `direction_id_feed`, `direction_id_used` (header
+  only when nothing was relabelled or with `--no-fix-directions`).
 - `route_stop_headways.csv` / `route_headways.csv` — the headway tables
   written to the report directory on **every** run (previously DB-only, so
   dry runs produced no headway output). Same columns as the DB tables

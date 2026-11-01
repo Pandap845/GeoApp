@@ -234,3 +234,116 @@ def test_coverage_rows_to_frame() -> None:
     assert gdf["nearest_stop_m"].iloc[0] == 512.3
     assert gdf.geometry.iloc[0].x == pytest.approx(-103.4)
     assert rows_to_frame([]).empty
+
+
+def test_two_stops_on_one_sequence_give_one_arc_not_a_zig_zag() -> None:
+    from gtfs_ingest.analysis.route_geometry import ordered_stop_times
+
+    # A1/A2 and B1/B2 are alias pairs listed under one stop_sequence each.
+    stop_times = pd.DataFrame(
+        {
+            "trip_id": ["t1"] * 4,
+            "stop_id": ["A2", "A1", "B1", "B2"],
+            "stop_sequence": [1, 1, 2, 2],
+            "departure_time": [0.0, 0.0, 120.0, 120.0],
+        }
+    )
+    trips = pd.DataFrame({"trip_id": ["t1"], "route_id": ["R1"], "direction_id": [0]})
+    links = route_stop_links(fake_feed(None, trips, stop_times), "feedx")
+    assert list(zip(links["stop_uid_a"], links["stop_uid_b"])) == [("feedx:A1", "feedx:B1")]
+    assert links["travel_min"].iloc[0] == 2.0
+
+    _, dropped = ordered_stop_times(stop_times)
+    assert sorted(zip(dropped["stop_id"], dropped["kept_stop_id"])) == [
+        ("A2", "A1"),
+        ("B2", "B1"),
+    ]
+    shuffled = route_stop_links(fake_feed(None, trips, stop_times.iloc[::-1]), "feedx")
+    pd.testing.assert_frame_equal(shuffled, links)
+
+
+def test_route_trip_minutes_is_the_median_trip_duration() -> None:
+    from gtfs_ingest.analysis.route_geometry import route_trip_minutes
+
+    stop_times = pd.DataFrame(
+        {
+            "trip_id": ["t1", "t1", "t2", "t2", "t3", "t3"],
+            "stop_id": ["A", "B", "A", "B", "B", "A"],
+            "stop_sequence": [1, 2, 1, 2, 1, 2],
+            "departure_time": [0.0, 600.0, 0.0, 1200.0, 0.0, 300.0],
+        }
+    )
+    trips = pd.DataFrame(
+        {"trip_id": ["t1", "t2", "t3"], "route_id": ["R1"] * 3, "direction_id": [0, 0, 1]}
+    )
+    minutes = route_trip_minutes(fake_feed(None, trips, stop_times), "feedx")
+    got = dict(zip(zip(minutes["route_uid"], minutes["direction_id"]), minutes["trip_min"]))
+    assert got == {("feedx:R1", 0): 15.0, ("feedx:R1", 1): 5.0}
+
+
+def test_link_time_quality_labels() -> None:
+    from gtfs_ingest.analysis.route_geometry import link_time_quality
+
+    # B is ~1.1 km north of A; C is next to B.
+    stops = pd.DataFrame(
+        {
+            "stop_uid": ["f:A", "f:B", "f:C"],
+            "stop_lat": [20.0, 20.01, 20.0101],
+            "stop_lon": [-103.0, -103.0, -103.0],
+        }
+    )
+    links = pd.DataFrame(
+        {
+            "route_uid": ["f:R1", "f:R1", "f:R1", "f:R1", "f:SLOW"],
+            "direction_id": [0, 0, 0, 0, 0],
+            "stop_uid_a": ["f:A", "f:A", "f:B", "f:A", "f:A"],
+            "stop_uid_b": ["f:B", "f:B", "f:C", "f:B", "f:B"],
+            # 2 min = 33 km/h, 0.5 min = 133 km/h, 0 s, no time, slow route.
+            "travel_min": [2.0, 0.5, 0.0, None, 2.0],
+        }
+    )
+    shapes = gpd.GeoDataFrame(
+        {"route_uid": ["f:SLOW"], "direction_id": [0]},
+        geometry=[LineString([(-103.0, 20.0), (-103.0, 20.01)])],
+        crs="EPSG:4326",
+    )
+    # The SLOW route needs an hour for its 1.1 km shape.
+    trip_minutes = pd.DataFrame({"route_uid": ["f:SLOW"], "direction_id": [0], "trip_min": [60.0]})
+    labels = link_time_quality(links, stops, shapes, trip_minutes)
+    assert labels.tolist() == ["ok", "too_fast", "zero", "untimed", "too_slow"]
+
+
+def test_analyze_reports_stops_sharing_a_sequence(tmp_path: Path) -> None:
+    import json
+
+    from gtfs_ingest import cli
+    from gtfs_ingest.analysis.pipeline_phase2 import JSON_NAME
+
+    from conftest import feed_files, write_feed_dir
+
+    # S1 and its alias S1B (0 m apart) share stop_sequence 1.
+    feed = feed_files(
+        replace={
+            "stops.txt": (
+                "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
+                "S1,Main,40.0,-75.0,0,\nS1B,Main,40.0,-75.0,0,\nS3,End,40.01,-75.0,0,\n"
+            ),
+            "stop_times.txt": (
+                "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+                "T1,08:00:00,08:00:00,S1B,1\nT1,08:00:00,08:00:00,S1,1\n"
+                "T1,08:10:00,08:10:00,S3,2\n"
+            ),
+        }
+    )
+    write_feed_dir(tmp_path / "feeds", "metro", feed)
+    out = tmp_path / "out"
+    args = ["analyze-frequency", "--feeds", str(tmp_path / "feeds"), "--report", str(out)]
+    assert cli.main([*args, "--service-date", "2026-01-06", "--dry-run"]) == 0
+
+    (result,) = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))["feeds"]
+    assert result["status"] == "analyzed"
+    assert result["duplicate_sequence_rows"] == 1
+    assert any("at most 0 m apart" in note for note in result["notes"])
+    edges = pd.read_csv(out / "station_network_edges.csv")
+    rides = edges[edges["edge_type"] == "in_vehicle"]
+    assert list(zip(rides["stop_uid_a"], rides["stop_uid_b"])) == [("metro:S1", "metro:S3")]

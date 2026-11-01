@@ -58,3 +58,6 @@ CI (`.github/workflows/tests.yml`): lint (ruff check + format, blocking), unit m
 | `--no-dedupe` | dedupe on | |
 | `--no-drop-unserved-stops` | unserved stops dropped | keeps stops no trip uses |
 | `--prune-station-network` | off | drops station-network arcs that change no shortest time |
+| `--fix-directions` | on | relabels `direction_id` from stop order on mixed-sense routes |
+| `--route-dedupe` | on | one source per line in routing inputs (newer feed wins) |
+| `--min-transfer-s` | 120 | change time in `footpaths.csv` |

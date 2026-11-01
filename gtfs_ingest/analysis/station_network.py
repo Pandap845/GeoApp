@@ -38,6 +38,7 @@ EDGE_COLUMNS = [
     "direction_id",
     "route_uid",
     "distance_m",
+    "time_quality",
 ]
 
 NODE_COLUMNS = ["stop_uid", "near_id", "name", "feed", "canonical_uid", "lat", "lon"]
@@ -120,6 +121,7 @@ def build_station_graph(
                         "direction_id": int(row["direction_id"]),
                         "route_uid": row["route_uid"],
                         "feed_id": row["feed_id"],
+                        "time_quality": row.get("time_quality"),
                     }
                 ),
             )
@@ -263,6 +265,10 @@ def _edges_by_type(graph: nx.MultiDiGraph) -> dict[str, int]:
 def station_graph_stats(graph: nx.MultiDiGraph) -> dict[str, Any]:
     """Report stats. Weak components count transit stops only; docks go in n_stops_only."""
     transit = [u for u, d in graph.nodes(data=True) if not d.get("stops_only")]
+    quality: dict[str, int] = {}
+    for _, _, data in graph.edges(data=True):
+        if data.get("edge_type") == "in_vehicle" and data.get("time_quality"):
+            quality[data["time_quality"]] = quality.get(data["time_quality"], 0) + 1
     return {
         "n_stops": graph.number_of_nodes(),
         "n_stops_only": graph.number_of_nodes() - len(transit),
@@ -271,6 +277,7 @@ def station_graph_stats(graph: nx.MultiDiGraph) -> dict[str, Any]:
         "n_weak_components": (
             len(list(nx.weakly_connected_components(graph.subgraph(transit)))) if transit else 0
         ),
+        "in_vehicle_time_quality": dict(sorted(quality.items())),
     }
 
 
@@ -308,6 +315,7 @@ def station_edges_frame(graph: nx.MultiDiGraph) -> pd.DataFrame:
                 "direction_id": data.get("direction_id"),
                 "route_uid": data.get("route_uid"),
                 "distance_m": data.get("distance_m"),
+                "time_quality": data.get("time_quality"),
             }
         )
     frame = pd.DataFrame(rows, columns=EDGE_COLUMNS)

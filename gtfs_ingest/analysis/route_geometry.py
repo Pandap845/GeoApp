@@ -11,8 +11,11 @@ import logging
 from typing import Any
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 from shapely.geometry import LineString
+
+from .near_stations import haversine_m
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +32,12 @@ LINK_COLUMNS = [
     "travel_min",
     "n_obs",
 ]
+TRIP_MINUTE_COLUMNS = ["route_uid", "direction_id", "trip_min"]
+
+#: A straight-line speed above this is a wrong time; the real path is longer.
+MAX_IN_VEHICLE_KMH = 80.0
+#: A route direction slower than this along its shape has placeholder times.
+MIN_ROUTE_KMH = 5.0
 
 
 def _linea_map(feed: Any) -> pd.DataFrame:
@@ -50,11 +59,33 @@ def _linea_map(feed: Any) -> pd.DataFrame:
     return routes[["route_id", "linea"]]
 
 
-def _direction_series(trips: pd.DataFrame) -> pd.Series:
+def direction_series(trips: pd.DataFrame) -> pd.Series:
     """direction_id as int, -1 when unknown."""
     if "direction_id" not in trips.columns:
         return pd.Series(-1, index=trips.index)
     return pd.to_numeric(trips["direction_id"], errors="coerce").fillna(-1).astype(int)
+
+
+def ordered_stop_times(stop_times: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Stop times sorted by trip and stop_sequence, one stop per sequence; returns (kept, dropped).
+
+    Some feeds list two alias stops under one stop_sequence; keeping the
+    smallest stop_id stops the trip zig-zagging between them. dropped carries
+    kept_stop_id.
+    """
+    ordered = stop_times.copy()
+    ordered["stop_id"] = ordered["stop_id"].astype(str)
+    ordered["stop_sequence"] = pd.to_numeric(ordered["stop_sequence"], errors="coerce")
+    ordered = ordered.dropna(subset=["stop_sequence"]).sort_values(
+        ["trip_id", "stop_sequence", "stop_id"], kind="mergesort"
+    )
+    duplicate = ordered.duplicated(["trip_id", "stop_sequence"])
+    kept = ordered[~duplicate].reset_index(drop=True)
+    dropped = ordered[duplicate].merge(
+        kept[["trip_id", "stop_sequence", "stop_id"]].rename(columns={"stop_id": "kept_stop_id"}),
+        on=["trip_id", "stop_sequence"],
+    )
+    return kept, dropped
 
 
 def route_shapes(feed: Any, feed_id: str) -> gpd.GeoDataFrame:
@@ -94,7 +125,7 @@ def route_shapes(feed: Any, feed_id: str) -> gpd.GeoDataFrame:
     combos = trips.dropna(subset=["shape_id"]).copy()
     combos["shape_id"] = combos["shape_id"].astype(str)
     combos["route_id"] = combos["route_id"].astype(str)
-    combos["direction_id"] = _direction_series(combos)
+    combos["direction_id"] = direction_series(combos)
     combos = combos.drop_duplicates(["route_id", "direction_id", "shape_id"])
     combos = combos[combos["shape_id"].isin({str(k) for k in geometries})]
     if combos.empty:
@@ -128,10 +159,7 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
     has_times = "departure_time" in stop_times.columns
     if has_times:
         keep.append("departure_time")
-    ordered = stop_times[keep].copy()
-    ordered["stop_sequence"] = pd.to_numeric(ordered["stop_sequence"], errors="coerce")
-    ordered = ordered.dropna(subset=["stop_sequence"]).sort_values(["trip_id", "stop_sequence"])
-    ordered["stop_id"] = ordered["stop_id"].astype(str)
+    ordered, _ = ordered_stop_times(stop_times[keep])
     ordered["next_stop_id"] = ordered.groupby("trip_id")["stop_id"].shift(-1)
     if has_times:
         ordered["seg_s"] = (
@@ -144,7 +172,7 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
 
     trip_meta = trips[["trip_id", "route_id"]].copy()
     trip_meta["route_id"] = trip_meta["route_id"].astype(str)
-    trip_meta["direction_id"] = _direction_series(trips)
+    trip_meta["direction_id"] = direction_series(trips)
     merged = pairs.merge(trip_meta, on="trip_id")
     if merged.empty:
         return pd.DataFrame(columns=LINK_COLUMNS)
@@ -162,3 +190,81 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
     links = links.merge(_linea_map(feed), on="route_id", how="left")
     links["linea"] = links["linea"].fillna(links["route_id"])
     return links[LINK_COLUMNS].reset_index(drop=True)
+
+
+def route_trip_minutes(feed: Any, feed_id: str) -> pd.DataFrame:
+    """Median scheduled trip duration in minutes per route and direction."""
+    stop_times, trips = feed.stop_times, feed.trips
+    if stop_times.empty or trips.empty or "departure_time" not in stop_times.columns:
+        return pd.DataFrame(columns=TRIP_MINUTE_COLUMNS)
+    times = pd.to_numeric(stop_times["departure_time"], errors="coerce").groupby(
+        stop_times["trip_id"]
+    )
+    span = (times.max() - times.min()).rename("trip_s").reset_index()
+    meta = trips[["trip_id", "route_id"]].copy()
+    meta["route_id"] = meta["route_id"].astype(str)
+    meta["direction_id"] = direction_series(trips)
+    spans = span.merge(meta, on="trip_id").dropna(subset=["trip_s"])
+    if spans.empty:
+        return pd.DataFrame(columns=TRIP_MINUTE_COLUMNS)
+    minutes = spans.groupby(["route_id", "direction_id"], as_index=False)["trip_s"].median()
+    minutes["route_uid"] = feed_id + ":" + minutes["route_id"]
+    minutes["trip_min"] = minutes["trip_s"] / 60
+    return minutes[TRIP_MINUTE_COLUMNS]
+
+
+def link_time_quality(
+    links: pd.DataFrame,
+    stops: pd.DataFrame,
+    shapes: gpd.GeoDataFrame,
+    trip_minutes: pd.DataFrame,
+) -> pd.Series:
+    """time_quality per link: untimed, zero, too_fast, too_slow or ok; times are not changed.
+
+    too_fast is a straight-line speed above MAX_IN_VEHICLE_KMH (the real path
+    is longer still); too_slow marks every link of a route direction whose
+    shape length over its trip duration is below MIN_ROUTE_KMH.
+    """
+    if links.empty:
+        return pd.Series(dtype=object, index=links.index)
+    minutes = pd.to_numeric(links["travel_min"], errors="coerce")
+    coords = stops.drop_duplicates("stop_uid").set_index("stop_uid")
+    a = coords.reindex(links["stop_uid_a"]).set_index(links.index)
+    b = coords.reindex(links["stop_uid_b"]).set_index(links.index)
+    meters = haversine_m(a["stop_lat"], a["stop_lon"], b["stop_lat"], b["stop_lon"])
+    kmh = (meters / 1000) / (minutes.where(minutes > 0) / 60)
+    slow = _slow_route_directions(shapes, trip_minutes)
+    is_slow = pd.Series(
+        [key in slow for key in zip(links["route_uid"], links["direction_id"].astype(int))],
+        index=links.index,
+    )
+    labels = np.select(
+        [minutes.isna(), minutes == 0, kmh > MAX_IN_VEHICLE_KMH, is_slow],
+        ["untimed", "zero", "too_fast", "too_slow"],
+        default="ok",
+    )
+    return pd.Series(labels, index=links.index)
+
+
+def _slow_route_directions(
+    shapes: gpd.GeoDataFrame, trip_minutes: pd.DataFrame
+) -> set[tuple[str, int]]:
+    """(route_uid, direction_id) whose shape length over trip duration is below MIN_ROUTE_KMH."""
+    if shapes.empty or trip_minutes.empty or "route_uid" not in shapes.columns:
+        return set()
+    km = shapes.to_crs(shapes.estimate_utm_crs()).length / 1000
+    lengths = (
+        pd.DataFrame(
+            {
+                "route_uid": shapes["route_uid"],
+                "direction_id": shapes["direction_id"].astype(int),
+                "km": km,
+            }
+        )
+        .groupby(["route_uid", "direction_id"], as_index=False)["km"]
+        .max()
+    )
+    speed = lengths.merge(trip_minutes, on=["route_uid", "direction_id"])
+    speed = speed[speed["trip_min"] > 0]
+    slow = speed[speed["km"] / (speed["trip_min"] / 60) < MIN_ROUTE_KMH]
+    return set(zip(slow["route_uid"], slow["direction_id"].astype(int)))

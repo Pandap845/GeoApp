@@ -233,7 +233,7 @@ def _near_entries(
     return entries[columns]
 
 
-def _haversine_m(lat1: pd.Series, lon1: pd.Series, lat2: pd.Series, lon2: pd.Series) -> pd.Series:
+def haversine_m(lat1: pd.Series, lon1: pd.Series, lat2: pd.Series, lon2: pd.Series) -> pd.Series:
     """Great-circle meters between two point series."""
     p1, p2 = np.radians(lat1), np.radians(lat2)
     dphi = np.radians(lat2 - lat1)
@@ -287,7 +287,7 @@ def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> p
         return pd.DataFrame(columns=columns)
     entries["near_station"] = entries["near_station"].fillna("")
     estimate = (
-        _haversine_m(
+        haversine_m(
             entries["stop_lat"], entries["stop_lon"], entries["near_lat"], entries["near_lon"]
         )
         / VEHICLE_M_PER_MIN

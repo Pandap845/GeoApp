@@ -26,10 +26,18 @@
 .. automodule:: gtfs_ingest.analysis.headways
 ```
 
+```{eval-rst}
+.. automodule:: gtfs_ingest.analysis.directions
+```
+
 ## Connectivity
 
 ```{eval-rst}
 .. automodule:: gtfs_ingest.analysis.connectivity
+```
+
+```{eval-rst}
+.. automodule:: gtfs_ingest.analysis.route_dedupe
 ```
 
 ## Station deduplication and proximity
@@ -54,6 +62,12 @@
 
 ```{eval-rst}
 .. automodule:: gtfs_ingest.analysis.station_network
+```
+
+## Timetable
+
+```{eval-rst}
+.. automodule:: gtfs_ingest.analysis.timetable
 ```
 
 ## Geometry and exports
