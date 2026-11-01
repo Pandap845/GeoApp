@@ -110,6 +110,11 @@ conectividad ni topología de misma línea; se reporta con estado `stops_only`.
 
 ## 2. near_stations.csv — una fila por parada
 
+Por defecto solo incluye paradas que **algún viaje usa**: una parada
+(`location_type` 0) que no aparece en ninguna fila de `stop_times.txt` no se
+puede abordar y se omite (`--no-drop-unserved-stops` la conserva). Sigue en
+la tabla `stops` de PostGIS.
+
 | Columna | Significado |
 | --- | --- |
 | `ID` | Id secuencial de nodo **de este archivo** (1..N en orden de `stop_uid`). Es la clave que usan todas las columnas de relación. No es estable entre corridas con feeds distintos; para cruces durables usar `stop_uid` |
@@ -200,9 +205,10 @@ COUNT(DISTINCT COALESCE(NULLIF("station_dedup",''), "stop_uid"))
 ```
 
 Con los dos feeds de Guadalajara más MiBici la diferencia no es menor:
-14,349 registros → **11,054** estaciones con la deduplicación actual (10,533
-antes de la regla de conflictos del mismo feed; 8,877 con el antiguo radio
-de 50 m dentro de cada feed).
+14,349 registros → 12,768 con algún viaje (se omiten 1,581 paradas de mdb
+que ningún viaje usa) → **10,203** estaciones con la deduplicación actual
+(11,054 conservando las paradas sin servicio; 10,533 antes de la regla de
+conflictos del mismo feed).
 
 ---
 

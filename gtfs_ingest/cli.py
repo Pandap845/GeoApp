@@ -84,6 +84,20 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     _add_dry_run(parser, "Validate/analyze and write reports only; no database writes.")
 
 
+def _add_unserved_arg(parser: argparse.ArgumentParser) -> None:
+    """--drop-unserved-stops (analyze-frequency and detect-interchanges)."""
+    from .normalizer import DROP_UNSERVED_STOPS
+
+    parser.add_argument(
+        "--drop-unserved-stops",
+        action=argparse.BooleanOptionalAction,
+        default=DROP_UNSERVED_STOPS,
+        help="Leave out stops that appear in no stop_times row (no trip can board "
+        "them). They stay in the PostGIS stops table. On by default; "
+        "--no-drop-unserved-stops keeps them.",
+    )
+
+
 def _add_dedupe_args(parser: argparse.ArgumentParser) -> None:
     """Station deduplication flags (analyze-frequency and detect-interchanges)."""
     from .analysis.dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD, WITHIN_FEED_DISTANCE_M
@@ -234,6 +248,7 @@ def _add_analyze_parser(subparsers: Any) -> None:
         "--transport-mode: a route passes if it matches either. Default: all routes.",
     )
     _add_dedupe_args(analyze)
+    _add_unserved_arg(analyze)
 
 
 def _add_detect_parser(subparsers: Any) -> None:
@@ -263,6 +278,7 @@ def _add_detect_parser(subparsers: Any) -> None:
         help="Metric CRS for distance math (default: auto-detect a UTM zone).",
     )
     _add_dedupe_args(detect)
+    _add_unserved_arg(detect)
 
 
 def _add_conflate_parser(subparsers: Any) -> None:
@@ -563,6 +579,14 @@ def _settings(args: argparse.Namespace) -> Settings:
     return Settings(**overrides)
 
 
+def _stop_options(args: argparse.Namespace) -> dict[str, Any]:
+    """Dedupe and unserved-stop flags as config fields; within-feed 0 turns that rule off."""
+    return {
+        **_dedupe_options(args),
+        "drop_unserved_stops": args.drop_unserved_stops,
+    }
+
+
 def _dedupe_options(args: argparse.Namespace) -> dict[str, Any]:
     """Dedupe flags as config fields; a within-feed radius of 0 turns that rule off."""
     return {
@@ -705,7 +729,7 @@ def _analysis_config(args: argparse.Namespace, settings: Settings) -> Any:
         walk_cache_dir=args.walk_cache_dir,
         osm_line_table=settings.osm_line_table,
         osm_geom_column=settings.osm_geom_column,
-        **_dedupe_options(args),
+        **_stop_options(args),
         dry_run=settings.dry_run,
     )
 
@@ -745,7 +769,7 @@ def _run_detect_interchanges(args: argparse.Namespace) -> int:
         eps_m=args.eps,
         min_samples=args.min_samples,
         metric_crs=args.crs or settings.metric_crs,
-        **_dedupe_options(args),
+        **_stop_options(args),
         dry_run=settings.dry_run,
     )
     ok, report = _guarded("Interchange detection", lambda: run_interchanges(config))

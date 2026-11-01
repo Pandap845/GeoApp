@@ -810,3 +810,117 @@ def test_within_feed_dedupe_can_be_disabled(tmp_path: Path) -> None:
 
     assert equiv.empty
     assert report["station_groups"] == 0
+
+
+# Unserved stops: listed in stops.txt, used by no trip
+#: ANALYSIS_FEED plus S9, ~50 m from S1, that no trip serves.
+UNSERVED_FEED = {
+    **ANALYSIS_FEED,
+    "stops.txt": ANALYSIS_FEED["stops.txt"] + "S9,Ghost Stop,40.00045,-75.0,0,\n",
+}
+
+
+def test_unserved_stops_are_left_out_by_default(tmp_path: Path) -> None:
+    write_feed_dir(tmp_path / "feeds", "metro", UNSERVED_FEED)
+
+    report = _run_analysis(tmp_path, "out")
+
+    near = pd.read_csv(tmp_path / "out" / "near_stations.csv")
+    assert "metro:S9" not in set(near["stop_uid"])
+    assert "Ghost Stop" not in " ".join(near["near_stations"])
+    nodes = pd.read_csv(tmp_path / "out" / "station_network_nodes.csv")
+    assert "metro:S9" not in set(nodes["stop_uid"])
+    (feed,) = report["feeds"]
+    assert feed["unserved_stops"] == 1
+    assert report["drop_unserved_stops"] is True
+    assert report["unserved_stops_dropped"] == 1
+
+
+def test_unserved_stops_can_be_kept(tmp_path: Path) -> None:
+    write_feed_dir(tmp_path / "feeds", "metro", UNSERVED_FEED)
+
+    report = _run_analysis(tmp_path, "out", "--no-drop-unserved-stops")
+
+    near = pd.read_csv(tmp_path / "out" / "near_stations.csv")
+    assert "metro:S9" in set(near["stop_uid"])
+    assert report["feeds"][0]["unserved_stops"] == 1
+    assert report["unserved_stops_dropped"] == 0
+
+
+def test_postgis_pairs_touching_a_dropped_stop_are_ignored(tmp_path: Path, monkeypatch) -> None:
+    """The stops table keeps every stop, so PostGIS pairs must be filtered."""
+    from gtfs_ingest import db
+    from gtfs_ingest.analysis import pipeline_phase2, storage
+
+    write_feed_dir(tmp_path / "feeds", "metro", UNSERVED_FEED)
+    loaded: dict[str, int] = {}
+
+    def fake_postgis(engine, feed_ids, threshold_m):
+        return pd.DataFrame(
+            {"stop_uid_a": ["metro:S1"], "stop_uid_b": ["metro:S9"], "distance_m": [50.0]}
+        )
+
+    monkeypatch.setattr(db, "make_engine", lambda url: object())
+    monkeypatch.setattr(db, "ensure_schema", lambda engine: None)
+    monkeypatch.setattr(
+        db, "load_feed_stops", lambda engine, feed_id, stops: loaded.setdefault(feed_id, len(stops))
+    )
+    monkeypatch.setattr(storage, "ensure_analysis_schema", lambda engine: None)
+    monkeypatch.setattr(storage, "replace_feed_rows", lambda *a, **k: 0)
+    monkeypatch.setattr(storage, "replace_all_rows", lambda *a, **k: 0)
+    monkeypatch.setattr(storage, "fetch_osm_matches", lambda engine, feed_ids: None)
+    monkeypatch.setattr(connectivity, "proximity_pairs_postgis", fake_postgis)
+
+    pipeline_phase2.run_analysis(
+        pipeline_phase2.AnalysisConfig(
+            feed_paths=[tmp_path / "feeds"],
+            database_url="postgresql+psycopg://unused",
+            report_dir=tmp_path / "out",
+            service_date=date(2026, 1, 6),
+        )
+    )
+
+    assert loaded["metro"] == 4  # PostGIS still gets every stop, S9 included
+    near = pd.read_csv(tmp_path / "out" / "near_stations.csv")
+    s1 = near[near["stop_uid"] == "metro:S1"].iloc[0]
+    assert s1["near_stations"] == "[]"
+
+
+def test_detect_interchanges_drops_unserved_stops(tmp_path: Path) -> None:
+    from gtfs_ingest import cli
+
+    write_feed_dir(tmp_path / "feeds", "metro", UNSERVED_FEED)
+    out = tmp_path / "out"
+    assert (
+        cli.main(
+            [
+                "detect-interchanges",
+                "--feeds",
+                str(tmp_path / "feeds"),
+                "--report",
+                str(out),
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads((out / "interchanges_report.json").read_text(encoding="utf-8"))
+    (feed,) = report["feeds"]
+    assert feed["unserved_stops"] == 1
+    assert feed["stops"] == 3
+    assert report["unserved_stops_dropped"] == 1
+
+
+def test_drop_unserved_default_is_the_same_in_cli_and_configs() -> None:
+    from gtfs_ingest import cli
+    from gtfs_ingest.analysis.pipeline_phase2 import AnalysisConfig
+    from gtfs_ingest.conflation.pipeline_phase3 import InterchangeConfig
+    from gtfs_ingest.normalizer import DROP_UNSERVED_STOPS
+
+    parser = cli.build_parser()
+    for command in ("analyze-frequency", "detect-interchanges"):
+        args = parser.parse_args([command, "--feeds", "x", "--dry-run"])
+        assert args.drop_unserved_stops is DROP_UNSERVED_STOPS
+    assert AnalysisConfig(feed_paths=[]).drop_unserved_stops is DROP_UNSERVED_STOPS
+    assert InterchangeConfig(feed_paths=[]).drop_unserved_stops is DROP_UNSERVED_STOPS

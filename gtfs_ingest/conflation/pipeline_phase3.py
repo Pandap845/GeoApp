@@ -47,6 +47,7 @@ class InterchangeConfig(BaseModel):
     dedupe_name_threshold: float = Field(default=NAME_SIM_THRESHOLD, ge=0.0, le=1.0)
     # Same default as the CLI; None = off (cross-feed aliases only).
     dedupe_within_feed_distance_m: float | None = Field(default=WITHIN_FEED_DISTANCE_M, gt=0)
+    drop_unserved_stops: bool = normalizer.DROP_UNSERVED_STOPS
     dry_run: bool = False
 
 
@@ -75,6 +76,7 @@ class FeedNote(BaseModel):
     stops: int = 0
     routes: int = 0
     has_transfers_txt: bool = False
+    unserved_stops: int = 0  # location_type 0 stops that no trip uses
     notes: list[str] = Field(default_factory=list)
 
 
@@ -93,6 +95,8 @@ class InterchangeReport(BaseModel):
     stops_deduplicated: int = 0
     # Pairs dropped because they would merge far-apart stops of one feed.
     dedupe_rejected_pairs: int = 0
+    drop_unserved_stops: bool = normalizer.DROP_UNSERVED_STOPS
+    unserved_stops_dropped: int = 0
     single_physical_station_clusters: int = 0  # clusters that are just one station's aliases
     feeds: list[FeedNote]
     clusters_total: int = 0
@@ -124,7 +128,9 @@ class ConflationReport(BaseModel):
     osm_only_by_kind: dict[str, int] = Field(default_factory=dict)
 
 
-def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]]:
+def _collect_feed(
+    source: Any, drop_unserved: bool = normalizer.DROP_UNSERVED_STOPS
+) -> tuple[FeedNote, dict[str, pd.DataFrame | None]]:
     """Load one feed's stops, route maps and transfers; failures go into the note."""
     note = FeedNote(feed_id=source.feed_id, status="ok")
     data: dict[str, pd.DataFrame | None] = {
@@ -151,6 +157,12 @@ def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]
             return note, data
 
         data["route_stops"] = route_stop_map(loaded.feed, source.feed_id)
+        # Same rule as Phase 2: a stop no trip uses can't be boarded.
+        unserved = normalizer.unserved_stops(stops, loaded.table("stop_times.txt"))
+        note.unserved_stops = int(unserved.sum())
+        if drop_unserved and note.unserved_stops:
+            stops = data["stops"] = stops[~unserved].reset_index(drop=True)
+            note.notes.append(f"{note.unserved_stops} stop(s) used by no trip left out")
 
         routes_raw = loaded.table("routes.txt")
         if routes_raw is not None and not routes_raw.empty and "route_id" in routes_raw.columns:
@@ -196,7 +208,7 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
     notes: list[FeedNote] = []
     all_data: list[dict] = []
     for source in sources:
-        note, data = _collect_feed(source)
+        note, data = _collect_feed(source, config.drop_unserved_stops)
         notes.append(note)
         all_data.append(data)
 
@@ -272,6 +284,10 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
         equivalence_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
         stops_deduplicated=len(canonical),
         dedupe_rejected_pairs=len(rejected),
+        drop_unserved_stops=config.drop_unserved_stops,
+        unserved_stops_dropped=(
+            sum(n.unserved_stops for n in notes) if config.drop_unserved_stops else 0
+        ),
         single_physical_station_clusters=(
             int((clusters["physical_stop_count"] == 1).sum()) if not clusters.empty else 0
         ),

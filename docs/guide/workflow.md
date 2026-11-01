@@ -207,6 +207,14 @@ report.
   near/same-line stations, shapes, links). The **stop inventory stays
   complete** — stops of excluded routes appear unserved. Feeds with no
   matching route are reported `filtered_out`.
+- **Never-served stops are left out** (Phases 2 and 3, default on;
+  `--no-drop-unserved-stops` keeps them). A stop with `location_type` 0
+  that appears in no `stop_times.txt` row of the whole feed can't be
+  boarded on any day, so it is not a network node or a near station.
+  Stations, entrances and stops-only sources are never dropped. The
+  PostGIS `stops` table still holds every record; the PostGIS proximity
+  pairs are filtered to the run's stops. Counted per feed as
+  `unserved_stops` (mdb: 1,581).
 
 ---
 

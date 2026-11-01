@@ -1198,13 +1198,13 @@ erDiagram
 | --- | --- |
 | 6 Service date | 2020-01-01 and 2024-01-01 (busiest per feed) — **not coherent** |
 | 8 Headways | 102,460 stop-level rows, 2,001 route rollups, 274 routes |
-| 11 Dedupe | 3,546 pairs kept: 3,299 cross-feed + 247 within-feed (5 m); 1,077 rejected as same-feed conflicts |
-| 11 Stations | 14,349 records → **11,054** physical stations (10,533 before the conflict rule, 8,877 with the former 50 m) |
+| 11 Dedupe | 3,584 pairs accepted among served stops; 772 rejected as same-feed conflicts |
+| 11 Stations | 12,768 served records → **10,203** physical stations (11,054 keeping unserved stops, 10,533 before the conflict rule) |
 | 12 Connectivity | 9,112 route pairs: 3,669 `same_stop`, 1,428 `same_station_dedup`, 4,015 `proximity` |
 | 13 Walk graph | 129,039 ways → 512,420 vertices, 1,186,804 directed edges |
 | 13 Routing | 87,708 of 91,773 pairs on streets; typical walk 1.33× the straight line |
 | 15 `walk_source` | network 12,252 · mixed 1,356 · none 451 · straight_line 290 |
-| 16 Station network | 14,349 nodes; 25,485 in_vehicle + 186,150 walk + 7,092 same_station arcs |
+| 16 Station network | 12,768 nodes (1,581 never-served stops left out); 25,485 in_vehicle + 144,572 walk + 5,624 same_station arcs; **1 weak component** among transit stops |
 
 ### Phase 3
 
@@ -1284,7 +1284,8 @@ side-of-street tolerances 1 m / 10 m / 2 m.
 
 5. **Empty `system` has several causes** — a stops-only source, a stop unserved
    on the analyzed date, a parent station, or missing agency metadata. Identify
-   stops-only sources by `feed_id`, never by `system`.
+   stops-only sources by `feed_id`, never by `system`. (Stops that *no* trip
+   ever serves are left out entirely by default; see `--drop-unserved-stops`.)
 
 6. **Headways don't vary by time of day here** (Step 8), because the source
    data defines uniform frequencies. That is a property of the feeds, not a

@@ -69,7 +69,8 @@ class AnalysisConfig(BaseModel):
 
     service_date None picks each feed's busiest date. mode_codes/route_specs
     keep routes matching either filter. dedupe_within_feed_distance_m defaults
-    to 5 m like the CLI; None turns that rule off. dry_run skips the database.
+    to 5 m like the CLI; None turns that rule off. drop_unserved_stops leaves
+    out stops no trip uses. dry_run skips the database.
     """
 
     feed_paths: list[Path]
@@ -93,6 +94,7 @@ class AnalysisConfig(BaseModel):
     dedupe_name_threshold: float = Field(default=NAME_SIM_THRESHOLD, ge=0.0, le=1.0)
     # Same default as the CLI; None = off (cross-feed aliases only).
     dedupe_within_feed_distance_m: float | None = Field(default=WITHIN_FEED_DISTANCE_M, gt=0)
+    drop_unserved_stops: bool = normalizer.DROP_UNSERVED_STOPS
     dry_run: bool = False
 
 
@@ -111,6 +113,7 @@ class FeedAnalysis(BaseModel):
     frequency_trips_expanded: int = 0  # trips from frequencies.txt
     calendar_end: str | None = None  # ISO date, latest declared service
     calendar_status: str = "unknown"  # "current" | "expired" | "unknown"
+    unserved_stops: int = 0  # location_type 0 stops that no trip uses
     notes: list[str] = Field(default_factory=list)
 
 
@@ -132,6 +135,8 @@ class AnalysisReport(BaseModel):
     stops_deduplicated: int = 0  # stops belonging to some alias group
     # Pairs dropped because they would merge far-apart stops of one feed.
     dedupe_rejected_pairs: int = 0
+    drop_unserved_stops: bool = normalizer.DROP_UNSERVED_STOPS
+    unserved_stops_dropped: int = 0  # left out of every output of this run
     windows: dict[str, str]  # name -> "HH:MM-HH:MM"
     # False when feeds were analyzed on different days (outputs then mix schedules).
     service_dates_coherent: bool = True
@@ -444,6 +449,24 @@ def _store_feed(engine: Engine, feed_id: str, data: _FeedData) -> None:
     storage.replace_feed_rows(engine, "route_headways", feed_id, data.rollup)
 
 
+def _handle_unserved(
+    raw: Any, config: AnalysisConfig, result: FeedAnalysis, data: _FeedData
+) -> None:
+    """Count stops no trip uses; with drop_unserved_stops, leave them out of the run."""
+    unserved = normalizer.unserved_stops(data.stops, raw.table("stop_times.txt"))
+    result.unserved_stops = int(unserved.sum())
+    if not result.unserved_stops:
+        return
+    if config.drop_unserved_stops:
+        data.stops = data.stops[~unserved].reset_index(drop=True)
+        result.notes.append(
+            f"{result.unserved_stops} stop(s) used by no trip left out "
+            "(--no-drop-unserved-stops keeps them)"
+        )
+    else:
+        result.notes.append(f"{result.unserved_stops} stop(s) used by no trip, kept")
+
+
 def _analyze_feed(
     source: FeedSource, config: AnalysisConfig, engine: Engine | None
 ) -> tuple[FeedAnalysis, _FeedData]:
@@ -474,6 +497,9 @@ def _analyze_feed(
         data.stops, _ = normalizer.normalize_stops(raw)
         if engine is not None:
             _store_feed(engine, source.feed_id, data)
+        # After the DB load: PostGIS keeps the whole inventory, the run drops
+        # stops that can't be boarded.
+        _handle_unserved(raw, config, result, data)
     except Exception as exc:  # per-feed isolation
         log.exception("Feed %s: analysis failed", source.feed_id)
         result.status = "failed"
@@ -545,7 +571,11 @@ def _proximity_pairs(
 ) -> pd.DataFrame:
     """Stop pairs within *proximity_m*, from PostGIS when there is a database."""
     if engine is not None and feed_ids:
-        return connectivity.proximity_pairs_postgis(engine, feed_ids, proximity_m)
+        pairs = connectivity.proximity_pairs_postgis(engine, feed_ids, proximity_m)
+        # The table holds every stop; keep pairs of stops this run uses.
+        known = set(all_stops["stop_uid"])
+        used = pairs["stop_uid_a"].isin(known) & pairs["stop_uid_b"].isin(known)
+        return pairs[used].reset_index(drop=True)
     return connectivity.proximity_pairs_local(all_stops, proximity_m)
 
 
@@ -687,6 +717,10 @@ def _build_report(
         station_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
         stops_deduplicated=len(canonical),
         dedupe_rejected_pairs=len(rejected),
+        drop_unserved_stops=config.drop_unserved_stops,
+        unserved_stops_dropped=(
+            sum(r.unserved_stops for r in feed_results) if config.drop_unserved_stops else 0
+        ),
         windows={w.name: w.label for w in config.windows},
         service_dates_coherent=len(analyzed_dates) <= 1,
         service_dates=analyzed_dates,
@@ -918,6 +952,13 @@ def _md_dedupe_line(report: AnalysisReport) -> str:
     )
 
 
+def _md_unserved_line(report: AnalysisReport) -> str:
+    total = sum(f.unserved_stops for f in report.feeds)
+    if report.drop_unserved_stops:
+        return f"Unserved stops (no trip uses them): {total} left out of every output  "
+    return f"Unserved stops (no trip uses them): {total} kept (--no-drop-unserved-stops)  "
+
+
 def _md_header(report: AnalysisReport) -> list[str]:
     modes = ", ".join(report.mode_filter) if report.mode_filter else "all (no filter)"
     routes = ", ".join(report.route_filter) if report.route_filter else "all (no filter)"
@@ -931,6 +972,7 @@ def _md_header(report: AnalysisReport) -> list[str]:
         f"Transport modes: {modes}  ",
         f"Routes: {routes}  ",
         _md_dedupe_line(report),
+        _md_unserved_line(report),
         "",
         "## Time windows",
         "",

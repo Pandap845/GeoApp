@@ -134,3 +134,24 @@ def test_stops_csv_drops_bad_rows_with_the_same_finding_codes(tmp_path: Path) ->
         "dropped_duplicate_stop_id",
         "dropped_null_stop_id",
     } <= codes(findings)
+
+
+def test_unserved_stops_mask(tmp_path: Path) -> None:
+    from gtfs_ingest.normalizer import unserved_stops
+
+    stops, _ = normalize_stops(load_dir_feed(tmp_path, "feed", feed_files()))
+    stop_times = pd.DataFrame({"stop_id": [" S1 "]})  # whitespace is ignored
+
+    mask = unserved_stops(stops, stop_times)
+
+    # S1 is served, S3 is not, S2 is a station (location_type 1): never unserved.
+    assert dict(zip(stops["stop_id"], mask)) == {"S1": False, "S2": False, "S3": True}
+
+
+def test_unserved_stops_marks_nothing_without_stop_times(tmp_path: Path) -> None:
+    from gtfs_ingest.normalizer import unserved_stops
+
+    stops, _ = normalize_stops(load_dir_feed(tmp_path, "feed", feed_files()))
+
+    assert not unserved_stops(stops, None).any()
+    assert not unserved_stops(stops, pd.DataFrame(columns=["stop_id"])).any()

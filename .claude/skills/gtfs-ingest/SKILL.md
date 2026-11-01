@@ -25,7 +25,7 @@ reproducible and every change must keep the tests green**.
 1. **Four phases, one CLI:** `ingest` → `analyze-frequency` → `detect-interchanges` / `conflate-osm` → `google-qa` / `locate-stations`, plus `export-neo4j`. Entry point: `python -m gtfs_ingest.cli`.
 2. **A broken feed never stops a run.** Every per-feed step has a failure boundary; problems become findings in the report.
 3. **`stop_uid = "{feed_id}:{stop_id}"`** is the global key. `feed_id` comes from the file name (`mibici.csv` → `mibici`).
-4. **Dedupe groups records, it never deletes them.** Count stations with `station_dedup` from `near_stations_quality.csv`, not with row counts.
+4. **Dedupe groups records, it never deletes them.** Count stations with `station_dedup` from `near_stations_quality.csv`, not with row counts. Stops that no trip uses *are* left out of every Phase 2/3 output by default (`--no-drop-unserved-stops` keeps them); PostGIS `stops` keeps them all.
 5. **Two dedupe rules plus one guard:** cross-feed (≤ 30 m, similar name *or* shared route) and within-feed (≤ 5 m, shared route only); then a station never holds two stops of one feed more than 5 m apart (rejected pairs → `stop_equivalences_rejected.csv`). CLI and config defaults must stay equal.
 6. **Stops-only sources (MiBici) carry geometry only:** no routes, never deduplicated, unlinked nodes in the station network, but listed as neighbours with line `-`.
 7. **DB writes are idempotent:** delete-and-reload per feed, or truncate-and-reload for cross-feed tables.

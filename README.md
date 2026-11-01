@@ -289,6 +289,7 @@ by default):
 | `--dedupe-distance-m METERS` | **Cross-feed** alias candidate radius (stops of *different* feeds). Default `30`. |
 | `--dedupe-name-threshold RATIO` | Minimum normalized-name similarity (0–1) to accept a *cross-feed* pair on names alone; pairs sharing a `route_short_name` match regardless. Default `0.75`. |
 | `--dedupe-within-feed-distance-m METERS` | **Within-feed** alias candidate radius (stops of the *same* feed). Default `5` (also the `AnalysisConfig`/`InterchangeConfig` default); `0` disables. |
+| `--drop-unserved-stops` / `--no-drop-unserved-stops` | Leave out stops (`location_type` 0) that appear in **no** `stop_times.txt` row of the whole feed: no trip can board them. Default **on**. They stay in the PostGIS `stops` table (and so in `conflate-osm`), but appear in no `analyze-frequency` / `detect-interchanges` output. The report counts them per feed (`unserved_stops`) either way. |
 
 Two kinds of duplicate, with deliberately different evidence:
 
@@ -336,9 +337,10 @@ clusters report `physical_stop_count`. The audit trail is
 
 ### Counting stations, not stop records
 
-**Deduplication records equivalences; it never deletes rows.** Every stop
-record stays in `stops`, in `near_stations.csv` and in the GeoPackage, so a
-raw `COUNT(*)` counts *records*, not physical stations. To count stations,
+**Deduplication records equivalences; it never deletes rows.** Every served
+stop record stays in `near_stations.csv` and in the GeoPackage (and every
+record in `stops`), so a raw `COUNT(*)` counts *records*, not physical
+stations. To count stations,
 resolve each record to its canonical station using `station_dedup` from
 `near_stations_quality.csv`:
 
@@ -351,15 +353,19 @@ On the two Guadalajara feeds plus MiBici this is not a rounding difference:
 | Level | Stations |
 | --- | ---: |
 | Raw stop records (incl. 484 MiBici docks) | 14,349 |
-| Dedupe (default: cross-feed 30 m, within-feed 5 m, same-feed conflicts rejected) | **11,054** |
+| Records some trip serves (1,581 unserved mdb stops dropped, default) | 12,768 |
+| Dedupe (default: cross-feed 30 m, within-feed 5 m, same-feed conflicts rejected) | **10,203** |
+| *for reference: keeping the unserved stops* | *11,054* |
 | *for reference: before the same-feed conflict rule* | *10,533* |
 | *for reference: within-feed at the former 50 m* | *8,877* |
 
 The conflict rule rejects 1,077 cross-feed pairs (all 768 at 15–30 m, 304 at
 5–15 m, 5 at 1–5 m; none at ≤ 1 m), so opposite platforms stay separate
-stations: the widest station now spans 7.5 m (median 0 m). Any density,
-coverage or accessibility figure computed on the raw record count is
-inflated by ~1.30×.
+stations: the widest station now spans 7.5 m (median 0 m). The 1,581
+unserved stops are in `stops.txt` but in no trip; 111 of them were the 49
+small pieces of the station network, which is now **one piece**. Any
+density, coverage or accessibility figure computed on the raw record
+count is inflated by ~1.41×.
 
 `detect-interchanges` only: `--eps METERS` (DBSCAN radius, default 120),
 `--min-samples N` (default 2), `--crs EPSG:XXXXX` (metric CRS override).

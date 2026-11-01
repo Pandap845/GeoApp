@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 #: WGS84, the coordinate system GTFS uses.
 CRS = "EPSG:4326"
 
+#: Leave out stops that no trip uses (they can't be boarded); CLI default too.
+DROP_UNSERVED_STOPS = True
+
 _OPTIONAL_STR_COLUMNS = ("stop_name", "parent_station")
 
 
@@ -114,3 +117,17 @@ def normalize_stops(loaded: LoadedFeed) -> tuple[gpd.GeoDataFrame, list[Finding]
         len(raw) - len(gdf),
     )
     return gdf, findings
+
+
+def unserved_stops(stops: gpd.GeoDataFrame, stop_times: pd.DataFrame | None) -> pd.Series:
+    """Mask of stops (location_type 0) that no stop_times row uses.
+
+    Such a stop can't be boarded on any day. Stations, entrances and other
+    location types are never unserved: trips don't stop at them by design.
+    Without a readable stop_times table nothing is marked: we can't tell.
+    """
+    no_times = stop_times is None or stop_times.empty or "stop_id" not in stop_times.columns
+    if stops.empty or no_times:
+        return pd.Series(False, index=stops.index)
+    served = set(stop_times["stop_id"].astype("string").str.strip().dropna())
+    return (stops["location_type"] == 0) & ~stops["stop_id"].astype("string").isin(served)
