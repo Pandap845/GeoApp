@@ -8,7 +8,7 @@ never dropped, so stops served only by excluded routes just appear unserved.
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 import pandas as pd
 
@@ -53,16 +53,16 @@ def parse_routes(specs: Iterable[str]) -> frozenset[str]:
     return frozenset(_tokens(specs))
 
 
-def mode_labels(codes: Optional[Iterable[int]]) -> list[str]:
+def mode_labels(codes: Iterable[int] | None) -> list[str]:
     """Sorted mode names for the report; empty when there is no filter."""
     return sorted(mode_name(c) for c in codes) if codes else []
 
 
 def allowed_route_ids(
-    routes: Optional[pd.DataFrame],
-    mode_codes: Optional[frozenset[int]],
-    route_specs: Optional[frozenset[str]],
-) -> Optional[set[str]]:
+    routes: pd.DataFrame | None,
+    mode_codes: frozenset[int] | None,
+    route_specs: frozenset[str] | None,
+) -> set[str] | None:
     """Route ids of this feed selected by the filters.
 
     Returns None when no filter is set (analyze everything), otherwise the

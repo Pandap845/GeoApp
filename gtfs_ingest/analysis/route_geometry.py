@@ -18,8 +18,17 @@ log = logging.getLogger(__name__)
 
 SHAPE_COLUMNS = ["route_uid", "feed_id", "route_id", "linea", "direction_id", "shape_id"]
 #: n_obs = number of timed trips behind the travel_min median (0 when travel_min is NULL).
-LINK_COLUMNS = ["route_uid", "feed_id", "route_id", "linea", "direction_id",
-                "stop_uid_a", "stop_uid_b", "travel_min", "n_obs"]
+LINK_COLUMNS = [
+    "route_uid",
+    "feed_id",
+    "route_id",
+    "linea",
+    "direction_id",
+    "stop_uid_a",
+    "stop_uid_b",
+    "travel_min",
+    "n_obs",
+]
 
 
 def _linea_map(feed: Any) -> pd.DataFrame:
@@ -32,8 +41,11 @@ def _linea_map(feed: Any) -> pd.DataFrame:
         return pd.DataFrame(columns=["route_id", "linea"])
     routes = routes.drop_duplicates("route_id").copy()
     routes["route_id"] = routes["route_id"].astype(str)
-    short = routes["route_short_name"].astype(str).str.strip() \
-        if "route_short_name" in routes.columns else pd.Series("", index=routes.index)
+    short = (
+        routes["route_short_name"].astype(str).str.strip()
+        if "route_short_name" in routes.columns
+        else pd.Series("", index=routes.index)
+    )
     routes["linea"] = short.where(short.replace("nan", "") != "", routes["route_id"])
     return routes[["route_id", "linea"]]
 
@@ -47,8 +59,9 @@ def _direction_series(trips: pd.DataFrame) -> pd.Series:
 
 def route_shapes(feed: Any, feed_id: str) -> gpd.GeoDataFrame:
     """One line per (route, direction, shape_id) from shapes.txt; empty if there are no shapes."""
-    empty = gpd.GeoDataFrame(pd.DataFrame(columns=SHAPE_COLUMNS),
-                             geometry=gpd.GeoSeries([], crs="EPSG:4326"))
+    empty = gpd.GeoDataFrame(
+        pd.DataFrame(columns=SHAPE_COLUMNS), geometry=gpd.GeoSeries([], crs="EPSG:4326")
+    )
     try:
         shapes = feed.shapes
     except Exception:  # noqa: BLE001 - a broken shapes.txt never aborts phase 2
@@ -57,14 +70,19 @@ def route_shapes(feed: Any, feed_id: str) -> gpd.GeoDataFrame:
     trips = feed.trips
     required = {"shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"}
     if (
-        shapes is None or shapes.empty or not required.issubset(shapes.columns)
-        or trips.empty or "shape_id" not in trips.columns
+        shapes is None
+        or shapes.empty
+        or not required.issubset(shapes.columns)
+        or trips.empty
+        or "shape_id" not in trips.columns
     ):
         return empty
 
     shapes = shapes.dropna(subset=["shape_pt_lat", "shape_pt_lon"]).copy()
     shapes["shape_pt_sequence"] = pd.to_numeric(shapes["shape_pt_sequence"], errors="coerce")
-    shapes = shapes.dropna(subset=["shape_pt_sequence"]).sort_values(["shape_id", "shape_pt_sequence"])
+    shapes = shapes.dropna(subset=["shape_pt_sequence"]).sort_values(
+        ["shape_id", "shape_pt_sequence"]
+    )
     geometries = {
         shape_id: LineString(points[["shape_pt_lon", "shape_pt_lat"]].to_numpy())
         for shape_id, points in shapes.groupby("shape_id")
@@ -87,8 +105,9 @@ def route_shapes(feed: Any, feed_id: str) -> gpd.GeoDataFrame:
     combos = combos.merge(_linea_map(feed), on="route_id", how="left")
     combos["linea"] = combos["linea"].fillna(combos["route_id"])
     geom = [geometries[s] if s in geometries else geometries[str(s)] for s in combos["shape_id"]]
-    return gpd.GeoDataFrame(combos[SHAPE_COLUMNS].reset_index(drop=True),
-                            geometry=geom, crs="EPSG:4326")
+    return gpd.GeoDataFrame(
+        combos[SHAPE_COLUMNS].reset_index(drop=True), geometry=geom, crs="EPSG:4326"
+    )
 
 
 def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
@@ -99,7 +118,8 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
     """
     stop_times, trips = feed.stop_times, feed.trips
     if (
-        stop_times.empty or trips.empty
+        stop_times.empty
+        or trips.empty
         or not {"trip_id", "stop_id", "stop_sequence"}.issubset(stop_times.columns)
     ):
         return pd.DataFrame(columns=LINK_COLUMNS)
@@ -120,9 +140,7 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
         ordered.loc[ordered["seg_s"] < 0, "seg_s"] = pd.NA  # broken sequences
     else:
         ordered["seg_s"] = pd.NA
-    pairs = ordered.dropna(subset=["next_stop_id"])[
-        ["trip_id", "stop_id", "next_stop_id", "seg_s"]
-    ]
+    pairs = ordered.dropna(subset=["next_stop_id"])[["trip_id", "stop_id", "next_stop_id", "seg_s"]]
 
     trip_meta = trips[["trip_id", "route_id"]].copy()
     trip_meta["route_id"] = trip_meta["route_id"].astype(str)
@@ -131,10 +149,9 @@ def route_stop_links(feed: Any, feed_id: str) -> pd.DataFrame:
     if merged.empty:
         return pd.DataFrame(columns=LINK_COLUMNS)
     merged["seg_s"] = pd.to_numeric(merged["seg_s"], errors="coerce")
-    links = (
-        merged.groupby(["route_id", "direction_id", "stop_id", "next_stop_id"], as_index=False)
-        .agg(seg_s=("seg_s", "median"), n_obs=("seg_s", "count"))
-    )
+    links = merged.groupby(
+        ["route_id", "direction_id", "stop_id", "next_stop_id"], as_index=False
+    ).agg(seg_s=("seg_s", "median"), n_obs=("seg_s", "count"))
     links["travel_min"] = (links["seg_s"] / 60).round(1)
     links["n_obs"] = links["n_obs"].astype(int)
 

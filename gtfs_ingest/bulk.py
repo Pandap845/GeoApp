@@ -34,12 +34,14 @@ def copy_rows(conn: Connection, table: str, df: pd.DataFrame) -> int:
         return 0
     cols = list(df.columns)
     raw = conn.connection  # underlying psycopg3 connection
-    with raw.cursor() as cur:
-        with cur.copy(
-            f"COPY {table} ({', '.join(cols)}) FROM STDIN"  # noqa: S608 - internal names
-        ) as copy:
-            for record in clean_records(df):
-                copy.write_row(tuple(record[c] for c in cols))
+    with (
+        raw.cursor() as cur,
+        cur.copy(
+            f"COPY {table} ({', '.join(cols)}) FROM STDIN"  # internal names
+        ) as copy,
+    ):
+        for record in clean_records(df):
+            copy.write_row(tuple(record[c] for c in cols))
     return len(df)
 
 
@@ -54,11 +56,13 @@ def bulk_insert(conn: Connection, table: str, df: pd.DataFrame) -> int:
     except Exception as exc:  # noqa: BLE001 - COPY is an optimization, never a gate
         log.warning(
             "%s: COPY failed (%s: %s); falling back to executemany",
-            table, type(exc).__name__, exc,
+            table,
+            type(exc).__name__,
+            exc,
         )
         cols = list(df.columns)
         sql = text(
-            f"INSERT INTO {table} ({', '.join(cols)}) "  # noqa: S608
+            f"INSERT INTO {table} ({', '.join(cols)}) "  # table and column names are internal, never user input
             f"VALUES ({', '.join(':' + c for c in cols)})"
         )
         records = clean_records(df)

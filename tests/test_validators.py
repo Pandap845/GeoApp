@@ -45,9 +45,7 @@ def test_missing_both_calendar_files(tmp_path: Path) -> None:
 def test_calendar_dates_satisfies_calendar_requirement(tmp_path: Path) -> None:
     files = feed_files(
         omit=("calendar.txt",),
-        replace={
-            "calendar_dates.txt": "service_id,date,exception_type\nWK,20260102,1\n"
-        },
+        replace={"calendar_dates.txt": "service_id,date,exception_type\nWK,20260102,1\n"},
     )
     loaded = load_dir_feed(tmp_path, "cal_dates_only", files)
     assert not by_code(validate_feed(loaded), "missing_calendar")
@@ -212,8 +210,7 @@ def test_added_calendar_date_extends_validity(tmp_path: Path) -> None:
         replace={
             "calendar.txt": _calendar(date(2020, 1, 1), date(2022, 12, 31)),
             "calendar_dates.txt": (
-                "service_id,date,exception_type\n"
-                f"WK,{_ymd(today + timedelta(days=10))},1\n"
+                f"service_id,date,exception_type\nWK,{_ymd(today + timedelta(days=10))},1\n"
             ),
         }
     )
@@ -228,7 +225,7 @@ def test_removed_calendar_date_does_not_extend_validity(tmp_path: Path) -> None:
             "calendar.txt": _calendar(date(2020, 1, 1), date(2022, 12, 31)),
             "calendar_dates.txt": (
                 "service_id,date,exception_type\n"
-                f"WK,{_ymd(today + timedelta(days=10))},2\n"     # removal
+                f"WK,{_ymd(today + timedelta(days=10))},2\n"  # removal
             ),
         }
     )
@@ -238,10 +235,12 @@ def test_removed_calendar_date_does_not_extend_validity(tmp_path: Path) -> None:
 
 def test_junk_calendar_dates_tolerated(tmp_path: Path) -> None:
     files = feed_files(
-        replace={"calendar.txt": (
-            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
-            "WK,1,1,1,1,1,0,0,not-a-date,also-junk\n"
-        )}
+        replace={
+            "calendar.txt": (
+                "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+                "WK,1,1,1,1,1,0,0,not-a-date,also-junk\n"
+            )
+        }
     )
     loaded = load_dir_feed(tmp_path, "junk_dates", files)
     # Nothing parses -> no expiry verdict, and no validator crash either.
@@ -256,7 +255,7 @@ def test_feed_expired_respects_injected_analysis_date(tmp_path: Path) -> None:
     loaded = load_dir_feed(tmp_path, "clocked", files)
 
     (finding,) = by_code(validate_feed(loaded, analysis_date=date(2023, 1, 11)), "feed_expired")
-    assert "11 day(s) before today" in finding.message           # exact, reproducible
+    assert "11 day(s) before today" in finding.message  # exact, reproducible
     # Clock set BEFORE the calendar end: not expired at all.
     assert not by_code(validate_feed(loaded, analysis_date=date(2021, 6, 1)), "feed_expired")
 
@@ -310,5 +309,5 @@ def test_unresolvable_csv_header_reaches_the_report(tmp_path: Path) -> None:
         load_stops_csv_feed(tmp_path, "bad.csv", "ID_PARADA,DESC,X,Y\n1,Centro,20.6,-103.3\n")
     )
 
-    assert by_code(findings, "feed_unreadable")          # generic: the feed failed
-    assert by_code(findings, "unresolved_csv_header")    # specific: which column to rename
+    assert by_code(findings, "feed_unreadable")  # generic: the feed failed
+    assert by_code(findings, "unresolved_csv_header")  # specific: which column to rename

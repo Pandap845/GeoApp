@@ -43,10 +43,7 @@ ANALYSIS_FEED = feed_files(
             "R2,A1,20,Cross Line,3\n"
         ),
         "trips.txt": (
-            "route_id,service_id,trip_id,direction_id\n"
-            "R1,WK,T1,0\n"
-            "R2,SA,T2,\n"
-            "R2,WK,T3,0\n"
+            "route_id,service_id,trip_id,direction_id\nR1,WK,T1,0\nR2,SA,T2,\nR2,WK,T3,0\n"
         ),
         "stop_times.txt": (
             "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
@@ -68,9 +65,7 @@ def analysis_source(tmp_path: Path):
 
 def departures(*rows: tuple) -> pd.DataFrame:
     """Rows of (route_id, direction_id, stop_id, departure_s)."""
-    return pd.DataFrame(
-        list(rows), columns=["route_id", "direction_id", "stop_id", "departure_s"]
-    )
+    return pd.DataFrame(list(rows), columns=["route_id", "direction_id", "stop_id", "departure_s"])
 
 
 # Pure headway math
@@ -84,7 +79,7 @@ def test_headways_basic_window() -> None:
 
     (row,) = result[result["time_window"] == "am_peak"].to_dict("records")
     assert row["trip_count"] == 3
-    assert row["mean_headway_s"] == 900.0    # gaps 600 and 1200
+    assert row["mean_headway_s"] == 900.0  # gaps 600 and 1200
     assert row["median_headway_s"] == 900.0
     assert row["min_headway_s"] == 600.0
     assert row["max_headway_s"] == 1200.0
@@ -95,8 +90,8 @@ def test_headways_across_midnight_post_24h() -> None:
     late = TimeWindow.parse("late", "23:00-25:00")
     dep = departures(
         ("R1", 0, "S1", parse_hhmm("23:40")),
-        ("R1", 0, "S1", parse_hhmm("24:00")),   # 86400 s
-        ("R1", 0, "S1", parse_hhmm("24:20")),   # 87600 s
+        ("R1", 0, "S1", parse_hhmm("24:00")),  # 86400 s
+        ("R1", 0, "S1", parse_hhmm("24:20")),  # 87600 s
     )
     result = compute_stop_headways(dep, [late])
 
@@ -112,7 +107,7 @@ def test_single_departure_window_marked_not_crashed() -> None:
     (row,) = result.to_dict("records")
     assert row["time_window"] == "am_peak"
     assert row["trip_count"] == 1
-    assert pd.isna(row["mean_headway_s"])   # headway undefined, row kept
+    assert pd.isna(row["mean_headway_s"])  # headway undefined, row kept
     assert pd.isna(row["median_headway_s"])
 
 
@@ -134,10 +129,10 @@ def test_route_rollup_averages_stop_means() -> None:
     rollup = route_rollup(compute_stop_headways(dep, DEFAULT_WINDOWS))
 
     (row,) = rollup.to_dict("records")
-    assert row["mean_headway_s"] == 900.0     # mean of 600 and 1200
+    assert row["mean_headway_s"] == 900.0  # mean of 600 and 1200
     assert row["stop_count"] == 3
     assert row["stops_with_headway"] == 2
-    assert row["trip_count"] == 2             # max departures at any stop
+    assert row["trip_count"] == 2  # max departures at any stop
 
 
 def test_window_parsing_and_validation() -> None:
@@ -145,7 +140,7 @@ def test_window_parsing_and_validation() -> None:
     assert (w.start_s, w.end_s) == (82800, 99000)
     assert w.label == "23:00-27:30"
     with pytest.raises(ValueError):
-        TimeWindow.parse("bad", "09:00-06:00")   # end before start
+        TimeWindow.parse("bad", "09:00-06:00")  # end before start
     with pytest.raises(ValueError):
         TimeWindow.parse("bad", "banana")
 
@@ -156,7 +151,7 @@ def test_weekday_service_selected(tmp_path: Path) -> None:
     feed, selection = load_service_feed(source, date(2026, 1, 6))  # Tuesday
 
     assert selection.source == "explicit"
-    assert set(feed.trips["trip_id"]) == {"T1", "T3"}   # WK trips only
+    assert set(feed.trips["trip_id"]) == {"T1", "T3"}  # WK trips only
 
 
 def test_saturday_service_selected(tmp_path: Path) -> None:
@@ -176,7 +171,7 @@ def test_busiest_date_fallback(tmp_path: Path) -> None:
     source = analysis_source(tmp_path)
     _, selection = load_service_feed(source, None)
     assert selection.source == "busiest"
-    assert selection.service_ids     # non-empty
+    assert selection.service_ids  # non-empty
 
 
 def test_post_24h_times_parsed_as_seconds(tmp_path: Path) -> None:
@@ -199,19 +194,23 @@ def test_direction_id_blank_becomes_sentinel(tmp_path: Path) -> None:
 def test_common_service_date_overlapping_feeds(tmp_path: Path) -> None:
     # Both feeds share 2026 weekdays: the latest common served date wins.
     a = write_feed_dir(tmp_path, "feed_a", ANALYSIS_FEED)
-    b = write_feed_dir(tmp_path, "feed_b", feed_files())   # VALID_FEED: WK 2026
+    b = write_feed_dir(tmp_path, "feed_b", feed_files())  # VALID_FEED: WK 2026
     common = common_service_date([str(a), str(b)])
     assert common is not None
-    assert common == date(2026, 12, 31)                    # Thursday, both serve it
+    assert common == date(2026, 12, 31)  # Thursday, both serve it
 
 
 def test_common_service_date_disjoint_feeds_is_none(tmp_path: Path) -> None:
-    old = feed_files(replace={"calendar.txt": (
-        "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
-        "WK,1,1,1,1,1,0,0,20200101,20201231\n"
-    )})
+    old = feed_files(
+        replace={
+            "calendar.txt": (
+                "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+                "WK,1,1,1,1,1,0,0,20200101,20201231\n"
+            )
+        }
+    )
     a = write_feed_dir(tmp_path, "old_feed", old)
-    b = write_feed_dir(tmp_path, "new_feed", ANALYSIS_FEED)   # 2026
+    b = write_feed_dir(tmp_path, "new_feed", ANALYSIS_FEED)  # 2026
     assert common_service_date([str(a), str(b)]) is None
 
 
@@ -220,8 +219,11 @@ def test_service_ids_in_range_skips_unserved_days(tmp_path: Path) -> None:
     # Mon 2026-01-05 (removed by calendar_dates) .. Sun 2026-01-11.
     served = service_ids_in_range(str(path), date(2026, 1, 5), date(2026, 1, 11))
     assert sorted(d.isoformat() for d in served) == [
-        "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09",  # Tue-Fri (WK)
-        "2026-01-10",                                            # Sat (SA)
+        "2026-01-06",
+        "2026-01-07",
+        "2026-01-08",
+        "2026-01-09",  # Tue-Fri (WK)
+        "2026-01-10",  # Sat (SA)
     ]
     assert all(ids for ids in served.values())
 
@@ -233,29 +235,32 @@ def _template(*rows: tuple[str, str, float]) -> pd.DataFrame:
 
 
 def test_expand_frequencies_basic_runs_and_offsets() -> None:
-    st = _template(("T1", "A", 28800.0), ("T1", "B", 29400.0))    # 08:00, 08:10
+    st = _template(("T1", "A", 28800.0), ("T1", "B", 29400.0))  # 08:00, 08:10
     freq = pd.DataFrame(
-        {"trip_id": ["T1"], "start_time": [28800.0], "end_time": [32400.0],
-         "headway_secs": [1200.0]}                                # 08:00-09:00 @ 20 min
+        {
+            "trip_id": ["T1"],
+            "start_time": [28800.0],
+            "end_time": [32400.0],
+            "headway_secs": [1200.0],
+        }  # 08:00-09:00 @ 20 min
     )
     out = expand_frequencies(st, freq)
 
-    assert len(out) == 6                                          # 3 runs x 2 stops
+    assert len(out) == 6  # 3 runs x 2 stops
     a = out[out["stop_id"] == "A"]["departure_time"].tolist()
     b = out[out["stop_id"] == "B"]["departure_time"].tolist()
-    assert a == [28800.0, 30000.0, 31200.0]                       # per-run starts
-    assert b == [29400.0, 30600.0, 31800.0]                       # +10 min offset
+    assert a == [28800.0, 30000.0, 31200.0]  # per-run starts
+    assert b == [29400.0, 30600.0, 31800.0]  # +10 min offset
 
 
 def test_expand_frequencies_end_time_is_exclusive() -> None:
     # end - start divisible by headway: no run departs AT end_time.
     st = _template(("T1", "A", 0.0))
     freq = pd.DataFrame(
-        {"trip_id": ["T1"], "start_time": [0.0], "end_time": [3600.0],
-         "headway_secs": [1800.0]}
+        {"trip_id": ["T1"], "start_time": [0.0], "end_time": [3600.0], "headway_secs": [1800.0]}
     )
     out = expand_frequencies(st, freq)
-    assert out["departure_time"].tolist() == [0.0, 1800.0]        # not 3600.0
+    assert out["departure_time"].tolist() == [0.0, 1800.0]  # not 3600.0
 
 
 def test_expand_frequencies_skips_bad_rows() -> None:
@@ -264,7 +269,7 @@ def test_expand_frequencies_skips_bad_rows() -> None:
         {
             "trip_id": ["T1", "T1", "T1", "T1"],
             "start_time": [0.0, 0.0, None, 3600.0],
-            "end_time": [3600.0, 3600.0, 3600.0, 3600.0],          # last: end == start
+            "end_time": [3600.0, 3600.0, 3600.0, 3600.0],  # last: end == start
             "headway_secs": [0.0, None, 600.0, 600.0],
         }
     )
@@ -274,8 +279,12 @@ def test_expand_frequencies_skips_bad_rows() -> None:
 def test_expand_frequencies_caps_runaway_rows() -> None:
     st = _template(("T1", "A", 0.0))
     freq = pd.DataFrame(
-        {"trip_id": ["T1"], "start_time": [0.0], "end_time": [86400.0],
-         "headway_secs": [1.0]}                                   # 86400 runs!
+        {
+            "trip_id": ["T1"],
+            "start_time": [0.0],
+            "end_time": [86400.0],
+            "headway_secs": [1.0],
+        }  # 86400 runs!
     )
     out = expand_frequencies(st, freq, max_runs=10)
     assert len(out) == 10
@@ -284,8 +293,12 @@ def test_expand_frequencies_caps_runaway_rows() -> None:
 def test_expand_frequencies_deterministic() -> None:
     st = _template(("T1", "A", 0.0), ("T1", "B", 60.0), ("T2", "A", 0.0))
     freq = pd.DataFrame(
-        {"trip_id": ["T1", "T2"], "start_time": [0.0, 0.0],
-         "end_time": [1800.0, 1800.0], "headway_secs": [600.0, 900.0]}
+        {
+            "trip_id": ["T1", "T2"],
+            "start_time": [0.0, 0.0],
+            "end_time": [1800.0, 1800.0],
+            "headway_secs": [600.0, 900.0],
+        }
     )
     pd.testing.assert_frame_equal(expand_frequencies(st, freq), expand_frequencies(st, freq))
 
@@ -293,17 +306,14 @@ def test_expand_frequencies_deterministic() -> None:
 #: ANALYSIS_FEED plus a frequencies.txt turning T1 into 3 runs 08:00-09:00.
 FREQUENCY_FEED = {
     **ANALYSIS_FEED,
-    "frequencies.txt": (
-        "trip_id,start_time,end_time,headway_secs\n"
-        "T1,08:00:00,09:00:00,1200\n"
-    ),
+    "frequencies.txt": ("trip_id,start_time,end_time,headway_secs\nT1,08:00:00,09:00:00,1200\n"),
 }
 
 
 def test_stop_departures_replaces_template_for_frequency_trips(tmp_path: Path) -> None:
     path = write_feed_dir(tmp_path, "freq_feed", FREQUENCY_FEED)
     (source,) = discover_feeds([path])
-    feed, _ = load_service_feed(source, date(2026, 1, 6))         # Tuesday: T1 + T3
+    feed, _ = load_service_feed(source, date(2026, 1, 6))  # Tuesday: T1 + T3
     dep = stop_departures(feed)
 
     # T1's template departure at S1 (08:00) is replaced by the 3 runs.
@@ -311,7 +321,7 @@ def test_stop_departures_replaces_template_for_frequency_trips(tmp_path: Path) -
     assert s1_r1 == [28800.0, 30000.0, 31200.0]
     # Non-frequency trip T3 (route R2) keeps its single real departure.
     s1_r2 = dep[(dep["stop_id"] == "S1") & (dep["route_id"] == "R2")]["departure_s"].tolist()
-    assert s1_r2 == [9.5 * 3600]                                  # 09:30
+    assert s1_r2 == [9.5 * 3600]  # 09:30
 
 
 def test_frequency_expansion_raises_window_trip_count(tmp_path: Path) -> None:
@@ -321,8 +331,9 @@ def test_frequency_expansion_raises_window_trip_count(tmp_path: Path) -> None:
     stats = compute_stop_headways(stop_departures(feed), DEFAULT_WINDOWS)
 
     (row,) = stats[
-        (stats["route_id"] == "R1") & (stats["stop_id"] == "S1")
+        (stats["route_id"] == "R1")
+        & (stats["stop_id"] == "S1")
         & (stats["time_window"] == "am_peak")
     ].to_dict("records")
-    assert row["trip_count"] == 3                                 # was 1 pre-expansion
-    assert row["mean_headway_s"] == 1200.0                        # the defined headway
+    assert row["trip_count"] == 3  # was 1 pre-expansion
+    assert row["mean_headway_s"] == 1200.0  # the defined headway

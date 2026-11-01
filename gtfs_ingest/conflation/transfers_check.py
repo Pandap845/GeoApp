@@ -8,7 +8,7 @@ simply listed.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Sequence
+from collections.abc import Sequence
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -24,15 +24,15 @@ class TransferCheck(BaseModel):
     feeds_with_transfers: list[str] = Field(default_factory=list)
     feeds_without_transfers: list[str] = Field(default_factory=list)
     declared_pairs: int = 0
-    declared_co_clustered: int = 0        # declared and inferred (agreement)
-    declared_not_co_clustered: int = 0    # declared but NOT inferred
+    declared_co_clustered: int = 0  # declared and inferred (agreement)
+    declared_not_co_clustered: int = 0  # declared but NOT inferred
     clusters_total: int = 0
-    clusters_with_declared: int = 0       # inferred and backed by transfers.txt
-    clusters_without_declared: int = 0    # inferred only, not declared
+    clusters_with_declared: int = 0  # inferred and backed by transfers.txt
+    clusters_without_declared: int = 0  # inferred only, not declared
     not_inferred_examples: list[str] = Field(default_factory=list)
 
 
-def declared_pairs(feed_id: str, transfers: Optional[pd.DataFrame]) -> pd.DataFrame:
+def declared_pairs(feed_id: str, transfers: pd.DataFrame | None) -> pd.DataFrame:
     """Declared transfer pairs as stop_uid_a < stop_uid_b, deduplicated, no self-transfers."""
     columns = ["stop_uid_a", "stop_uid_b"]
     if (
@@ -60,7 +60,7 @@ def declared_pairs(feed_id: str, transfers: Optional[pd.DataFrame]) -> pd.DataFr
 
 
 def check_transfers(
-    transfers_by_feed: dict[str, Optional[pd.DataFrame]],
+    transfers_by_feed: dict[str, pd.DataFrame | None],
     cluster_members: Sequence[Sequence[str]],
 ) -> TransferCheck:
     """Compare declared transfers (feed_id -> table or None) with the cluster member lists."""
@@ -79,7 +79,7 @@ def check_transfers(
         if all_pairs
         else pd.DataFrame(columns=["stop_uid_a", "stop_uid_b"])
     )
-    result.declared_pairs = int(len(declared))
+    result.declared_pairs = len(declared)
 
     cluster_of: dict[str, int] = {}
     for idx, members in enumerate(cluster_members):
@@ -95,9 +95,7 @@ def check_transfers(
         else:
             result.declared_not_co_clustered += 1
             if len(result.not_inferred_examples) < _SAMPLE:
-                result.not_inferred_examples.append(
-                    f"{row['stop_uid_a']} <-> {row['stop_uid_b']}"
-                )
+                result.not_inferred_examples.append(f"{row['stop_uid_a']} <-> {row['stop_uid_b']}")
 
     result.clusters_with_declared = len(clusters_backed)
     result.clusters_without_declared = result.clusters_total - len(clusters_backed)

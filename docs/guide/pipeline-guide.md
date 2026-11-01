@@ -745,7 +745,7 @@ you need one factor.
 
 ```mermaid
 flowchart LR
-    ST["stops, in row order"] --> ID["ID = 1..N"]
+    ST["stops, sorted by stop_uid"] --> ID["ID = 1..N"]
     PP["proximity pairs<br/>(dedupe-filtered, walk-refined)"] --> NE["both directions<br/>left-join serving lines"]
     RS["route_stops"] --> LA["lines at each stop"]
     LA --> NE
@@ -755,9 +755,9 @@ flowchart LR
     ID --> NS & SLS
 ```
 
-**Node ids.** `ID` is `1..N` in row order and every relation references stops
-by it. It is stable only for identical inputs in the same order; `stop_uid` is
-the cross-run key.
+**Node ids.** `ID` is `1..N` in `stop_uid` order and every relation references
+stops by it. The same stops always get the same IDs, whatever the input order,
+but adding a stop shifts the IDs after it; `stop_uid` is the cross-run key.
 
 **`near_stations` — what can I walk to?**
 
@@ -841,7 +841,7 @@ flowchart LR
 | `same_station` | each dedupe pair, **two arcs** | `0.0` |
 
 ```python
-nx.shortest_path(G, a, b, weight="time_min")    # riding + walking + transferring
+nx.shortest_path(G, a, b, weight="time_min")  # riding + walking + transferring
 ```
 
 Stops-only nodes (MiBici docks) get **no** `walk` or `same_station` arcs. A

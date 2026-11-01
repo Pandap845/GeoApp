@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Optional
 
 from sqlalchemy import Engine
 
@@ -22,8 +21,8 @@ log = logging.getLogger(__name__)
 
 def process_feed(
     source: FeedSource,
-    engine: Optional[Engine],
-    analysis_date: Optional[date] = None,
+    engine: Engine | None,
+    analysis_date: date | None = None,
 ) -> FeedReport:
     """Load, validate, normalize and store one feed. Never raises.
 
@@ -41,7 +40,7 @@ def process_feed(
         if engine is not None:
             try:
                 stops_loaded = db.load_feed_stops(engine, source.feed_id, stops)
-            except Exception as exc:  # noqa: BLE001 - DB failure for one feed must not kill the run
+            except Exception as exc:  # DB failure for one feed must not kill the run
                 log.exception("Feed %s: database load failed", source.feed_id)
                 findings.append(
                     Finding(
@@ -59,10 +58,10 @@ def process_feed(
             row_counts=loaded.row_counts(),
             optional_files=validators.optional_file_matrix(loaded),
             findings=findings,
-            stops_normalized=int(len(stops)),
+            stops_normalized=len(stops),
             stops_loaded=stops_loaded,
         )
-    except Exception as exc:  # noqa: BLE001 - last-resort isolation per feed
+    except Exception as exc:  # last-resort isolation per feed
         log.exception("Feed %s: unexpected failure", source.feed_id)
         findings.append(
             Finding(
@@ -91,7 +90,7 @@ def run_pipeline(settings: Settings) -> RunReport:
     if not sources:
         log.warning("No feeds discovered under: %s", ", ".join(map(str, settings.feed_paths)))
 
-    engine: Optional[Engine] = None
+    engine: Engine | None = None
     if not settings.dry_run:
         if not settings.database_url:
             raise ValueError(
@@ -103,9 +102,7 @@ def run_pipeline(settings: Settings) -> RunReport:
 
     # Fix the date once so expiry checks are reproducible within a run.
     analysis_date = settings.analysis_date or date.today()
-    feed_reports = [
-        process_feed(source, engine, analysis_date=analysis_date) for source in sources
-    ]
+    feed_reports = [process_feed(source, engine, analysis_date=analysis_date) for source in sources]
 
     run_report = report.build_run_report(
         feed_reports, dry_run=settings.dry_run, analysis_date=analysis_date.isoformat()
@@ -117,6 +114,9 @@ def run_pipeline(settings: Settings) -> RunReport:
     loaded_total = sum(f.stops_loaded for f in feed_reports)
     log.info(
         "Run complete: %d feed(s), %d error(s), %d warning(s), %d stops loaded",
-        len(feed_reports), errors, warnings, loaded_total,
+        len(feed_reports),
+        errors,
+        warnings,
+        loaded_total,
     )
     return run_report

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gtfs-ingest"
 version = "0.1.0"
-description = "GTFS ingestion & validation pipeline (Phase 1): validate feeds, normalize stops, load into PostGIS."
+description = "GTFS, OpenStreetMap and MiBici transit analysis for Guadalajara, backed by PostGIS."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4"]
+dev = ["pytest>=7.4", "ruff==0.16.6"]
 docs = [
     "sphinx>=7.0",
     "furo>=2024.1",
@@ -39,9 +39,31 @@ docs = [
 [project.scripts]
 gtfs-ingest = "gtfs_ingest.cli:main"
 
-[tool.setuptools]
-packages = ["gtfs_ingest"]
+# Find the subpackages too (analysis, conflation, qa, export).
+[tool.setuptools.packages.find]
+include = ["gtfs_ingest*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 log_cli_level = "WARNING"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["docs/_build"]
+
+[tool.ruff.lint]
+# Explicit list, so a newer ruff never changes the rules on its own.
+select = ["E", "F", "I", "UP", "B", "BLE", "SIM", "C4", "RUF", "DTZ", "ISC"]
+ignore = [
+    "E501",    # long lines: the formatter wraps code; long strings stay readable
+    "DTZ011",  # date.today(): analysis dates are local calendar days (--analysis-date)
+    "B905",    # zip(strict=): the zipped columns come from one frame, so lengths match
+    "RUF001", "RUF002", "RUF003",  # Spanish text and "·" separators are intended
+    "RUF005",  # ["a"] + rest reads fine; no need for unpacking
+    "UP042",   # StrEnum would change how the enums format
+]
+
+[tool.ruff.lint.isort]
+# Test helpers imported by name from tests/.
+known-local-folder = ["conftest", "test_connectivity"]

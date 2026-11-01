@@ -1,0 +1,5 @@
+edge_type,stop_uid_a,stop_uid_b,time_min,linea,direction_id,route_uid,distance_m
+in_vehicle,metro:S1,metro:S3,1030.0,10,0.0,metro:R1,
+in_vehicle,metro:S1,metro:S3,10.0,20,0.0,metro:R2,
+same_station,metro:S1,other:X1,0.0,,,,
+walk,metro:S2,metro:S3,1.0,,,,14.001076277917928

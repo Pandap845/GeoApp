@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 from sqlalchemy import Engine, text
@@ -30,7 +29,9 @@ def probe_state(engine: Engine, feed_ids: list[str], line_table: str) -> tuple:
     """Return (line_count, max_osm_id, latest stop load time): changes when the data changes."""
     with engine.connect() as conn:
         count, max_id = conn.execute(
-            text(f"SELECT count(*), max(osm_id) FROM {line_table}")  # noqa: S608
+            text(
+                f"SELECT count(*), max(osm_id) FROM {line_table}"
+            )  # table and column names are internal, never user input
         ).one()
         loaded_at = conn.execute(
             text("SELECT max(loaded_at) FROM stops WHERE feed_id = ANY(:feeds)"),
@@ -68,7 +69,7 @@ def _path(cache_dir: Path, key: str) -> Path:
     return cache_dir / f"walkgraph-{key[:12]}.npz"
 
 
-def load(cache_dir: Path, key: str) -> Optional[GraphArrays]:
+def load(cache_dir: Path, key: str) -> GraphArrays | None:
     """Cached graph arrays for *key*, or None if missing or unreadable."""
     path = _path(cache_dir, key)
     if not path.is_file():
@@ -92,8 +93,6 @@ def save(
     """Save the graph arrays under *key* and return the file path."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = _path(cache_dir, key)
-    np.savez_compressed(
-        path, node_xy=node_xy, indptr=indptr, indices=indices, weights=weights
-    )
+    np.savez_compressed(path, node_xy=node_xy, indptr=indptr, indices=indices, weights=weights)
     log.info("Walk graph cached: %s (%d vertices)", path, len(node_xy))
     return path

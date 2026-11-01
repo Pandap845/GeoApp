@@ -13,7 +13,7 @@ import logging
 import geopandas as gpd
 import pandas as pd
 
-from .models import Finding, LoadedFeed, STOP_COLUMNS, Severity, numeric_stop_id
+from .models import STOP_COLUMNS, Finding, LoadedFeed, Severity, numeric_stop_id
 
 log = logging.getLogger(__name__)
 
@@ -58,14 +58,10 @@ def normalize_stops(loaded: LoadedFeed) -> tuple[gpd.GeoDataFrame, list[Finding]
 
     # Unparseable coordinates become NaN and are dropped below.
     for col in ("stop_lat", "stop_lon"):
-        df[col] = pd.to_numeric(
-            df[col].astype("string").str.strip(), errors="coerce"
-        )
+        df[col] = pd.to_numeric(df[col].astype("string").str.strip(), errors="coerce")
 
     # Blank location_type means 0 (stop/platform) in GTFS.
-    df["location_type"] = (
-        pd.to_numeric(df["location_type"], errors="coerce").fillna(0).astype(int)
-    )
+    df["location_type"] = pd.to_numeric(df["location_type"], errors="coerce").fillna(0).astype(int)
 
     def _drop(mask: pd.Series, code: str, reason: str) -> None:
         nonlocal df

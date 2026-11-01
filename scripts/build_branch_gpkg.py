@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import geopandas as gpd
@@ -70,8 +70,16 @@ BRANCHES = {
 
 #: The 10 columns of near_stations.csv, preserved verbatim on every point.
 SOURCE_COLUMNS = [
-    "ID", "stop_uid", "station", "system", "stop_id",
-    "stop_lat", "stop_lon", "stop_line_ids", "near_stations", "same_line_stations",
+    "ID",
+    "stop_uid",
+    "station",
+    "system",
+    "stop_id",
+    "stop_lat",
+    "stop_lon",
+    "stop_line_ids",
+    "near_stations",
+    "same_line_stations",
 ]
 
 #: Columns this script adds. Nothing else is touched.
@@ -90,9 +98,7 @@ def classify_route(modalidad: str, long_name: str) -> str:
         return "tren_ligero"
     if modalidad.lower() == "sitren":
         return "sitren"
-    if modalidad == "Mi Macro" and not long_name.startswith(
-        ("Alimentadora", "Complementaria")
-    ):
+    if modalidad == "Mi Macro" and not long_name.startswith(("Alimentadora", "Complementaria")):
         return "mi_macro_brt"
     return "alimentadores"
 
@@ -101,8 +107,13 @@ def route_branches() -> pd.DataFrame:
     """``route_uid -> branch`` for every route in the analysis."""
     routes = pd.read_csv(ROUTES)
     routes.columns = [
-        "route_uid", "feed_id", "route_id",
-        "route_short_name", "route_long_name", "route_type", "modalidad",
+        "route_uid",
+        "feed_id",
+        "route_id",
+        "route_short_name",
+        "route_long_name",
+        "route_type",
+        "modalidad",
     ]
     routes["branch"] = [
         classify_route(m, ln)
@@ -157,9 +168,7 @@ def build_points(sb: pd.DataFrame) -> gpd.GeoDataFrame:
 
     exploded["color"] = exploded["branch"].map(BRANCHES)
     geometry = gpd.points_from_xy(exploded["stop_lon"], exploded["stop_lat"], crs=CRS)
-    gdf = gpd.GeoDataFrame(
-        exploded[SOURCE_COLUMNS + ADDED_COLUMNS], geometry=geometry, crs=CRS
-    )
+    gdf = gpd.GeoDataFrame(exploded[SOURCE_COLUMNS + ADDED_COLUMNS], geometry=geometry, crs=CRS)
     gdf.attrs["n_source"] = n_source
     return gdf
 
@@ -185,7 +194,7 @@ def qml(color_hex: str, kind: str) -> str:
 
     Uses the ``<prop>`` form, which QGIS 3.x still parses across versions.
     """
-    r, g, b = (int(color_hex[i:i + 2], 16) for i in (1, 3, 5))
+    r, g, b = (int(color_hex[i : i + 2], 16) for i in (1, 3, 5))
     rgba = f"{r},{g},{b},255"
     if kind == "Point":
         body = f"""      <symbol type="marker" name="0" alpha="1" clip_to_extent="1" force_rhr="0">
@@ -223,7 +232,7 @@ def qml(color_hex: str, kind: str) -> str:
 
 def write_layer_styles(path: Path, layers: list[tuple[str, str, str]]) -> None:
     """Append a QGIS ``layer_styles`` table so colors load automatically."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     con = sqlite3.connect(path)
     try:
         con.execute("DROP TABLE IF EXISTS layer_styles")
@@ -287,7 +296,9 @@ def main() -> int:
                 print(f"  skipped {name} (no features)")
                 continue
             subset.to_file(
-                TARGET_GPKG, layer=name, driver="GPKG",
+                TARGET_GPKG,
+                layer=name,
+                driver="GPKG",
                 mode="a" if TARGET_GPKG.exists() else "w",
             )
             written.append((name, kind, color))
@@ -302,32 +313,43 @@ def main() -> int:
     print(f"{'layer':<26}{'geometry':<13}{'features':>10}  {'CRS':<11}color")
     print("-" * 74)
     total_points = 0
-    for name, kind, color in written:
+    for name, _kind, color in written:
         info = pyogrio.read_info(TARGET_GPKG, layer=name)
         n = info["features"]
         crs = gpd.read_file(TARGET_GPKG, layer=name, rows=1).crs
         if name.startswith("stops_"):
             total_points += n
-        print(f"{name:<26}{info['geometry_type']:<13}{n:>10}  {str(crs):<11}{color}")
+        print(f"{name:<26}{info['geometry_type']:<13}{n:>10}  {crs!s:<11}{color}")
     print("-" * 74)
 
     # Assertions the plan promised.
     n_source = points.attrs["n_source"]
     back = gpd.read_file(TARGET_GPKG, layer="stops_alimentadores")
     all_pts = pd.concat(
-        [gpd.read_file(TARGET_GPKG, layer=n)[["stop_uid"]]
-         for n, k, _ in written if n.startswith("stops_")],
+        [
+            gpd.read_file(TARGET_GPKG, layer=n)[["stop_uid"]]
+            for n, k, _ in written
+            if n.startswith("stops_")
+        ],
         ignore_index=True,
     )
     checks = [
-        (f"point features = {total_points} (source {n_source} + duplicated multi-branch stops)",
-         total_points >= n_source),
-        (f"distinct stop_uid across point layers = {all_pts['stop_uid'].nunique()} == {n_source}",
-         all_pts["stop_uid"].nunique() == n_source),
-        ("all 10 source columns present on point layers",
-         all(c in back.columns for c in SOURCE_COLUMNS)),
-        ("branch/color non-null on every feature",
-         back["branch"].notna().all() and back["color"].notna().all()),
+        (
+            f"point features = {total_points} (source {n_source} + duplicated multi-branch stops)",
+            total_points >= n_source,
+        ),
+        (
+            f"distinct stop_uid across point layers = {all_pts['stop_uid'].nunique()} == {n_source}",
+            all_pts["stop_uid"].nunique() == n_source,
+        ),
+        (
+            "all 10 source columns present on point layers",
+            all(c in back.columns for c in SOURCE_COLUMNS),
+        ),
+        (
+            "branch/color non-null on every feature",
+            back["branch"].notna().all() and back["color"].notna().all(),
+        ),
         (f"no reprojection - everything written as {CRS}", True),
     ]
     ok = True

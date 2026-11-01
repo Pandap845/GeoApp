@@ -9,7 +9,7 @@ QA runs are partial: re-checking 20 items must not erase earlier verdicts.
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Mapping
+from collections.abc import Iterable, Mapping
 
 from sqlalchemy import Engine, text
 

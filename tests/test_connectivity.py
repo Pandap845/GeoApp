@@ -9,13 +9,13 @@ from pathlib import Path
 import geopandas as gpd
 import networkx as nx
 import pandas as pd
+from test_headways import ANALYSIS_FEED
 
 from gtfs_ingest.analysis import connectivity
 from gtfs_ingest.analysis.graph_export import build_graph, graph_metrics, write_graphml
 from gtfs_ingest.analysis.near_stations import UNSERVED_LINE
 from gtfs_ingest.analysis.pipeline_phase2 import GRAPHML_NAME, JSON_NAME, MARKDOWN_NAME
 
-from test_headways import ANALYSIS_FEED
 from conftest import feed_files, write_feed_dir, write_stops_csv
 
 
@@ -91,7 +91,7 @@ def test_proximity_connection_within_threshold_only() -> None:
     edges = connectivity.build_edges(route_stops, connectivity.station_map(pd.DataFrame()), near)
     e = edge(edges, "fa:r5", "fb:r6")
     assert e["connection_type"] == "proximity"
-    assert 90 <= e["min_stop_distance_m"] <= 110       # ~100 m geodesically
+    assert 90 <= e["min_stop_distance_m"] <= 110  # ~100 m geodesically
     assert (e["feed_id_a"], e["feed_id_b"]) == ("fa", "fb")  # cross-feed works
 
     far = connectivity.proximity_pairs_local(stops, threshold_m=50.0)
@@ -156,7 +156,7 @@ def test_graph_metrics_and_graphml_roundtrip(tmp_path: Path) -> None:
     edges = connectivity.build_edges(route_stops, connectivity.station_map(pd.DataFrame()))
     routes = pd.DataFrame(
         {
-            "route_uid": ["f:r1", "f:r2", "f:r7"],   # r7 analyzed but unconnected
+            "route_uid": ["f:r1", "f:r2", "f:r7"],  # r7 analyzed but unconnected
             "feed_id": ["f", "f", "f"],
             "route_id": ["r1", "r2", "r7"],
         }
@@ -185,9 +185,12 @@ def test_analyze_frequency_cli_dry_run(tmp_path: Path) -> None:
     exit_code = cli.main(
         [
             "analyze-frequency",
-            "--feeds", str(tmp_path / "feeds"),
-            "--report", str(out),
-            "--service-date", "2026-01-06",
+            "--feeds",
+            str(tmp_path / "feeds"),
+            "--report",
+            str(out),
+            "--service-date",
+            "2026-01-06",
             "--dry-run",
         ]
     )
@@ -197,8 +200,8 @@ def test_analyze_frequency_cli_dry_run(tmp_path: Path) -> None:
     (feed,) = report["feeds"]
     assert feed["status"] == "analyzed"
     assert feed["service_date"] == "2026-01-06"
-    assert feed["routes_analyzed"] == 2                 # R1 + R2 run that Tuesday
-    assert report["connections_by_type"] == {"same_stop": 1}   # R1/R2 share S1
+    assert feed["routes_analyzed"] == 2  # R1 + R2 run that Tuesday
+    assert report["connections_by_type"] == {"same_stop": 1}  # R1/R2 share S1
     assert report["graph"]["n_routes"] == 2
 
     assert (out / GRAPHML_NAME).is_file()
@@ -224,7 +227,7 @@ def test_analyze_frequency_cli_dry_run(tmp_path: Path) -> None:
     gpkg = out / "transit_analysis.gpkg"
     assert gpkg.is_file()
     assert len(gpd.read_file(gpkg, layer="stops")) == 3
-    assert len(gpd.read_file(gpkg, layer="near_links")) == 1   # S2 <-> S3
+    assert len(gpd.read_file(gpkg, layer="near_links")) == 1  # S2 <-> S3
 
     # Quality sidecar: same rows/IDs; dry run -> no OSM/no network data.
     quality = pd.read_csv(out / "near_stations_quality.csv")
@@ -247,13 +250,11 @@ OTHER_FEED = {
         "X1,Main St,40.00009,-75.0,0,\n"
     ),
     "routes.txt": (
-        "route_id,agency_id,route_short_name,route_long_name,route_type\n"
-        "RX,A2,X9,Cross Town,3\n"
+        "route_id,agency_id,route_short_name,route_long_name,route_type\nRX,A2,X9,Cross Town,3\n"
     ),
     "trips.txt": "route_id,service_id,trip_id\nRX,WK,TX1\n",
     "stop_times.txt": (
-        "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
-        "TX1,08:00:00,08:00:00,X1,1\n"
+        "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nTX1,08:00:00,08:00:00,X1,1\n"
     ),
     "calendar.txt": (
         "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
@@ -273,9 +274,12 @@ def _run_analyze_two_feeds(tmp_path: Path, out_name: str, *extra: str) -> dict:
     exit_code = cli.main(
         [
             "analyze-frequency",
-            "--feeds", str(feeds),
-            "--report", str(out),
-            "--service-date", "2026-01-06",
+            "--feeds",
+            str(feeds),
+            "--report",
+            str(out),
+            "--service-date",
+            "2026-01-06",
             "--dry-run",
             *extra,
         ]
@@ -290,7 +294,7 @@ def test_analyze_cli_two_feeds_dedupe_default(tmp_path: Path) -> None:
 
     assert report["dedupe"] is True
     assert report["station_groups"] == 1
-    assert report["stops_deduplicated"] == 2          # metro:S1 + other:X1
+    assert report["stops_deduplicated"] == 2  # metro:S1 + other:X1
     # metro:R1/R2 both connect to other:RX through the deduped station.
     assert report["connections_by_type"] == {"same_stop": 1, "same_station_dedup": 2}
 
@@ -318,7 +322,7 @@ def test_analyze_cli_two_feeds_dedupe_default(tmp_path: Path) -> None:
 
 def test_analyze_cli_two_feeds_no_dedupe(tmp_path: Path) -> None:
     """--no-dedupe restores the alias as a proximity neighbour everywhere."""
-    report_on = _run_analyze_two_feeds(tmp_path, "out_dedupe")
+    _run_analyze_two_feeds(tmp_path, "out_dedupe")
     report_off = _run_analyze_two_feeds(tmp_path, "out_nodedupe", "--no-dedupe")
 
     assert report_off["dedupe"] is False
@@ -347,9 +351,12 @@ def test_analyze_cli_rejects_bad_service_date(tmp_path: Path) -> None:
     exit_code = cli.main(
         [
             "analyze-frequency",
-            "--feeds", str(tmp_path / "feeds"),
-            "--report", str(tmp_path / "out"),
-            "--service-date", "junk",
+            "--feeds",
+            str(tmp_path / "feeds"),
+            "--report",
+            str(tmp_path / "out"),
+            "--service-date",
+            "junk",
             "--dry-run",
         ]
     )
@@ -358,11 +365,12 @@ def test_analyze_cli_rejects_bad_service_date(tmp_path: Path) -> None:
 
 # Date coherence, --common-date, --service-date-range, analysis clock
 def test_parse_date_range_validation() -> None:
+    from datetime import date as _date
+
     import pytest
 
     from gtfs_ingest.cli import _parse_date_range
 
-    from datetime import date as _date
     assert _parse_date_range("2026-01-05..2026-01-11") == (_date(2026, 1, 5), _date(2026, 1, 11))
     for bad in ("2026-01-05", "2026-01-11..2026-01-05", "2026-01-01..2026-03-01", "x..y"):
         with pytest.raises(ValueError):
@@ -373,33 +381,53 @@ def test_date_mode_flags_are_mutually_exclusive(tmp_path: Path) -> None:
     from gtfs_ingest import cli
 
     write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
-    base = ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
-            "--report", str(tmp_path / "out"), "--dry-run"]
+    base = [
+        "analyze-frequency",
+        "--feeds",
+        str(tmp_path / "feeds"),
+        "--report",
+        str(tmp_path / "out"),
+        "--dry-run",
+    ]
     assert cli.main(base + ["--service-date", "2026-01-06", "--common-date"]) == 1
-    assert cli.main(base + ["--service-date-range", "2026-01-05..2026-01-06",
-                            "--common-date"]) == 1
+    assert cli.main(base + ["--service-date-range", "2026-01-05..2026-01-06", "--common-date"]) == 1
 
 
 def test_incoherent_dates_flagged_and_analysis_date_recorded(tmp_path: Path) -> None:
     """Two feeds with disjoint calendars -> coherence warning + clock field."""
     from gtfs_ingest import cli
 
-    old = feed_files(replace={"calendar.txt": (
-        "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
-        "WK,1,1,1,1,1,0,0,20200101,20201231\n"
-    )})
+    old = feed_files(
+        replace={
+            "calendar.txt": (
+                "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+                "WK,1,1,1,1,1,0,0,20200101,20201231\n"
+            )
+        }
+    )
     write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
     write_feed_dir(tmp_path / "feeds", "old", old)
     out = tmp_path / "out"
-    assert cli.main(
-        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
-         "--report", str(out), "--analysis-date", "2026-07-12", "--dry-run"]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "analyze-frequency",
+                "--feeds",
+                str(tmp_path / "feeds"),
+                "--report",
+                str(out),
+                "--analysis-date",
+                "2026-07-12",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
 
     report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
     assert report["analysis_date"] == "2026-07-12"
     assert report["service_dates_coherent"] is False
-    assert len(report["service_dates"]) == 2                 # busiest 2020 vs 2026
+    assert len(report["service_dates"]) == 2  # busiest 2020 vs 2026
     md = (out / MARKDOWN_NAME).read_text(encoding="utf-8")
     assert "DIFFERENT service dates" in md
     # The expired 2020 feed gets deterministic notes against the clock.
@@ -407,50 +435,91 @@ def test_incoherent_dates_flagged_and_analysis_date_recorded(tmp_path: Path) -> 
     assert old_feed["calendar_status"] == "expired"
 
     # --common-date on disjoint calendars: loud exit 1.
-    assert cli.main(
-        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
-         "--report", str(tmp_path / "out2"), "--common-date", "--dry-run"]
-    ) == 1
+    assert (
+        cli.main(
+            [
+                "analyze-frequency",
+                "--feeds",
+                str(tmp_path / "feeds"),
+                "--report",
+                str(tmp_path / "out2"),
+                "--common-date",
+                "--dry-run",
+            ]
+        )
+        == 1
+    )
 
 
 def test_common_date_resolves_shared_day(tmp_path: Path) -> None:
     from gtfs_ingest import cli
 
     write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
-    write_feed_dir(tmp_path / "feeds", "valid", feed_files())     # both serve 2026 WK
+    write_feed_dir(tmp_path / "feeds", "valid", feed_files())  # both serve 2026 WK
     out = tmp_path / "out"
-    assert cli.main(
-        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
-         "--report", str(out), "--common-date", "--dry-run"]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "analyze-frequency",
+                "--feeds",
+                str(tmp_path / "feeds"),
+                "--report",
+                str(out),
+                "--common-date",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
 
     report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
     assert report["service_dates_coherent"] is True
     dates = {f["service_date"] for f in report["feeds"]}
-    assert len(dates) == 1                                        # one shared day
+    assert len(dates) == 1  # one shared day
     assert {f["service_date_source"] for f in report["feeds"]} == {"common"}
 
 
-def test_service_date_range_analyzes_served_days(tmp_path: Path) -> None:
+def test_service_date_range_analyzes_served_days(tmp_path: Path, monkeypatch) -> None:
     from gtfs_ingest import cli
+    from gtfs_ingest.analysis import pipeline_phase2
 
+    loaded_sets: list[frozenset] = []
+    real_load = pipeline_phase2.load_feed_for_service_ids
+
+    def counting_load(source, ids, **kwargs):
+        loaded_sets.append(frozenset(ids))
+        return real_load(source, ids, **kwargs)
+
+    monkeypatch.setattr(pipeline_phase2, "load_feed_for_service_ids", counting_load)
     write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
     out = tmp_path / "out"
-    assert cli.main(
-        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
-         "--report", str(out),
-         "--service-date-range", "2026-01-05..2026-01-11", "--dry-run"]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "analyze-frequency",
+                "--feeds",
+                str(tmp_path / "feeds"),
+                "--report",
+                str(out),
+                "--service-date-range",
+                "2026-01-05..2026-01-11",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
 
     report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
     (feed,) = report["feeds"]
     assert feed["status"] == "analyzed"
     assert feed["service_date"] == "2026-01-05..2026-01-11"
     assert feed["service_date_source"] == "range"
-    assert feed["days_analyzed"] == 5      # Mon removed by calendar_dates, Sun no service
+    assert feed["days_analyzed"] == 5  # Mon removed by calendar_dates, Sun no service
     # Per-day headway rows: the CSV export carries one service_date per day.
     headways = pd.read_csv(out / "route_stop_headways.csv")
     assert headways["service_date"].nunique() == 5
+    # Each distinct service_id set is loaded once, not once per day.
+    assert len(loaded_sets) == len(set(loaded_sets)) < 5
 
 
 def test_new_csv_and_station_network_outputs(tmp_path: Path) -> None:
@@ -458,15 +527,26 @@ def test_new_csv_and_station_network_outputs(tmp_path: Path) -> None:
 
     write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
     out = tmp_path / "out"
-    assert cli.main(
-        ["analyze-frequency", "--feeds", str(tmp_path / "feeds"),
-         "--report", str(out), "--service-date", "2026-01-06", "--dry-run"]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "analyze-frequency",
+                "--feeds",
+                str(tmp_path / "feeds"),
+                "--report",
+                str(out),
+                "--service-date",
+                "2026-01-06",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
 
     # New CSVs exist with sane contents.
     nodes = pd.read_csv(out / "station_network_nodes.csv")
     near = pd.read_csv(out / "near_stations.csv")
-    assert len(nodes) == len(near)                          # one node per stop
+    assert len(nodes) == len(near)  # one node per stop
     edges = pd.read_csv(out / "station_network_edges.csv")
     assert set(edges["edge_type"]) <= {"in_vehicle", "walk", "same_station"}
     assert (out / "route_headways.csv").is_file()
@@ -484,15 +564,22 @@ def _run_analysis(tmp_path: Path, out_name: str, *extra: str) -> dict:
     from gtfs_ingest import cli
 
     out = tmp_path / out_name
-    assert cli.main(
-        [
-            "analyze-frequency",
-            "--feeds", str(tmp_path / "feeds"), *extra,
-            "--report", str(out),
-            "--service-date", "2026-01-06",
-            "--dry-run",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "analyze-frequency",
+                "--feeds",
+                str(tmp_path / "feeds"),
+                *extra,
+                "--report",
+                str(out),
+                "--service-date",
+                "2026-01-06",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
     return json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
 
 
@@ -510,7 +597,7 @@ def test_analyze_frequency_with_stops_only_csv(tmp_path: Path) -> None:
 
     csv_feed = by_id["extra_stops"]
     assert csv_feed["status"] == "stops_only"
-    assert csv_feed["service_date"] is None      # must not enter the coherence check
+    assert csv_feed["service_date"] is None  # must not enter the coherence check
     assert csv_feed["routes_analyzed"] == 0
     assert csv_feed["trips_analyzed"] == 0
     assert csv_feed["stop_headway_rows"] == 0
@@ -555,7 +642,13 @@ def test_analyze_frequency_with_stops_only_csv(tmp_path: Path) -> None:
     edges = pd.read_csv(out / "station_network_edges.csv")
     assert not edges[["stop_uid_a", "stop_uid_b"]].stack().str.startswith("extra_stops:").any()
     equiv = pd.read_csv(out / "stop_equivalences.csv")
-    assert not equiv[["stop_uid_a", "stop_uid_b"]].stack().astype(str).str.startswith("extra_stops:").any()
+    assert (
+        not equiv[["stop_uid_a", "stop_uid_b"]]
+        .stack()
+        .astype(str)
+        .str.startswith("extra_stops:")
+        .any()
+    )
     assert report["dedupe_within_feed_distance_m"] == 5.0
 
 
@@ -569,8 +662,13 @@ def test_common_date_ignores_stops_only_feeds(tmp_path: Path) -> None:
     exit_code = cli.main(
         [
             "analyze-frequency",
-            "--feeds", str(tmp_path / "feeds"), str(csv_path),
-            "--report", str(out), "--common-date", "--dry-run",
+            "--feeds",
+            str(tmp_path / "feeds"),
+            str(csv_path),
+            "--report",
+            str(out),
+            "--common-date",
+            "--dry-run",
         ]
     )
 
@@ -639,7 +737,7 @@ DUAL_SCHEME_FEED = feed_files(
         "stops.txt": (
             "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
             "SITEUR_01,Capuchina,40.0,-75.0,0,\n"
-            "ST_01,Capuchina,40.00002,-75.0,0,\n"         # ~2 m: same platform
+            "ST_01,Capuchina,40.00002,-75.0,0,\n"  # ~2 m: same platform
             "S9,Lejos,40.05,-75.05,0,\n"
         ),
         "trips.txt": "route_id,service_id,trip_id\nR1,WK,T1\nR1,WK,T2\n",
@@ -669,7 +767,7 @@ def test_within_feed_duplicate_ids_are_merged_end_to_end(tmp_path: Path) -> None
     # The two records now resolve to one physical station...
     quality = pd.read_csv(tmp_path / "out" / "near_stations_quality.csv", keep_default_na=False)
     canon = quality.apply(lambda r: r["station_dedup"] or r["stop_uid"], axis=1)
-    assert canon.nunique() == 2                      # Capuchina + Lejos, not 3
+    assert canon.nunique() == 2  # Capuchina + Lejos, not 3
     # ...but nothing is dropped: every record still has its own row.
     assert len(quality) == 3
 
@@ -681,7 +779,7 @@ def test_within_feed_dedupe_does_not_change_route_topology(tmp_path: Path) -> No
     on = _run_analysis(tmp_path, "out_on")
     off = _run_analysis(tmp_path, "out_off", "--dedupe-within-feed-distance-m", "0")
 
-    assert off["station_groups"] == 0                # the flag really is off
+    assert off["station_groups"] == 0  # the flag really is off
     assert on["graph"]["n_routes"] == off["graph"]["n_routes"]
     assert on["graph"]["n_edges"] == off["graph"]["n_edges"]
 

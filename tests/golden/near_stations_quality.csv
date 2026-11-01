@@ -1,0 +1,5 @@
+ID,stop_uid,walk_source,travel_source,travel_n_obs,coord_confidence,station_dedup
+1,metro:S1,none,observed,1,unavailable,metro:S1
+2,metro:S2,straight_line,none,0,unavailable,
+3,metro:S3,straight_line,observed,1,unavailable,
+4,other:X1,none,none,0,unavailable,metro:S1

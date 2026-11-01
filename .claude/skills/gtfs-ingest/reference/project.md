@@ -29,6 +29,7 @@ Ignore `gtfs_ingest/.venv` (a stray second virtualenv); the project env is the r
 | `normalizer.py` | stops into the common schema; drops rows without id or valid coordinates |
 | `db.py`, `bulk.py` | `stops` table DDL and fast COPY loading |
 | `report.py` | JSON + Markdown validation report |
+| `manifest.py` | `run_manifest.json`: input sha256s, git commit, package versions, parameters (no secrets, no timestamp) |
 | `pipeline_phase1.py` | orchestration |
 | `models.py` | shared pydantic models and GTFS constants; `FeedSource.is_stops_only` |
 | `config.py`, `cli.py` | settings (`.env`) and the command line |

@@ -81,12 +81,13 @@ def test_headway_pk_migration_blocks_are_idempotent_and_complete() -> None:
     assert len(blocks) == 2
     for name in ("route_stop_headways_pkey", "route_headways_pkey"):
         (block,) = [b for b in blocks if name in b]
-        assert "service_date" in block            # both the guard and the new PK
+        assert "service_date" in block  # both the guard and the new PK
         assert "ADD CONSTRAINT" in block and "DROP CONSTRAINT" in block
-        assert "NOT EXISTS" in block              # idempotency guard
+        assert "NOT EXISTS" in block  # idempotency guard
     # Fresh-database CREATEs already carry the widened PKs.
     creates = [
-        s for s in _DDL_STATEMENTS
+        s
+        for s in _DDL_STATEMENTS
         if "CREATE TABLE IF NOT EXISTS route_stop_headways" in s
         or "CREATE TABLE IF NOT EXISTS route_headways" in s
     ]
@@ -115,7 +116,7 @@ def test_live_bulk_copy_nan_becomes_null() -> None:
             "stop_id": ["S1"],
             "time_window": ["am_peak"],
             "trip_count": [1],
-            "mean_headway_s": [float("nan")],     # single departure: undefined
+            "mean_headway_s": [float("nan")],  # single departure: undefined
             "median_headway_s": [float("nan")],
             "min_headway_s": [float("nan")],
             "max_headway_s": [float("nan")],
@@ -124,11 +125,13 @@ def test_live_bulk_copy_nan_becomes_null() -> None:
     assert replace_feed_rows(engine, "route_stop_headways", "copytest", frame) == 1
     with engine.connect() as conn:
         row = conn.execute(
-            text("SELECT trip_count, mean_headway_s FROM route_stop_headways "
-                 "WHERE feed_id = 'copytest'")
+            text(
+                "SELECT trip_count, mean_headway_s FROM route_stop_headways "
+                "WHERE feed_id = 'copytest'"
+            )
         ).one()
     assert row.trip_count == 1
-    assert row.mean_headway_s is None            # NaN arrived as NULL
+    assert row.mean_headway_s is None  # NaN arrived as NULL
     engine.dispose()
 
 
@@ -146,7 +149,8 @@ def test_live_csv_and_gtfs_stops_coexist_under_colliding_ids(tmp_path, valid_fee
 
     # The CSV reuses VALID_FEED's stop ids on purpose.
     csv_feed = load_stops_csv_feed(
-        tmp_path, "extra_stops.csv",
+        tmp_path,
+        "extra_stops.csv",
         "id,name,latitude,longitude\nS1,Other Network S1,20.67,-103.34\n",
     )
     engine = make_engine(os.environ["GTFS_TEST_DATABASE_URL"])

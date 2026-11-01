@@ -97,8 +97,15 @@ return `None` — the table only exists after `conflate-osm`; never abort.
   osm_matches = None
   if engine is not None and analyzed_feed_ids:
       osm_matches = storage.fetch_osm_matches(engine, analyzed_feed_ids)
-  quality = near_stations.build_quality(near, route_stops, routes, stop_pairs,
-      stop_links=all_links, osm_matches=osm_matches, canonical=canonical)
+  quality = near_stations.build_quality(
+      near,
+      route_stops,
+      routes,
+      stop_pairs,
+      stop_links=all_links,
+      osm_matches=osm_matches,
+      canonical=canonical,
+  )
   near_stations.write_quality(quality, config.report_dir)
   ```
   (`canonical` already in scope from the dedupe stage; empty under

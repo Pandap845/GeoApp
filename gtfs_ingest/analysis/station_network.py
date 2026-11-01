@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import geopandas as gpd
 import networkx as nx
@@ -30,8 +30,14 @@ STATION_LAYER_NAME = "station_network"
 
 #: Edge CSV columns: one row per pair for walk/same_station, per direction for in_vehicle.
 EDGE_COLUMNS = [
-    "edge_type", "stop_uid_a", "stop_uid_b", "time_min",
-    "linea", "direction_id", "route_uid", "distance_m",
+    "edge_type",
+    "stop_uid_a",
+    "stop_uid_b",
+    "time_min",
+    "linea",
+    "direction_id",
+    "route_uid",
+    "distance_m",
 ]
 
 NODE_COLUMNS = ["stop_uid", "near_id", "name", "feed", "canonical_uid", "lat", "lon"]
@@ -43,7 +49,7 @@ def build_station_graph(
     stop_links: pd.DataFrame,
     stop_pairs: pd.DataFrame,
     equivalences: pd.DataFrame,
-    canonical: Optional[pd.DataFrame] = None,
+    canonical: pd.DataFrame | None = None,
     exclude_feeds: Collection[str] = (),
 ) -> nx.MultiDiGraph:
     """Build the network; stops of *exclude_feeds* become unlinked "stops_only" nodes."""
@@ -55,6 +61,7 @@ def build_station_graph(
     if exclude_feeds:
         stops_only = set(stops.loc[stops["feed_id"].isin(list(exclude_feeds)), "stop_uid"])
     if stops_only:
+
         def _without_stops_only(pairs: pd.DataFrame) -> pd.DataFrame:
             if pairs.empty:
                 return pairs
@@ -65,15 +72,15 @@ def build_station_graph(
         equivalences = _without_stops_only(equivalences)
         log.info("Station network: %d stops-only stop(s) kept as unlinked nodes", len(stops_only))
 
-    near_id = (
-        near.set_index("stop_uid")["ID"] if not near.empty else pd.Series(dtype=object)
-    )
+    near_id = near.set_index("stop_uid")["ID"] if not near.empty else pd.Series(dtype=object)
     canon = (
         canonical.set_index("stop_uid")["canonical_uid"]
         if canonical is not None and not canonical.empty
         else pd.Series(dtype=object)
     )
-    for row in stops[["stop_uid", "feed_id", "stop_name", "stop_lat", "stop_lon"]].to_dict("records"):
+    for row in stops[["stop_uid", "feed_id", "stop_name", "stop_lat", "stop_lon"]].to_dict(
+        "records"
+    ):
         uid = row["stop_uid"]
         graph.add_node(
             uid,
@@ -118,7 +125,7 @@ def build_station_graph(
     if not stop_pairs.empty:
         pairs = stop_pairs.sort_values(["stop_uid_a", "stop_uid_b"], kind="mergesort")
         minutes = walk_minutes(pairs["distance_m"])
-        for (row, walk_min) in zip(pairs.to_dict("records"), minutes):
+        for row, walk_min in zip(pairs.to_dict("records"), minutes):
             attrs = _clean_attrs(
                 {
                     "edge_type": "walk",
@@ -142,7 +149,8 @@ def build_station_graph(
 
     log.info(
         "Station network: %d stops, %d edges (%s)",
-        graph.number_of_nodes(), graph.number_of_edges(),
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
         ", ".join(f"{k}={v}" for k, v in _edges_by_type(graph).items()) or "none",
     )
     return graph
@@ -176,7 +184,9 @@ def write_station_graphml(graph: nx.MultiDiGraph, path: Path) -> Path:
     nx.write_graphml(graph, path)
     log.info(
         "Station network written: %s (%d nodes, %d edges)",
-        path, graph.number_of_nodes(), graph.number_of_edges(),
+        path,
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
     )
     return path
 
@@ -228,9 +238,7 @@ def station_nodes_frame(graph: nx.MultiDiGraph) -> pd.DataFrame:
     return frame.sort_values("stop_uid", kind="mergesort").reset_index(drop=True)
 
 
-def station_edges_layer(
-    graph: nx.MultiDiGraph, stops: gpd.GeoDataFrame
-) -> gpd.GeoDataFrame:
+def station_edges_layer(graph: nx.MultiDiGraph, stops: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Edges as lines for the GeoPackage."""
     edges = station_edges_frame(graph)
     if edges.empty:

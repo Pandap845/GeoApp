@@ -15,8 +15,8 @@ import io
 import logging
 import re
 import unicodedata
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, Sequence
 
 import pandas as pd
 
@@ -59,9 +59,7 @@ def _norm(header: str) -> str:
 
 #: Normalized alias -> canonical column.
 _ALIAS_LOOKUP: dict[str, str] = {
-    _norm(alias): canonical
-    for canonical, aliases in ALIASES.items()
-    for alias in aliases
+    _norm(alias): canonical for canonical, aliases in ALIASES.items() for alias in aliases
 }
 
 
@@ -104,7 +102,7 @@ def _candidate_delimiters(text: str) -> list[str]:
     return [sniffed] + [d for d in DELIMITERS if d != sniffed]
 
 
-def _parse(text: str, delimiter: str) -> Optional[pd.DataFrame]:
+def _parse(text: str, delimiter: str) -> pd.DataFrame | None:
     """Parse *text* with one delimiter (all values as strings), or None if it fails."""
     try:
         return pd.read_csv(
@@ -120,9 +118,7 @@ def _parse(text: str, delimiter: str) -> Optional[pd.DataFrame]:
         return None
 
 
-def _unresolved_finding(
-    filename: str, columns: Sequence[str], mapping: dict[str, str]
-) -> Finding:
+def _unresolved_finding(filename: str, columns: Sequence[str], mapping: dict[str, str]) -> Finding:
     """ERROR finding: what was found, what is missing, which spellings work."""
     resolved = {v: k for k, v in mapping.items()}
     missing = [name for name in REQUIRED if name not in resolved]
@@ -147,7 +143,7 @@ def _unresolved_finding(
     )
 
 
-def read_stops_csv(path: Path) -> tuple[Optional[pd.DataFrame], list[Finding]]:
+def read_stops_csv(path: Path) -> tuple[pd.DataFrame | None, list[Finding]]:
     """Return (frame, findings); frame is None when the header can't be resolved.
 
     Raises:
@@ -168,8 +164,8 @@ def read_stops_csv(path: Path) -> tuple[Optional[pd.DataFrame], list[Finding]]:
         )
 
     # Use the first delimiter that yields a usable header; keep the closest miss for the error.
-    best: Optional[tuple[list[str], dict[str, str]]] = None
-    parsed: Optional[tuple[pd.DataFrame, dict[str, str], list[str], str]] = None
+    best: tuple[list[str], dict[str, str]] | None = None
+    parsed: tuple[pd.DataFrame, dict[str, str], list[str], str] | None = None
     for delimiter in _candidate_delimiters(text):
         frame = _parse(text, delimiter)
         if frame is None:

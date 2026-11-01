@@ -60,15 +60,21 @@ To prove a comment/docstring cleanup did not change behaviour, compare the AST w
 ```python
 import ast
 
+
 def code_only(source: str) -> str:
     tree = ast.parse(source)
     for node in ast.walk(tree):
         body = getattr(node, "body", None)
-        if isinstance(body, list) and body and isinstance(body[0], ast.Expr) \
-                and isinstance(getattr(body[0], "value", None), ast.Constant) \
-                and isinstance(body[0].value.value, str):
+        if (
+            isinstance(body, list)
+            and body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(getattr(body[0], "value", None), ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
             node.body = body[1:] or [ast.Pass()]
     return ast.dump(tree)
+
 
 assert code_only(old_source) == code_only(new_source)
 ```

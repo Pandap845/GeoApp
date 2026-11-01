@@ -47,8 +47,8 @@ def test_bus_rail_cluster_is_multimodal() -> None:
         ("f", "LONELY", 41.0, -76.0, None),
     )
     route_stops, routes = rs_routes(
-        ("f", "B10", "BUS1", 3),      # bus
-        ("f", "T1", "RAIL1", 2),      # rail
+        ("f", "B10", "BUS1", 3),  # bus
+        ("f", "T1", "RAIL1", 2),  # rail
         ("f", "B99", "LONELY", 3),
     )
     labels = cluster_stops(stops, eps_m=120, min_samples=2)
@@ -70,7 +70,7 @@ def test_bus_only_cluster_is_not_multimodal() -> None:
     )
     route_stops, routes = rs_routes(
         ("f", "B10", "A", 3),
-        ("f", "B20", "B", 700),   # extended bus code normalizes to bus too
+        ("f", "B20", "B", 700),  # extended bus code normalizes to bus too
     )
     clusters = build_interchanges(
         stops, cluster_stops(stops, eps_m=120, min_samples=2), route_stops, routes
@@ -115,7 +115,7 @@ def test_physical_stop_count_counts_canonical_stations() -> None:
     # Three stops in one cluster; two of them are aliases of one station.
     stops = stops_gdf(
         ("fa", "A", 40.0, -75.0, None),
-        ("fb", "B", 40.00009, -75.0, None),     # ~10 m: alias of A
+        ("fb", "B", 40.00009, -75.0, None),  # ~10 m: alias of A
         ("fa", "C", 40.0005, -75.0, None),
     )
     route_stops, routes = rs_routes(
@@ -129,7 +129,9 @@ def test_physical_stop_count_counts_canonical_stations() -> None:
             "group_id": [0, 0],
         }
     )
-    (cluster,) = build_interchanges(stops, labels, route_stops, routes, canonical).to_dict("records")
+    (cluster,) = build_interchanges(stops, labels, route_stops, routes, canonical).to_dict(
+        "records"
+    )
     assert cluster["stop_count"] == 3
     assert cluster["physical_stop_count"] == 2
 
@@ -141,7 +143,7 @@ def test_physical_stop_count_counts_canonical_stations() -> None:
 def test_unclustered_stops_get_minus_one() -> None:
     stops = stops_gdf(
         ("f", "A", 40.0, -75.0, None),
-        ("f", "B", 41.0, -76.0, None),   # ~140 km away
+        ("f", "B", 41.0, -76.0, None),  # ~140 km away
     )
     labels = cluster_stops(stops, eps_m=120, min_samples=2)
     assert list(labels) == [-1, -1]
@@ -151,9 +153,9 @@ def test_unclustered_stops_get_minus_one() -> None:
 def test_normalize_route_type_extended_codes() -> None:
     assert normalize_route_type(3) == 3
     assert normalize_route_type("2") == 2
-    assert normalize_route_type(700) == 3      # extended bus -> bus
-    assert normalize_route_type(109) == 2      # suburban railway -> rail
-    assert normalize_route_type(401) == 1      # metro
+    assert normalize_route_type(700) == 3  # extended bus -> bus
+    assert normalize_route_type(109) == 2  # suburban railway -> rail
+    assert normalize_route_type(401) == 1  # metro
     assert normalize_route_type("junk") is None
     assert normalize_route_type(None) is None
 
@@ -172,8 +174,8 @@ def test_transfers_check_agreement_and_misses() -> None:
     assert result.feeds_with_transfers == ["f"]
     assert result.feeds_without_transfers == ["g"]
     assert result.declared_pairs == 2
-    assert result.declared_co_clustered == 1          # BUS1 <-> RAIL1
-    assert result.declared_not_co_clustered == 1      # BUS1 <-> FARAWAY
+    assert result.declared_co_clustered == 1  # BUS1 <-> RAIL1
+    assert result.declared_not_co_clustered == 1  # BUS1 <-> FARAWAY
     assert result.clusters_with_declared == 1
     assert result.clusters_without_declared == 1
     assert result.not_inferred_examples == ["f:BUS1 <-> f:FARAWAY"]
@@ -200,7 +202,7 @@ def test_detect_interchanges_cli_dedupe_flags_phantom_cluster(tmp_path: Path) ->
         replace={
             "stops.txt": (
                 "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
-                "Z1,Central Stop,40.00005,-75.0,0,\n"     # ~5 m: same station
+                "Z1,Central Stop,40.00005,-75.0,0,\n"  # ~5 m: same station
             ),
             "trips.txt": "route_id,service_id,trip_id\nR1,WK,T9\n",
             "stop_times.txt": (
@@ -214,10 +216,20 @@ def test_detect_interchanges_cli_dedupe_flags_phantom_cluster(tmp_path: Path) ->
 
     def run(out_name: str, *extra: str) -> dict:
         out = tmp_path / out_name
-        assert cli.main(
-            ["detect-interchanges", "--feeds", str(tmp_path / "feeds"),
-             "--report", str(out), "--dry-run", *extra]
-        ) == 0
+        assert (
+            cli.main(
+                [
+                    "detect-interchanges",
+                    "--feeds",
+                    str(tmp_path / "feeds"),
+                    "--report",
+                    str(out),
+                    "--dry-run",
+                    *extra,
+                ]
+            )
+            == 0
+        )
         return json.loads((out / "interchanges_report.json").read_text(encoding="utf-8"))
 
     report = run("out_dedupe")
@@ -268,9 +280,12 @@ def test_detect_interchanges_cli_dry_run(tmp_path: Path) -> None:
     exit_code = cli.main(
         [
             "detect-interchanges",
-            "--feeds", str(tmp_path / "feeds"),
-            "--report", str(out),
-            "--eps", "120",
+            "--feeds",
+            str(tmp_path / "feeds"),
+            "--report",
+            str(out),
+            "--eps",
+            "120",
             "--dry-run",
         ]
     )
@@ -295,13 +310,20 @@ def test_detect_interchanges_degrades_on_stops_only_csv(tmp_path: Path) -> None:
     out = tmp_path / "out"
 
     exit_code = cli.main(
-        ["detect-interchanges", "--feeds", str(tmp_path / "feeds"), str(csv_path),
-         "--report", str(out), "--dry-run"]
+        [
+            "detect-interchanges",
+            "--feeds",
+            str(tmp_path / "feeds"),
+            str(csv_path),
+            "--report",
+            str(out),
+            "--dry-run",
+        ]
     )
 
     assert exit_code == 0
     report = json.loads((out / "interchanges_report.json").read_text(encoding="utf-8"))
     by_id = {f["feed_id"]: f for f in report["feeds"]}
-    assert by_id["extra_stops"]["status"] == "stops_only"   # not "failed"
+    assert by_id["extra_stops"]["status"] == "stops_only"  # not "failed"
     assert by_id["extra_stops"]["stops"] == 2
     assert by_id["extra_stops"]["routes"] == 0

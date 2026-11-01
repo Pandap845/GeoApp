@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Optional
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,12 +17,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Pipeline configuration (database, inputs, report folder, logging, OSM tables)."""
 
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Each alias list includes the field name so Settings(database_url=...) still works.
-    database_url: Optional[str] = Field(
+    database_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices("database_url", "DATABASE_URL", "GTFS_DATABASE_URL"),
     )
@@ -39,7 +36,7 @@ class Settings(BaseSettings):
         default="INFO",
         validation_alias=AliasChoices("log_level", "GTFS_LOG_LEVEL"),
     )
-    analysis_date: Optional[date] = Field(
+    analysis_date: date | None = Field(
         default=None,
         validation_alias=AliasChoices("analysis_date", "GTFS_ANALYSIS_DATE"),
         description="Reference date for expiry/staleness judgments (the "
@@ -60,14 +57,14 @@ class Settings(BaseSettings):
         default="way",
         validation_alias=AliasChoices("osm_geom_column", "GTFS_OSM_GEOM_COLUMN"),
     )
-    metric_crs: Optional[str] = Field(
+    metric_crs: str | None = Field(
         default=None,
         validation_alias=AliasChoices("metric_crs", "GTFS_METRIC_CRS"),
         description="Metric CRS like 'EPSG:32618'; default auto-detects a UTM zone.",
     )
 
     # Google QA key: environment only, never a CLI flag.
-    google_maps_api_key: Optional[str] = Field(
+    google_maps_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("GOOGLE_MAPS_API_KEY", "GTFS_GOOGLE_MAPS_API_KEY"),
         repr=False,  # keep the key out of reprs/logs

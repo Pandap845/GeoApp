@@ -13,7 +13,7 @@ and discarded after the verdict.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import Engine, text
 
@@ -37,20 +37,33 @@ TRANSIT_PLACE_TYPES: tuple[str, ...] = (
 
 #: Google vehicleType -> our basic GTFS route_type code.
 VEHICLE_TYPE_TO_MODE: dict[str, int] = {
-    "BUS": 3, "INTERCITY_BUS": 3, "TROLLEYBUS": 11,
-    "TRAM": 0, "LIGHT_RAIL": 0,
-    "SUBWAY": 1, "METRO_RAIL": 1,
-    "RAIL": 2, "HEAVY_RAIL": 2, "COMMUTER_TRAIN": 2,
-    "HIGH_SPEED_TRAIN": 2, "LONG_DISTANCE_TRAIN": 2,
+    "BUS": 3,
+    "INTERCITY_BUS": 3,
+    "TROLLEYBUS": 11,
+    "TRAM": 0,
+    "LIGHT_RAIL": 0,
+    "SUBWAY": 1,
+    "METRO_RAIL": 1,
+    "RAIL": 2,
+    "HEAVY_RAIL": 2,
+    "COMMUTER_TRAIN": 2,
+    "HIGH_SPEED_TRAIN": 2,
+    "LONG_DISTANCE_TRAIN": 2,
     "FERRY": 4,
-    "CABLE_CAR": 5, "GONDOLA_LIFT": 6, "FUNICULAR": 7, "MONORAIL": 12,
+    "CABLE_CAR": 5,
+    "GONDOLA_LIFT": 6,
+    "FUNICULAR": 7,
+    "MONORAIL": 12,
 }
 
 #: Fallback when no vehicleType is given: Google place type -> mode.
 PLACE_TYPE_TO_MODE: dict[str, int] = {
-    "bus_station": 3, "bus_stop": 3,
-    "train_station": 2, "subway_station": 1,
-    "light_rail_station": 0, "ferry_terminal": 4,
+    "bus_station": 3,
+    "bus_stop": 3,
+    "train_station": 2,
+    "subway_station": 1,
+    "light_rail_station": 0,
+    "ferry_terminal": 4,
 }
 
 
@@ -88,7 +101,7 @@ def eligible_stops(engine: Engine) -> list[dict[str, Any]]:
     return rows
 
 
-def extract_vehicle_types(transit_station: Optional[dict[str, Any]]) -> set[str]:
+def extract_vehicle_types(transit_station: dict[str, Any] | None) -> set[str]:
     """All vehicleType values anywhere in the payload (unknown shapes just yield nothing)."""
     found: set[str] = set()
 
@@ -125,8 +138,8 @@ def is_transit_place(place: PlaceResult) -> bool:
 
 
 def interchange_verdict(
-    our_modes: set[int], places: Optional[list[PlaceResult]]
-) -> tuple[str, Optional[bool], Optional[str]]:
+    our_modes: set[int], places: list[PlaceResult] | None
+) -> tuple[str, bool | None, str | None]:
     """Return (verdict, mode_agreement, place_id); *places* is None when the call failed."""
     if not places:  # None (failure) or empty (nothing returned)
         return "NO_DATA", None, None
@@ -141,7 +154,7 @@ def interchange_verdict(
     return "CONFLICT", False, place_id
 
 
-def stop_verdict(places: Optional[list[PlaceResult]]) -> tuple[str, Optional[str]]:
+def stop_verdict(places: list[PlaceResult] | None) -> tuple[str, str | None]:
     """Return (verdict, place_id); place_id is set only for STATION_FOUND."""
     if places is None:
         return "NO_DATA", None

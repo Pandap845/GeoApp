@@ -52,15 +52,19 @@ def test_route_shapes_one_feature_per_route_direction_shape() -> None:
     assert set(gdf["direction_id"]) == {0, 1}
     assert list(gdf["linea"].unique()) == ["Línea 2"]
     s1 = gdf[gdf["shape_id"] == "s1"].geometry.iloc[0]
-    assert list(s1.coords)[0] == (-103.0, 20.0)  # ordered by shape_pt_sequence
+    assert s1.coords[0] == (-103.0, 20.0)  # ordered by shape_pt_sequence
 
 
 def test_route_shapes_empty_without_shapes_txt() -> None:
     assert route_shapes(fake_feed(trips=TRIPS), "feedx").empty
     # unordered sequences are sorted, single-point shapes dropped
     shapes = pd.DataFrame(
-        {"shape_id": ["only"], "shape_pt_lat": [20.0],
-         "shape_pt_lon": [-103.0], "shape_pt_sequence": [1]}
+        {
+            "shape_id": ["only"],
+            "shape_pt_lat": [20.0],
+            "shape_pt_lon": [-103.0],
+            "shape_pt_sequence": [1],
+        }
     )
     assert route_shapes(fake_feed(shapes, TRIPS), "feedx").empty
 
@@ -79,18 +83,19 @@ def test_route_stop_links_follow_stop_sequence_not_proximity() -> None:
     assert got == {
         ("feedx:A", "feedx:B", 0),
         ("feedx:B", "feedx:C", 0),
-        ("feedx:C", "feedx:A", 1),   # reverse direction is its own edge
+        ("feedx:C", "feedx:A", 1),  # reverse direction is its own edge
     }
     assert set(links["linea"]) == {"Línea 2"}
     # Scheduled segment times: median departure difference, in minutes.
-    minutes = {(a, b): t for a, b, t in
-               zip(links["stop_uid_a"], links["stop_uid_b"], links["travel_min"])}
-    assert minutes[("feedx:A", "feedx:B")] == 2.0    # 120 s
-    assert minutes[("feedx:B", "feedx:C")] == 3.0    # 180 s
-    assert minutes[("feedx:C", "feedx:A")] == 4.0    # 240 s
+    minutes = {
+        (a, b): t for a, b, t in zip(links["stop_uid_a"], links["stop_uid_b"], links["travel_min"])
+    }
+    assert minutes[("feedx:A", "feedx:B")] == 2.0  # 120 s
+    assert minutes[("feedx:B", "feedx:C")] == 3.0  # 180 s
+    assert minutes[("feedx:C", "feedx:A")] == 4.0  # 240 s
     # n_obs = trips with a timed gap behind each median (sidecar provenance).
     assert "n_obs" in links.columns
-    assert set(links["n_obs"]) == {1}                # one timed trip per segment
+    assert set(links["n_obs"]) == {1}  # one timed trip per segment
 
 
 def test_route_stop_links_dedupes_repeated_trips() -> None:
@@ -128,18 +133,31 @@ def test_geopackage_gets_route_layers(tmp_path: Path) -> None:
     near = pd.DataFrame()
     pairs = pd.DataFrame(columns=["stop_uid_a", "stop_uid_b", "distance_m"])
     shapes_layer = gpd.GeoDataFrame(
-        {"route_uid": ["feedx:R1"], "feed_id": ["feedx"], "route_id": ["R1"],
-         "linea": ["L1"], "direction_id": [0], "shape_id": ["s1"]},
+        {
+            "route_uid": ["feedx:R1"],
+            "feed_id": ["feedx"],
+            "route_id": ["R1"],
+            "linea": ["L1"],
+            "direction_id": [0],
+            "shape_id": ["s1"],
+        },
         geometry=[LineString([(-103.0, 20.0), (-103.1, 20.1)])],
         crs="EPSG:4326",
     )
     links = pd.DataFrame(
-        {"route_uid": ["feedx:R1"], "feed_id": ["feedx"], "route_id": ["R1"],
-         "linea": ["L1"], "direction_id": [0],
-         "stop_uid_a": ["feedx:A"], "stop_uid_b": ["feedx:B"]}
+        {
+            "route_uid": ["feedx:R1"],
+            "feed_id": ["feedx"],
+            "route_id": ["R1"],
+            "linea": ["L1"],
+            "direction_id": [0],
+            "stop_uid_a": ["feedx:A"],
+            "stop_uid_b": ["feedx:B"],
+        }
     )
-    path = write_geopackage(stops, near, pairs, tmp_path,
-                            route_shapes=shapes_layer, stop_links=links)
+    path = write_geopackage(
+        stops, near, pairs, tmp_path, route_shapes=shapes_layer, stop_links=links
+    )
 
     import pyogrio
 
@@ -183,7 +201,9 @@ def test_same_line_stations_lists_adjacent_stops_in_route_order() -> None:
             "stop_uid_b": ["f:B", "f:C"],
         }
     )
-    out = build_near_stations(stops, route_stops, routes, stop_pairs, stop_links=stop_links).set_index("stop_uid")
+    out = build_near_stations(
+        stops, route_stops, routes, stop_pairs, stop_links=stop_links
+    ).set_index("stop_uid")
 
     # B is the middle stop: its same-line neighbours are A (prev) and C (next).
     # IDs are the sequential file ids (A=1, B=2, C=3 in row order).
@@ -200,8 +220,14 @@ def test_same_line_stations_lists_adjacent_stops_in_route_order() -> None:
 
 def test_coverage_rows_to_frame() -> None:
     rows = [
-        {"osm_id": 1, "kind": "bus_stop", "osm_name": "Parada X",
-         "nearest_stop_m": 512.345, "lat": 20.5, "lon": -103.4},
+        {
+            "osm_id": 1,
+            "kind": "bus_stop",
+            "osm_name": "Parada X",
+            "nearest_stop_m": 512.345,
+            "lat": 20.5,
+            "lon": -103.4,
+        },
     ]
     gdf = rows_to_frame(rows)
     assert gdf.crs.to_epsg() == 4326

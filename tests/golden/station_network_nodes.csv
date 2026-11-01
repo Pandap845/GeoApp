@@ -1,0 +1,5 @@
+stop_uid,near_id,name,feed,canonical_uid,lat,lon
+metro:S1,1,Main St,metro,metro:S1,40.0,-75.0
+metro:S2,2,Central Station,metro,metro:S2,40.01,-75.01
+metro:S3,3,Central Platform,metro,metro:S3,40.0101,-75.0099
+other:X1,4,Main St,other,metro:S1,40.00009,-75.0

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,7 +44,7 @@ class LocalizedText(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    text: Optional[str] = None
+    text: str | None = None
 
 
 class LatLng(BaseModel):
@@ -51,8 +52,8 @@ class LatLng(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 class PlaceResult(BaseModel):
@@ -64,19 +65,19 @@ class PlaceResult(BaseModel):
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    id: Optional[str] = None
+    id: str | None = None
     types: list[str] = Field(default_factory=list)
-    transit_station: Optional[dict[str, Any]] = Field(default=None, alias="transitStation")
-    display_name: Optional[LocalizedText] = Field(default=None, alias="displayName")
-    location: Optional[LatLng] = None
+    transit_station: dict[str, Any] | None = Field(default=None, alias="transitStation")
+    display_name: LocalizedText | None = Field(default=None, alias="displayName")
+    location: LatLng | None = None
 
     @property
-    def name(self) -> Optional[str]:
+    def name(self) -> str | None:
         """Display name, if requested."""
         return self.display_name.text if self.display_name else None
 
     @property
-    def coords(self) -> Optional[tuple[float, float]]:
+    def coords(self) -> tuple[float, float] | None:
         """(lat, lon), if requested."""
         if (
             self.location is not None
@@ -122,7 +123,7 @@ class GooglePlacesClient:
         backoff_base: float = 0.5,
         base_url: str = PLACES_BASE_URL,
         legacy_base_url: str = LEGACY_BASE_URL,
-        transport: Optional[httpx.BaseTransport] = None,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("GooglePlacesClient requires a non-empty API key")
@@ -158,9 +159,9 @@ class GooglePlacesClient:
         lon: float,
         radius_m: float,
         field_mask: Sequence[str],
-        included_types: Optional[Sequence[str]] = None,
+        included_types: Sequence[str] | None = None,
         max_results: int = 10,
-    ) -> Optional[list[PlaceResult]]:
+    ) -> list[PlaceResult] | None:
         """Places strictly within *radius_m*; [] means none, None means the call failed."""
         body: dict[str, Any] = {
             "locationRestriction": {
@@ -180,13 +181,13 @@ class GooglePlacesClient:
         self,
         query: str,
         field_mask: Sequence[str],
-        lat: Optional[float] = None,
-        lon: Optional[float] = None,
-        radius_m: Optional[float] = None,
+        lat: float | None = None,
+        lon: float | None = None,
+        radius_m: float | None = None,
         max_results: int = 10,
-        language: Optional[str] = None,
-        region: Optional[str] = None,
-    ) -> Optional[list[PlaceResult]]:
+        language: str | None = None,
+        region: str | None = None,
+    ) -> list[PlaceResult] | None:
         """Text Search, optionally biased toward a circle (used to prefer nearby namesakes)."""
         body: dict[str, Any] = {"textQuery": query, "maxResultCount": max_results}
         if lat is not None and lon is not None and radius_m:
@@ -203,14 +204,14 @@ class GooglePlacesClient:
         data = self._call("POST", "/places:searchText", field_mask, body)
         return None if data is None else self._parse_places(data)
 
-    def place_details(self, place_id: str, field_mask: Sequence[str]) -> Optional[PlaceResult]:
+    def place_details(self, place_id: str, field_mask: Sequence[str]) -> PlaceResult | None:
         """Details for one place (mask fields have no "places." prefix here)."""
         data = self._call("GET", f"/places/{place_id}", field_mask, None)
         return None if data is None else PlaceResult.model_validate(data)
 
     def geocode(
         self, address: str, language: str = "es", region: str = "mx"
-    ) -> Optional[tuple[float, float]]:
+    ) -> tuple[float, float] | None:
         """Legacy Geocoding: address -> (lat, lon), or None. Fallback after Text Search."""
         params = {"address": address, "language": language, "region": region}
         data = self._call_legacy("/geocode/json", params)
@@ -235,7 +236,7 @@ class GooglePlacesClient:
         transit_mode: str = "bus",
         language: str = "es",
         region: str = "mx",
-    ) -> Optional[float]:
+    ) -> float | None:
         """Legacy Distance Matrix travel time in minutes, or None (caller then estimates)."""
         params = {
             "origins": f"{origin[0]},{origin[1]}",
@@ -271,8 +272,8 @@ class GooglePlacesClient:
         return [PlaceResult.model_validate(p) for p in data.get("places", [])]
 
     def _call(
-        self, method: str, path: str, field_mask: Sequence[str], body: Optional[dict]
-    ) -> Optional[dict[str, Any]]:
+        self, method: str, path: str, field_mask: Sequence[str], body: dict | None
+    ) -> dict[str, Any] | None:
         """One budgeted Places call; None if it still fails after retries."""
         mask = [f for f in field_mask if f and f.strip()]
         if not mask:
@@ -294,7 +295,7 @@ class GooglePlacesClient:
             log.warning("Places API %s %s -> HTTP %s", method, path, exc.response.status_code)
             return None
 
-    def _call_legacy(self, path: str, params: dict[str, str]) -> Optional[dict[str, Any]]:
+    def _call_legacy(self, path: str, params: dict[str, str]) -> dict[str, Any] | None:
         """One budgeted legacy GET (no field masks in these APIs); None on failure."""
         if self._calls_made >= self._max_calls:
             raise CallBudgetExhausted(f"call budget of {self._max_calls} reached")
@@ -325,7 +326,7 @@ class GooglePlacesClient:
         return data
 
     def _request(
-        self, method: str, path: str, mask: list[str], body: Optional[dict]
+        self, method: str, path: str, mask: list[str], body: dict | None
     ) -> dict[str, Any]:
         headers = {"X-Goog-Api-Key": self._api_key, "X-Goog-FieldMask": ",".join(mask)}
         try:

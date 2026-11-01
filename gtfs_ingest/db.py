@@ -53,8 +53,15 @@ _CHUNK_SIZE = 1000
 
 #: Columns copied into the temp table; geom is built in SQL.
 _STOP_COLUMNS = [
-    "stop_uid", "stop_num_id", "feed_id", "stop_id", "stop_name",
-    "stop_lat", "stop_lon", "location_type", "parent_station",
+    "stop_uid",
+    "stop_num_id",
+    "feed_id",
+    "stop_id",
+    "stop_name",
+    "stop_lat",
+    "stop_lon",
+    "location_type",
+    "parent_station",
 ]
 
 _TEMP_TABLE_SQL = text(
@@ -106,7 +113,9 @@ def ensure_schema(engine: Engine) -> None:
         with engine.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
     except SQLAlchemyError as exc:
-        log.warning("Could not create postgis extension (may already exist / need superuser): %s", exc)
+        log.warning(
+            "Could not create postgis extension (may already exist / need superuser): %s", exc
+        )
 
     with engine.begin() as conn:
         try:
@@ -146,13 +155,16 @@ def load_feed_stops(engine: Engine, feed_id: str, stops: pd.DataFrame) -> int:
             except Exception as exc:  # noqa: BLE001 - performance path, never a gate
                 log.warning(
                     "stops: COPY load failed (%s: %s); falling back to executemany",
-                    type(exc).__name__, exc,
+                    type(exc).__name__,
+                    exc,
                 )
                 records = _records(stops)
                 for start in range(0, len(records), _CHUNK_SIZE):
                     conn.execute(_INSERT_SQL, records[start : start + _CHUNK_SIZE])
     log.info(
         "Feed %s: loaded %d stops into PostGIS in %.1fs",
-        feed_id, len(frame), time.perf_counter() - started,
+        feed_id,
+        len(frame),
+        time.perf_counter() - started,
     )
     return len(frame)

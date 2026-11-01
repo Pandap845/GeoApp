@@ -10,9 +10,9 @@ A broken feed is recorded and skipped.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -20,8 +20,8 @@ from sqlalchemy import Engine
 
 from .. import db, loader, normalizer
 from ..analysis import dedupe
-from ..analysis.dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD, WITHIN_FEED_DISTANCE_M
 from ..analysis.connectivity import route_stop_map
+from ..analysis.dedupe import DEDUPE_DISTANCE_M, NAME_SIM_THRESHOLD, WITHIN_FEED_DISTANCE_M
 from . import clustering, coverage, osm_match, side_of_street, storage
 from .transfers_check import TransferCheck, check_transfers
 
@@ -37,30 +37,30 @@ class InterchangeConfig(BaseModel):
     """Configuration of one detect-interchanges run."""
 
     feed_paths: list[Path]
-    database_url: Optional[str] = None
+    database_url: str | None = None
     report_dir: Path = Path("out")
     eps_m: float = Field(default=120.0, gt=0)
     min_samples: int = Field(default=2, ge=1)
-    metric_crs: Optional[str] = None
+    metric_crs: str | None = None
     dedupe: bool = True
     dedupe_distance_m: float = Field(default=DEDUPE_DISTANCE_M, gt=0)
     dedupe_name_threshold: float = Field(default=NAME_SIM_THRESHOLD, ge=0.0, le=1.0)
     # Same default as the CLI; None = off (cross-feed aliases only).
-    dedupe_within_feed_distance_m: Optional[float] = Field(default=WITHIN_FEED_DISTANCE_M, gt=0)
+    dedupe_within_feed_distance_m: float | None = Field(default=WITHIN_FEED_DISTANCE_M, gt=0)
     dry_run: bool = False
 
 
 class ConflationConfig(BaseModel):
     """Configuration of one conflate-osm run."""
 
-    database_url: Optional[str] = None
+    database_url: str | None = None
     report_dir: Path = Path("out")
     match_threshold_m: float = Field(default=50.0, gt=0)
     street_threshold_m: float = Field(default=50.0, gt=0)
     osm_line_table: str = "planet_osm_line"
     osm_point_table: str = "planet_osm_point"
     osm_geom_column: str = "way"
-    metric_crs: Optional[str] = None
+    metric_crs: str | None = None
     coverage_radius_m: float = Field(default=100.0, gt=0)
     coverage_buffer_m: float = Field(default=500.0, gt=0)
     skip_coverage: bool = False
@@ -88,7 +88,7 @@ class InterchangeReport(BaseModel):
     dedupe: bool = True
     dedupe_distance_m: float = DEDUPE_DISTANCE_M
     # None = within-feed dedupe was off (or the report predates the field).
-    dedupe_within_feed_distance_m: Optional[float] = None
+    dedupe_within_feed_distance_m: float | None = None
     equivalence_groups: int = 0
     stops_deduplicated: int = 0
     single_physical_station_clusters: int = 0  # clusters that are just one station's aliases
@@ -116,8 +116,8 @@ class ConflationReport(BaseModel):
     side_distribution: dict[str, int] = Field(default_factory=dict)
     side_low_confidence: int = 0
     stops_without_street: int = 0
-    coverage_radius_m: Optional[float] = None
-    coverage_buffer_m: Optional[float] = None
+    coverage_radius_m: float | None = None
+    coverage_buffer_m: float | None = None
     osm_only_stops: int = 0
     osm_only_by_kind: dict[str, int] = Field(default_factory=dict)
 
@@ -125,7 +125,12 @@ class ConflationReport(BaseModel):
 def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]]:
     """Load one feed's stops, route maps and transfers; failures go into the note."""
     note = FeedNote(feed_id=source.feed_id, status="ok")
-    data: dict[str, pd.DataFrame | None] = {"stops": None, "route_stops": None, "routes": None, "transfers": None}
+    data: dict[str, pd.DataFrame | None] = {
+        "stops": None,
+        "route_stops": None,
+        "routes": None,
+        "transfers": None,
+    }
     try:
         loaded = loader.load_feed(source)
         if loaded.load_error:
@@ -136,7 +141,7 @@ def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]
         # Stops-only: clustered by position, but no routes, so never multimodal.
         if source.is_stops_only:
             note.status = "stops_only"
-            note.stops = int(len(stops))
+            note.stops = len(stops)
             note.notes.append(
                 "stops-only CSV source: no routes or transfers.txt; "
                 "contributes stop positions to clustering only"
@@ -161,9 +166,9 @@ def _collect_feed(source: Any) -> tuple[FeedNote, dict[str, pd.DataFrame | None]
         transfers = loaded.table("transfers.txt")
         data["transfers"] = transfers if "transfers.txt" in loaded.files_present else None
         note.has_transfers_txt = data["transfers"] is not None
-        note.stops = int(len(stops))
-        note.routes = int(len(data["routes"])) if data["routes"] is not None else 0
-    except Exception as exc:  # noqa: BLE001 - per-feed isolation
+        note.stops = len(stops)
+        note.routes = len(data["routes"]) if data["routes"] is not None else 0
+    except Exception as exc:  # per-feed isolation
         log.exception("Feed %s: interchange collection failed", source.feed_id)
         note.status = "failed"
         note.notes.append(f"{type(exc).__name__}: {exc}")
@@ -177,10 +182,12 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
         ValueError: a non-dry run without a database URL.
     """
     sources = loader.discover_feeds(config.feed_paths)
-    engine: Optional[Engine] = None
+    engine: Engine | None = None
     if not config.dry_run:
         if not config.database_url:
-            raise ValueError("No database URL configured; pass --db-url / DATABASE_URL or use --dry-run")
+            raise ValueError(
+                "No database URL configured; pass --db-url / DATABASE_URL or use --dry-run"
+            )
         engine = db.make_engine(config.database_url)
         storage.ensure_conflation_schema(engine)
 
@@ -196,7 +203,9 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
 
     stops = _concat("stops", ["stop_uid", "feed_id", "stop_id", "parent_station"])
-    route_stops = _concat("route_stops", ["feed_id", "route_id", "route_uid", "stop_id", "stop_uid"])
+    route_stops = _concat(
+        "route_stops", ["feed_id", "route_id", "route_uid", "stop_id", "stop_uid"]
+    )
     routes = _concat("routes", ["route_uid", "route_type"])
 
     # Dedupe is recomputed so this phase runs on its own. It sees every trip,
@@ -204,32 +213,47 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
     canonical = pd.DataFrame(columns=dedupe.CANONICAL_COLUMNS)
     if config.dedupe and len(stops):
         accepted = dedupe.find_equivalences(
-            stops, route_stops, routes,
-            config.dedupe_distance_m, config.dedupe_name_threshold,
+            stops,
+            route_stops,
+            routes,
+            config.dedupe_distance_m,
+            config.dedupe_name_threshold,
             within_feed_distance_m=config.dedupe_within_feed_distance_m,
             exclude_feeds=[n.feed_id for n in notes if n.status == "stops_only"],
         )
         canonical = dedupe.canonical_map(accepted)
 
-    labels = clustering.cluster_stops(
-        stops, config.eps_m, config.min_samples, config.metric_crs, canonical
-    ) if len(stops) else pd.Series(dtype=int).to_numpy()
+    labels = (
+        clustering.cluster_stops(
+            stops, config.eps_m, config.min_samples, config.metric_crs, canonical
+        )
+        if len(stops)
+        else pd.Series(dtype=int).to_numpy()
+    )
     clusters = clustering.build_interchanges(stops, labels, route_stops, routes, canonical)
 
     transfers_by_feed = {
-        note.feed_id: data["transfers"] for note, data in zip(notes, all_data) if note.status == "ok"
+        note.feed_id: data["transfers"]
+        for note, data in zip(notes, all_data)
+        if note.status == "ok"
     }
-    transfers = check_transfers(transfers_by_feed, list(clusters["member_stop_uids"]) if not clusters.empty else [])
+    transfers = check_transfers(
+        transfers_by_feed, list(clusters["member_stop_uids"]) if not clusters.empty else []
+    )
 
     if engine is not None:
         storage.load_interchanges(engine, clusters)
 
     combos: dict[str, int] = {}
     if not clusters.empty:
-        combos = clusters["mode_names"].map(lambda names: "+".join(sorted(names)) or "(unknown)") \
-            .value_counts().to_dict()
+        combos = (
+            clusters["mode_names"]
+            .map(lambda names: "+".join(sorted(names)) or "(unknown)")
+            .value_counts()
+            .to_dict()
+        )
     report = InterchangeReport(
-        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
         dry_run=config.dry_run,
         eps_m=config.eps_m,
         min_samples=config.min_samples,
@@ -239,12 +263,12 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
             config.dedupe_within_feed_distance_m if config.dedupe else None
         ),
         equivalence_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
-        stops_deduplicated=int(len(canonical)),
+        stops_deduplicated=len(canonical),
         single_physical_station_clusters=(
             int((clusters["physical_stop_count"] == 1).sum()) if not clusters.empty else 0
         ),
         feeds=notes,
-        clusters_total=int(len(clusters)),
+        clusters_total=len(clusters),
         multimodal_count=int(clusters["is_multimodal"].sum()) if not clusters.empty else 0,
         single_mode_count=int((~clusters["is_multimodal"]).sum()) if not clusters.empty else 0,
         mode_combinations={k: int(v) for k, v in combos.items()},
@@ -253,8 +277,10 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
     _write(report, config.report_dir, INTERCHANGE_JSON, INTERCHANGE_MD, _interchange_markdown)
     log.info(
         "Interchange detection complete: %d clusters (%d multimodal), transfers agreement %d/%d",
-        report.clusters_total, report.multimodal_count,
-        transfers.declared_co_clustered, transfers.declared_pairs,
+        report.clusters_total,
+        report.multimodal_count,
+        transfers.declared_co_clustered,
+        transfers.declared_pairs,
     )
     return report
 
@@ -300,10 +326,12 @@ def run_conflation(config: ConflationConfig) -> ConflationReport:
         coverage.write_coverage_gpkg(gaps, config.report_dir)
 
     matched = int((~matches["needs_review"]).sum()) if not matches.empty else 0
-    total = int(len(matches))
-    side_counts = sides["side"].fillna("(no street)").value_counts().to_dict() if not sides.empty else {}
+    total = len(matches)
+    side_counts = (
+        sides["side"].fillna("(no street)").value_counts().to_dict() if not sides.empty else {}
+    )
     report = ConflationReport(
-        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
         dry_run=config.dry_run,
         match_threshold_m=config.match_threshold_m,
         street_threshold_m=config.street_threshold_m,
@@ -314,17 +342,26 @@ def run_conflation(config: ConflationConfig) -> ConflationReport:
         match_rate=round(matched / total, 3) if total else 0.0,
         needs_review=int(matches["needs_review"].sum()) if not matches.empty else 0,
         side_distribution={str(k): int(v) for k, v in side_counts.items()},
-        side_low_confidence=int((sides["side_confidence"] == "low").sum()) if not sides.empty else 0,
+        side_low_confidence=int((sides["side_confidence"] == "low").sum())
+        if not sides.empty
+        else 0,
         stops_without_street=int(sides["side"].isna().sum()) if not sides.empty else 0,
         coverage_radius_m=None if config.skip_coverage else config.coverage_radius_m,
         coverage_buffer_m=None if config.skip_coverage else config.coverage_buffer_m,
-        osm_only_stops=int(len(gaps)),
-        osm_only_by_kind={str(k): int(v) for k, v in gaps["kind"].fillna("(untagged)").value_counts().items()} if not gaps.empty else {},
+        osm_only_stops=len(gaps),
+        osm_only_by_kind={
+            str(k): int(v) for k, v in gaps["kind"].fillna("(untagged)").value_counts().items()
+        }
+        if not gaps.empty
+        else {},
     )
     _write(report, config.report_dir, CONFLATION_JSON, CONFLATION_MD, _conflation_markdown)
     log.info(
         "Conflation complete: %d/%d stops matched (%d need review); side resolved for %d stops",
-        matched, total, report.needs_review, total - report.stops_without_street,
+        matched,
+        total,
+        report.needs_review,
+        total - report.stops_without_street,
     )
     return report
 
@@ -343,8 +380,10 @@ def _interchange_markdown(report: InterchangeReport) -> str:
         "",
         f"Generated: {report.generated_at}  ",
         f"Mode: {'dry run (no DB writes)' if report.dry_run else 'full run'}  ",
-        f"DBSCAN: eps = {report.eps_m:g} m, min_samples = {report.min_samples} "
-        "(parent_station groups always merged)  ",
+        (
+            f"DBSCAN: eps = {report.eps_m:g} m, min_samples = {report.min_samples} "
+            "(parent_station groups always merged)  "
+        ),
         "Station deduplication: "
         + (
             f"on (cross-feed {report.dedupe_distance_m:g} m, within-feed "
@@ -371,9 +410,11 @@ def _interchange_markdown(report: InterchangeReport) -> str:
         "",
         "## Clusters",
         "",
-        f"Total: {report.clusters_total} · Multimodal: {report.multimodal_count} · "
-        f"Single-mode: {report.single_mode_count} · "
-        f"Single physical station (alias-only): {report.single_physical_station_clusters}",
+        (
+            f"Total: {report.clusters_total} · Multimodal: {report.multimodal_count} · "
+            f"Single-mode: {report.single_mode_count} · "
+            f"Single physical station (alias-only): {report.single_physical_station_clusters}"
+        ),
         "",
         "| Mode combination | Clusters |",
         "| --- | ---: |",
@@ -408,8 +449,10 @@ def _conflation_markdown(report: ConflationReport) -> str:
         "## Stop -> OSM transit node matching",
         "",
         f"- Stops: {report.stops_total}",
-        f"- Matched (confidence >= 0.5, within threshold): {report.matched} "
-        f"({report.match_rate:.1%})",
+        (
+            f"- Matched (confidence >= 0.5, within threshold): {report.matched} "
+            f"({report.match_rate:.1%})"
+        ),
         f"- Needs review: {report.needs_review}",
         "",
         "## Side of street",
@@ -418,16 +461,20 @@ def _conflation_markdown(report: ConflationReport) -> str:
         "| --- | ---: |",
         *[f"| {side} | {count} |" for side, count in sorted(report.side_distribution.items())],
         "",
-        f"Low confidence: {report.side_low_confidence} · "
-        f"No highway within threshold: {report.stops_without_street}",
+        (
+            f"Low confidence: {report.side_low_confidence} · "
+            f"No highway within threshold: {report.stops_without_street}"
+        ),
         "",
     ]
     if report.coverage_radius_m is not None:
         lines += [
             "## Reverse coverage (OSM transit nodes without a GTFS stop)",
             "",
-            f"Service area: stops hull + {report.coverage_buffer_m:g} m buffer · "
-            f"covered when a stop is within {report.coverage_radius_m:g} m",
+            (
+                f"Service area: stops hull + {report.coverage_buffer_m:g} m buffer · "
+                f"covered when a stop is within {report.coverage_radius_m:g} m"
+            ),
             "",
             f"- OSM-only transit nodes: **{report.osm_only_stops}**",
         ]

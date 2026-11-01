@@ -17,7 +17,6 @@ import logging
 import re
 from dataclasses import dataclass
 
-import numpy as np
 import pandas as pd
 from sqlalchemy import Engine, bindparam, text
 
@@ -30,12 +29,25 @@ _IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$", re.IGNORECA
 PT_VALUES = ("platform", "stop_position", "station")
 RAILWAY_VALUES = ("station", "halt", "tram_stop")
 
+# Nearest-neighbour lookups take this many index candidates, then break exact
+# distance ties by osm_id. A plain second ORDER BY key stops PostGIS from using
+# the spatial index.
+KNN_CANDIDATES = 5
+
 _STATION_KINDS = {"station"}
 _PLATFORM_KINDS = {"bus_stop", "platform", "stop_position", "tram_stop", "halt"}
 
 MATCH_COLUMNS = [
-    "stop_uid", "feed_id", "stop_id", "location_type",
-    "osm_id", "osm_kind", "osm_name", "distance_m", "match_confidence", "needs_review",
+    "stop_uid",
+    "feed_id",
+    "stop_id",
+    "location_type",
+    "osm_id",
+    "osm_kind",
+    "osm_name",
+    "distance_m",
+    "match_confidence",
+    "needs_review",
 ]
 
 
@@ -66,8 +78,11 @@ def validate_osm_schema(
         ValueError: a name is not a plain SQL identifier.
         RuntimeError: listing every missing table or column, or an empty table.
     """
-    for name, what in ((line_table, "OSM line table"), (point_table, "OSM point table"),
-                       (geom_column, "OSM geometry column")):
+    for name, what in (
+        (line_table, "OSM line table"),
+        (point_table, "OSM point table"),
+        (geom_column, "OSM geometry column"),
+    ):
         _check_identifier(name, what)
 
     problems: list[str] = []
@@ -84,8 +99,7 @@ def validate_osm_schema(
                 row[0]
                 for row in conn.execute(
                     text(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_name = :t"
+                        "SELECT column_name FROM information_schema.columns WHERE table_name = :t"
                     ),
                     {"t": table.split(".")[-1]},
                 )
@@ -94,7 +108,10 @@ def validate_osm_schema(
             if geom_column not in cols:
                 problems.append(f"{table} lacks geometry column {geom_column!r}")
 
-        required = {line_table: ("highway", "oneway"), point_table: ("highway", "railway", "public_transport")}
+        required = {
+            line_table: ("highway", "oneway"),
+            point_table: ("highway", "railway", "public_transport"),
+        }
         for table, needed in required.items():
             for col in needed:
                 if table in columns and col not in columns[table]:
@@ -104,8 +121,10 @@ def validate_osm_schema(
         if not problems:
             for table in (line_table, point_table):
                 srid = conn.execute(
-                    text(f"SELECT ST_SRID({geom_column}) FROM {table} "
-                         f"WHERE {geom_column} IS NOT NULL LIMIT 1")
+                    text(
+                        f"SELECT ST_SRID({geom_column}) FROM {table} "
+                        f"WHERE {geom_column} IS NOT NULL LIMIT 1"
+                    )
                 ).scalar()
                 if srid is None:
                     problems.append(f"{table} contains no geometries (empty OSM import?)")
@@ -116,8 +135,7 @@ def validate_osm_schema(
         raise RuntimeError(
             "OSM layers are not usable - fix the import or point the config "
             "(--osm-line-table/--osm-point-table/--osm-geom-column, or the "
-            "GTFS_OSM_* env vars) at the right layers:\n  - "
-            + "\n  - ".join(problems)
+            "GTFS_OSM_* env vars) at the right layers:\n  - " + "\n  - ".join(problems)
         )
     schema = OsmSchema(
         line_table=line_table,
@@ -130,7 +148,11 @@ def validate_osm_schema(
     )
     log.info(
         "OSM schema validated: %s (SRID %d), %s (SRID %d), geom column %r",
-        line_table, schema.line_srid, point_table, schema.point_srid, geom_column,
+        line_table,
+        schema.line_srid,
+        point_table,
+        schema.point_srid,
+        geom_column,
     )
     return schema
 
@@ -145,22 +167,28 @@ def nearest_transit_nodes(engine: Engine, schema: OsmSchema) -> pd.DataFrame:
                o.osm_id, o.kind AS osm_kind, o.osm_name, o.distance_m
         FROM stops s
         LEFT JOIN LATERAL (
-            SELECT p.osm_id,
-                   CASE
-                       WHEN p.highway = 'bus_stop' THEN 'bus_stop'
-                       WHEN p.public_transport IN :pt_values THEN p.public_transport
-                       ELSE p.railway
-                   END AS kind,
-                   {name_expr} AS osm_name,
-                   ST_Distance(s.geom::geography,
-                               ST_Transform(p.{g}, 4326)::geography) AS distance_m
-            FROM {schema.point_table} p
-            WHERE p.highway = 'bus_stop'
-               OR p.public_transport IN :pt_values
-               OR p.railway IN :railway_values
-            ORDER BY p.{g} <-> ST_Transform(s.geom, :point_srid)
+            SELECT * FROM (
+                SELECT p.osm_id,
+                       CASE
+                           WHEN p.highway = 'bus_stop' THEN 'bus_stop'
+                           WHEN p.public_transport IN :pt_values THEN p.public_transport
+                           ELSE p.railway
+                       END AS kind,
+                       {name_expr} AS osm_name,
+                       ST_Distance(s.geom::geography,
+                                   ST_Transform(p.{g}, 4326)::geography) AS distance_m,
+                       p.{g} <-> ST_Transform(s.geom, :point_srid) AS knn_d
+                FROM {schema.point_table} p
+                WHERE p.highway = 'bus_stop'
+                   OR p.public_transport IN :pt_values
+                   OR p.railway IN :railway_values
+                ORDER BY p.{g} <-> ST_Transform(s.geom, :point_srid)
+                LIMIT {KNN_CANDIDATES}
+            ) candidates
+            ORDER BY knn_d, osm_id
             LIMIT 1
         ) o ON TRUE
+        ORDER BY s.stop_uid
         """
     ).bindparams(
         # expanding=True turns "IN :param" into "IN (v1, v2, ...)".
@@ -172,11 +200,22 @@ def nearest_transit_nodes(engine: Engine, schema: OsmSchema) -> pd.DataFrame:
         rows = conn.execute(sql).mappings().all()
     frame = pd.DataFrame(
         rows,
-        columns=["stop_uid", "feed_id", "stop_id", "location_type",
-                 "osm_id", "osm_kind", "osm_name", "distance_m"],
+        columns=[
+            "stop_uid",
+            "feed_id",
+            "stop_id",
+            "location_type",
+            "osm_id",
+            "osm_kind",
+            "osm_name",
+            "distance_m",
+        ],
     )
-    log.info("OSM match: %d stops queried, %d with a candidate node",
-             len(frame), int(frame["osm_id"].notna().sum()))
+    log.info(
+        "OSM match: %d stops queried, %d with a candidate node",
+        len(frame),
+        int(frame["osm_id"].notna().sum()),
+    )
     return frame
 
 
@@ -201,8 +240,11 @@ def score_matches(matches: pd.DataFrame, threshold_m: float) -> pd.DataFrame:
     result = matches.copy()
     distance = pd.to_numeric(result["distance_m"], errors="coerce")
     distance_score = (1 - distance / threshold_m).clip(lower=0.0, upper=1.0)
-    compat = result.apply(lambda r: type_score(r["location_type"], r["osm_kind"]), axis=1) \
-        if not result.empty else pd.Series(dtype=float)
+    compat = (
+        result.apply(lambda r: type_score(r["location_type"], r["osm_kind"]), axis=1)
+        if not result.empty
+        else pd.Series(dtype=float)
+    )
     confidence = (distance_score * compat).round(3)
     result["match_confidence"] = confidence.fillna(0.0)
     result["needs_review"] = (

@@ -79,9 +79,7 @@ def test_blank_stop_id_dropped(tmp_path: Path) -> None:
     files = feed_files(
         replace={
             "stops.txt": (
-                "stop_id,stop_name,stop_lat,stop_lon\n"
-                ",No id,40.0,-75.0\n"
-                "S1,Ok,40.0,-75.0\n"
+                "stop_id,stop_name,stop_lat,stop_lon\n,No id,40.0,-75.0\nS1,Ok,40.0,-75.0\n"
             )
         }
     )
@@ -114,7 +112,7 @@ def test_stops_csv_normalizes_into_the_common_schema(tmp_path: Path) -> None:
     assert list(stops.columns) == list(STOP_COLUMNS) + ["geometry"]
     assert stops["stop_uid"].tolist() == ["extra_stops:C1", "extra_stops:C2"]
     assert stops["feed_id"].tolist() == ["extra_stops", "extra_stops"]
-    assert stops["location_type"].tolist() == [0, 0]      # defaulted, as for GTFS
+    assert stops["location_type"].tolist() == [0, 0]  # defaulted, as for GTFS
     assert stops["parent_station"].isna().all()
     assert stops.crs == CRS
     assert not findings

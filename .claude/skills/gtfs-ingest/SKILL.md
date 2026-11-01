@@ -36,5 +36,7 @@ reproducible and every change must keep the tests green**.
 ## Before you finish a change
 
 - `.venv/Scripts/python.exe -m pytest tests -q` passes (DB tests self-skip without a database).
+- `ruff check .` and `ruff format --check .` pass (CI blocks on both).
 - `DOCS_NO_INTERSPHINX=1 .venv/Scripts/python.exe -m sphinx -b html -W --keep-going docs <tmp>` passes. CI runs it with `-W`, so broken docstring markup fails the build.
 - README / `docs/guide/` updated if behaviour or defaults changed.
+- The plan and a change log are saved as `plans/YYYY-MM-DD-<topic>.md` and `plans/YYYY-MM-DD-<topic>-changes.md`. The `plans/` folder is git-ignored; never commit it.

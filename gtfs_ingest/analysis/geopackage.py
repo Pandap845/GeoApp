@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import geopandas as gpd
 import pandas as pd
@@ -24,9 +23,18 @@ GEOPACKAGE_NAME = "transit_analysis.gpkg"
 
 #: ID matches near_stations.csv; stop_num_id is the database join key.
 STOPS_LAYER_COLUMNS = [
-    "ID", "stop_num_id", "stop_uid", "feed_id", "stop_id", "station",
-    "system", "location_type", "parent_station", "stop_line_ids",
-    "near_stations", "same_line_stations",
+    "ID",
+    "stop_num_id",
+    "stop_uid",
+    "feed_id",
+    "stop_id",
+    "station",
+    "system",
+    "location_type",
+    "parent_station",
+    "stop_line_ids",
+    "near_stations",
+    "same_line_stations",
 ]
 
 
@@ -35,9 +43,9 @@ def write_geopackage(
     near: pd.DataFrame,
     stop_pairs: pd.DataFrame,
     out_dir: Path,
-    route_shapes: Optional[gpd.GeoDataFrame] = None,
-    stop_links: Optional[pd.DataFrame] = None,
-    station_edges: Optional[gpd.GeoDataFrame] = None,
+    route_shapes: gpd.GeoDataFrame | None = None,
+    stop_links: pd.DataFrame | None = None,
+    station_edges: gpd.GeoDataFrame | None = None,
 ) -> Path:
     """Write the GeoPackage, replacing any previous one. Optional layers are skipped when empty."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -66,7 +74,12 @@ def write_geopackage(
     log.info(
         "GeoPackage written: %s (stops: %d, near_links: %d, route_shapes: %d, "
         "route_stop_links: %d, station_network: %d)",
-        path, len(stops_layer), len(links_layer), n_shapes, n_route_links, n_station_edges,
+        path,
+        len(stops_layer),
+        len(links_layer),
+        n_shapes,
+        n_route_links,
+        n_station_edges,
     )
     return path
 
@@ -74,11 +87,25 @@ def write_geopackage(
 def _stops_layer(stops: gpd.GeoDataFrame, near: pd.DataFrame) -> gpd.GeoDataFrame:
     """Stop points with the near_stations columns merged in."""
     layer = stops[
-        ["stop_num_id", "stop_uid", "feed_id", "stop_id",
-         "location_type", "parent_station", "geometry"]
+        [
+            "stop_num_id",
+            "stop_uid",
+            "feed_id",
+            "stop_id",
+            "location_type",
+            "parent_station",
+            "geometry",
+        ]
     ].copy()
-    extra_cols = ["stop_uid", "ID", "station", "system", "stop_line_ids",
-                  "near_stations", "same_line_stations"]
+    extra_cols = [
+        "stop_uid",
+        "ID",
+        "station",
+        "system",
+        "stop_line_ids",
+        "near_stations",
+        "same_line_stations",
+    ]
     extras = near[extra_cols] if not near.empty else pd.DataFrame(columns=extra_cols)
     layer = layer.merge(extras, on="stop_uid", how="left")
     layer["ID"] = pd.to_numeric(layer["ID"], errors="coerce").fillna(0).astype(int)
@@ -89,8 +116,9 @@ def _stops_layer(stops: gpd.GeoDataFrame, near: pd.DataFrame) -> gpd.GeoDataFram
     layer["same_line_stations"] = layer["same_line_stations"].fillna("[]")
     # GeoPackage strings can't be NaN; use None.
     layer["parent_station"] = layer["parent_station"].where(layer["parent_station"].notna(), None)
-    gdf = gpd.GeoDataFrame(layer[STOPS_LAYER_COLUMNS + ["geometry"]],
-                           geometry="geometry", crs=stops.crs or "EPSG:4326")
+    gdf = gpd.GeoDataFrame(
+        layer[STOPS_LAYER_COLUMNS + ["geometry"]], geometry="geometry", crs=stops.crs or "EPSG:4326"
+    )
     return gdf
 
 
@@ -98,13 +126,14 @@ def _near_links_layer(stops: gpd.GeoDataFrame, stop_pairs: pd.DataFrame) -> gpd.
     """One line per walkable stop pair, with distance and walking minutes."""
     columns = ["num_id_a", "num_id_b", "stop_uid_a", "stop_uid_b", "distance_m", "walk_min"]
     if stop_pairs.empty:
-        return gpd.GeoDataFrame(pd.DataFrame(columns=columns),
-                                geometry=gpd.GeoSeries([], crs="EPSG:4326"))
+        return gpd.GeoDataFrame(
+            pd.DataFrame(columns=columns), geometry=gpd.GeoSeries([], crs="EPSG:4326")
+        )
     geom_by_uid = stops.set_index("stop_uid")["geometry"]
     pairs = stop_pairs[
         stop_pairs["stop_uid_a"].isin(geom_by_uid.index)
         & stop_pairs["stop_uid_b"].isin(geom_by_uid.index)
-    ].copy()
+    ].sort_values(["stop_uid_a", "stop_uid_b"], kind="mergesort")
     pairs["num_id_a"] = pairs["stop_uid_a"].map(numeric_stop_id)
     pairs["num_id_b"] = pairs["stop_uid_b"].map(numeric_stop_id)
     pairs["walk_min"] = walk_minutes(pairs["distance_m"])
@@ -117,25 +146,33 @@ def _near_links_layer(stops: gpd.GeoDataFrame, stop_pairs: pd.DataFrame) -> gpd.
 
 
 def _route_stop_links_layer(
-    stops: gpd.GeoDataFrame, stop_links: Optional[pd.DataFrame]
+    stops: gpd.GeoDataFrame, stop_links: pd.DataFrame | None
 ) -> gpd.GeoDataFrame:
     """One line per consecutive stop pair; pairs with a stop lacking geometry are skipped."""
-    columns = ["route_uid", "feed_id", "linea", "direction_id",
-               "stop_uid_a", "stop_uid_b", "travel_min"]
+    columns = [
+        "route_uid",
+        "feed_id",
+        "linea",
+        "direction_id",
+        "stop_uid_a",
+        "stop_uid_b",
+        "travel_min",
+    ]
     if stop_links is None or stop_links.empty:
-        return gpd.GeoDataFrame(pd.DataFrame(columns=columns),
-                                geometry=gpd.GeoSeries([], crs="EPSG:4326"))
+        return gpd.GeoDataFrame(
+            pd.DataFrame(columns=columns), geometry=gpd.GeoSeries([], crs="EPSG:4326")
+        )
     geom_by_uid = stops.drop_duplicates("stop_uid").set_index("stop_uid")["geometry"]
     links = stop_links.copy()
     if "travel_min" not in links.columns:
         links["travel_min"] = None
     links = links[
-        links["stop_uid_a"].isin(geom_by_uid.index)
-        & links["stop_uid_b"].isin(geom_by_uid.index)
+        links["stop_uid_a"].isin(geom_by_uid.index) & links["stop_uid_b"].isin(geom_by_uid.index)
     ].copy()
     lines = [
         LineString([geom_by_uid[a], geom_by_uid[b]])
         for a, b in zip(links["stop_uid_a"], links["stop_uid_b"])
     ]
-    return gpd.GeoDataFrame(links[columns].reset_index(drop=True), geometry=lines,
-                            crs=stops.crs or "EPSG:4326")
+    return gpd.GeoDataFrame(
+        links[columns].reset_index(drop=True), geometry=lines, crs=stops.crs or "EPSG:4326"
+    )

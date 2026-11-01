@@ -7,7 +7,6 @@ are reloaded in full each run because their rows can span feeds.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import pandas as pd
 from sqlalchemy import Engine, text
@@ -129,6 +128,7 @@ _TABLES: dict[str, bool] = {
     "stop_equivalences": False,
 }
 
+
 def ensure_analysis_schema(engine: Engine) -> None:
     """Create the four analysis tables and their indexes if missing."""
     with engine.begin() as conn:
@@ -160,7 +160,7 @@ def replace_feed_rows(engine: Engine, table: str, feed_id: str, df: pd.DataFrame
     return len(df)
 
 
-def fetch_osm_matches(engine: Engine, feed_ids: list[str]) -> Optional[pd.DataFrame]:
+def fetch_osm_matches(engine: Engine, feed_ids: list[str]) -> pd.DataFrame | None:
     """OSM match rows for these feeds, or None if the table can't be read.
 
     The table exists only after conflate-osm has run; None makes the sidecar
@@ -168,7 +168,7 @@ def fetch_osm_matches(engine: Engine, feed_ids: list[str]) -> Optional[pd.DataFr
     """
     sql = text(
         "SELECT stop_uid, osm_id, distance_m, match_confidence, needs_review "
-        "FROM stop_osm_matches WHERE feed_id = ANY(:feeds)"
+        "FROM stop_osm_matches WHERE feed_id = ANY(:feeds) ORDER BY stop_uid"
     )
     try:
         with engine.connect() as conn:

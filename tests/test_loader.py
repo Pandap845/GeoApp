@@ -91,7 +91,7 @@ def test_discovers_explicit_csv_as_stops_only_feed(tmp_path: Path) -> None:
 
     assert source.kind == "csv"
     assert source.is_stops_only is True
-    assert source.feed_id == "extra_stops"   # extension dropped, like a .zip
+    assert source.feed_id == "extra_stops"  # extension dropped, like a .zip
 
 
 def test_csv_in_collection_dir_is_not_discovered(tmp_path: Path) -> None:
@@ -116,7 +116,7 @@ def test_directory_named_like_a_zip_is_still_a_dir(tmp_path: Path) -> None:
 def test_load_csv_seeds_stops_table_without_partridge(tmp_path: Path) -> None:
     loaded = load_stops_csv_feed(tmp_path, "extra_stops.csv")
 
-    assert loaded.feed is None            # no partridge object in play
+    assert loaded.feed is None  # no partridge object in play
     assert loaded.load_error is None
     assert loaded.files_present == {"stops.txt"}
     stops = loaded.table("stops.txt")

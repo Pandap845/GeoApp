@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,19 +42,25 @@ TRANSPORT_MODE_MAP: dict[str, tuple[str, str]] = {
 DEFAULT_TRANSIT_MODE: tuple[str, str] = ("transit", "bus")
 
 EXCEL_HEADER: tuple[str, ...] = (
-    "ID", "Nombre_Estación", "Modalidad", "Línea", "Latitud", "Longitud", "Estacion_Proxima",
+    "ID",
+    "Nombre_Estación",
+    "Modalidad",
+    "Línea",
+    "Latitud",
+    "Longitud",
+    "Estacion_Proxima",
 )
 
 
 class LocatorConfig(BaseModel):
     """Configuration of one locate-stations run (api_key comes from the environment only)."""
 
-    stations_file: Optional[Path] = None
+    stations_file: Path | None = None
     report_dir: Path = Path("out")
     enabled: bool = False
-    api_key: Optional[str] = Field(default=None, repr=False)
+    api_key: str | None = Field(default=None, repr=False)
     transport_type: str = "SITREN"
-    line: Optional[str] = None
+    line: str | None = None
     language: str = "es"
     region: str = "mx"
     search_radius_m: float = Field(default=3000.0, gt=0)
@@ -72,12 +78,12 @@ class StationRow(BaseModel):
 
     index: int
     name: str
-    lat: Optional[float] = None
-    lon: Optional[float] = None
-    source: Optional[str] = None        # "text_search" | "geocoding" | None
-    next_name: Optional[str] = None     # directed edge: this -> next station
-    next_minutes: Optional[float] = None
-    next_source: Optional[str] = None   # "real" | "estimado" | "generico"
+    lat: float | None = None
+    lon: float | None = None
+    source: str | None = None  # "text_search" | "geocoding" | None
+    next_name: str | None = None  # directed edge: this -> next station
+    next_minutes: float | None = None
+    next_source: str | None = None  # "real" | "estimado" | "generico"
 
 
 class LocatorReport(BaseModel):
@@ -95,7 +101,7 @@ class LocatorReport(BaseModel):
     edges_real: int = 0
     edges_estimated: int = 0
     edges_generic: int = 0
-    excel_file: Optional[str] = None
+    excel_file: str | None = None
     notes: list[str] = Field(default_factory=list)
 
 
@@ -107,7 +113,7 @@ def read_station_list(path: Path) -> list[str]:
     return names
 
 
-def build_query(station: str, transport_type: str, line: Optional[str]) -> str:
+def build_query(station: str, transport_type: str, line: str | None) -> str:
     """Spanish Text Search query, as the original app builds it."""
     query = f"Estación {transport_type} {station}".strip()
     if line:
@@ -137,8 +143,8 @@ def _resolve_station(
     client: GooglePlacesClient,
     config: LocatorConfig,
     station: str,
-    anchor: Optional[tuple[float, float]],
-) -> tuple[Optional[float], Optional[float], Optional[str]]:
+    anchor: tuple[float, float] | None,
+) -> tuple[float | None, float | None, str | None]:
     """Return (lat, lon, source) for one station, or Nones if both APIs fail.
 
     Uses the first Text Search hit (the bias toward the anchor makes it reliable).
@@ -153,7 +159,7 @@ def _resolve_station(
         language=config.language,
         region=config.region,
     )
-    recommended: Optional[str] = None
+    recommended: str | None = None
     if places:
         recommended = places[0].name
         coords = places[0].coords
@@ -171,7 +177,7 @@ def run_station_locator(config: LocatorConfig) -> LocatorReport:
     Raises:
         ValueError: enabled without a readable stations file.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     report = LocatorReport(
         generated_at=now.isoformat(timespec="seconds"),
         status="ran",
@@ -220,7 +226,7 @@ def run_station_locator(config: LocatorConfig) -> LocatorReport:
     budget_hit = False
     try:
         # Resolve every station; each success becomes the next anchor.
-        anchor: Optional[tuple[float, float]] = None
+        anchor: tuple[float, float] | None = None
         for row in rows:
             try:
                 lat, lon, source = _resolve_station(client, config, row.name, anchor)
@@ -235,19 +241,23 @@ def run_station_locator(config: LocatorConfig) -> LocatorReport:
         use_matrix = config.use_distance_matrix and not budget_hit
         mode, transit_mode = transit_mode_for(config.transport_type)
         generic = round(config.max_route_minutes / len(stations), 1)
-        for current, nxt in zip(rows, rows[1:]):
+        for current, nxt in pairwise(rows):
             current.next_name = nxt.name
             if None in (current.lat, current.lon, nxt.lat, nxt.lon):
                 current.next_minutes, current.next_source = generic, "generico"
                 continue
             origin = (current.lat, current.lon)
             destination = (nxt.lat, nxt.lon)
-            minutes: Optional[float] = None
+            minutes: float | None = None
             if use_matrix:
                 try:
                     minutes = client.travel_time_minutes(
-                        origin, destination, mode, transit_mode,
-                        config.language, config.region,
+                        origin,
+                        destination,
+                        mode,
+                        transit_mode,
+                        config.language,
+                        config.region,
                     )
                 except CallBudgetExhausted:
                     budget_hit = True
@@ -288,8 +298,12 @@ def run_station_locator(config: LocatorConfig) -> LocatorReport:
     log.info(
         "Station locator complete: %d/%d station(s) resolved with %d call(s); "
         "%d real / %d estimated / %d generic edge time(s)",
-        report.stations_total - len(report.unresolved), report.stations_total,
-        report.calls_made, report.edges_real, report.edges_estimated, report.edges_generic,
+        report.stations_total - len(report.unresolved),
+        report.stations_total,
+        report.calls_made,
+        report.edges_real,
+        report.edges_estimated,
+        report.edges_generic,
     )
     return report
 
@@ -308,7 +322,15 @@ def _write_excel(rows: list[StationRow], config: LocatorConfig, path: Path) -> N
         else:
             proxima = "N/A"
         sheet.append(
-            [row.index, row.name, config.transport_type, config.line or "", row.lat, row.lon, proxima]
+            [
+                row.index,
+                row.name,
+                config.transport_type,
+                config.line or "",
+                row.lat,
+                row.lon,
+                proxima,
+            ]
         )
     workbook.save(path)
     log.info("Route exported to %s", path)
@@ -327,8 +349,10 @@ def _markdown(report: LocatorReport) -> str:
         "",
         f"Generated: {report.generated_at}  ",
         f"Status: **{report.status}**  ",
-        f"API calls: {report.calls_made} of {report.max_calls} "
-        f"(remaining budget: {report.budget_remaining})",
+        (
+            f"API calls: {report.calls_made} of {report.max_calls} "
+            f"(remaining budget: {report.budget_remaining})"
+        ),
         "",
         "## Resolution",
         "",

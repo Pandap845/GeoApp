@@ -10,7 +10,7 @@ dedupe.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from itertools import pairwise
 
 import geopandas as gpd
 import networkx as nx
@@ -39,13 +39,13 @@ MODE_NAMES: dict[int, str] = {
 
 #: Extended route_type ranges (TPEG / Google extension) -> basic code.
 _EXTENDED_RANGES: tuple[tuple[int, int, int], ...] = (
-    (100, 199, 2),    # railway service        -> rail
-    (200, 299, 3),    # coach service          -> bus
-    (400, 404, 1),    # urban railway/metro    -> metro
-    (405, 405, 12),   # monorail
-    (700, 799, 3),    # bus service            -> bus
-    (800, 899, 11),   # trolleybus
-    (900, 999, 0),    # tram service           -> tram
+    (100, 199, 2),  # railway service        -> rail
+    (200, 299, 3),  # coach service          -> bus
+    (400, 404, 1),  # urban railway/metro    -> metro
+    (405, 405, 12),  # monorail
+    (700, 799, 3),  # bus service            -> bus
+    (800, 899, 11),  # trolleybus
+    (900, 999, 0),  # tram service           -> tram
     (1000, 1099, 4),  # water transport        -> ferry
     (1200, 1299, 4),  # ferry
     (1300, 1399, 6),  # aerial lift
@@ -53,13 +53,21 @@ _EXTENDED_RANGES: tuple[tuple[int, int, int], ...] = (
 )
 
 CLUSTER_COLUMNS = [
-    "cluster_id", "is_multimodal", "stop_count", "physical_stop_count",
-    "modes", "mode_names",
-    "member_stop_uids", "routes", "feed_ids", "centroid_wkt", "hull_wkt",
+    "cluster_id",
+    "is_multimodal",
+    "stop_count",
+    "physical_stop_count",
+    "modes",
+    "mode_names",
+    "member_stop_uids",
+    "routes",
+    "feed_ids",
+    "centroid_wkt",
+    "hull_wkt",
 ]
 
 
-def normalize_route_type(route_type: object) -> Optional[int]:
+def normalize_route_type(route_type: object) -> int | None:
     """Basic 0-12 code for a basic or extended route_type; None if unparseable."""
     try:
         code = int(float(route_type))  # tolerate "3", 3, "3.0"
@@ -82,8 +90,8 @@ def cluster_stops(
     stops: gpd.GeoDataFrame,
     eps_m: float = 120.0,
     min_samples: int = 2,
-    metric_crs: Optional[str] = None,
-    canonical: Optional[pd.DataFrame] = None,
+    metric_crs: str | None = None,
+    canonical: pd.DataFrame | None = None,
 ) -> np.ndarray:
     """Cluster label per stop row (-1 = no cluster); deterministic for the same input."""
     n = len(stops)
@@ -98,19 +106,19 @@ def cluster_stops(
     graph.add_nodes_from(range(n))
     # Join stops that share a DBSCAN cluster, a parent station or a dedupe group.
     order = np.argsort(dbscan_labels, kind="stable")
-    for prev, cur in zip(order, order[1:]):
+    for prev, cur in pairwise(order):
         if dbscan_labels[prev] == dbscan_labels[cur] and dbscan_labels[cur] != -1:
             graph.add_edge(int(prev), int(cur))
     pos_by_uid = {uid: i for i, uid in enumerate(stops["stop_uid"])}
     stations = station_map(pd.DataFrame(stops.drop(columns="geometry")))
     for _, group in stations.groupby("station_uid"):
         members = [pos_by_uid[u] for u in group["stop_uid"] if u in pos_by_uid]
-        for prev, cur in zip(members, members[1:]):
+        for prev, cur in pairwise(members):
             graph.add_edge(prev, cur)
     if canonical is not None and not canonical.empty:
         for _, group in canonical.groupby("canonical_uid"):
             members = [pos_by_uid[u] for u in sorted(group["stop_uid"]) if u in pos_by_uid]
-            for prev, cur in zip(members, members[1:]):
+            for prev, cur in pairwise(members):
                 graph.add_edge(prev, cur)
 
     labels = np.full(n, -1, dtype=int)
@@ -121,7 +129,9 @@ def cluster_stops(
             labels[i] = cluster_id
     log.info(
         "Clustering: %d stops -> %d clusters (%d stops unclustered)",
-        n, len(components), int((labels == -1).sum()),
+        n,
+        len(components),
+        int((labels == -1).sum()),
     )
     return labels
 
@@ -131,17 +141,20 @@ def build_interchanges(
     labels: np.ndarray,
     route_stops: pd.DataFrame,
     routes: pd.DataFrame,
-    canonical: Optional[pd.DataFrame] = None,
+    canonical: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One row per cluster: modes, members, routes, feeds, centroid and hull (WKT)."""
-    route_types: dict[str, Optional[int]] = {}
+    route_types: dict[str, int | None] = {}
     if not routes.empty and "route_type" in routes.columns:
         route_types = {
             r["route_uid"]: normalize_route_type(r["route_type"])
             for r in routes[["route_uid", "route_type"]].to_dict("records")
         }
-    routes_by_stop = route_stops.groupby("stop_uid")["route_uid"].agg(set) if not route_stops.empty \
+    routes_by_stop = (
+        route_stops.groupby("stop_uid")["route_uid"].agg(set)
+        if not route_stops.empty
         else pd.Series(dtype=object)
+    )
     canon_of: dict[str, str] = {}
     if canonical is not None and not canonical.empty:
         canon_of = dict(zip(canonical["stop_uid"], canonical["canonical_uid"]))

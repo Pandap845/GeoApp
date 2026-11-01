@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 import geopandas as gpd
 import numpy as np
@@ -57,6 +56,7 @@ def fetch_walk_lines(
         WHERE l.highway IS NOT NULL
           AND l.highway NOT IN :excluded
           AND ST_Intersects(ST_Transform(l.{geom_column}, 4326), a.hull)
+        ORDER BY l.osm_id, wkt
         """
     ).bindparams(
         bindparam("excluded", value=list(EXCLUDED_HIGHWAYS), expanding=True),
@@ -91,7 +91,7 @@ def build_walk_graph(
     b = np.concatenate(ends)
     all_pts = np.round(np.concatenate([a, b]) / _MERGE_M) * _MERGE_M
     node_xy, inverse = np.unique(all_pts, axis=0, return_inverse=True)
-    u, v = inverse[: len(a)], inverse[len(a):]
+    u, v = inverse[: len(a)], inverse[len(a) :]
     w = np.hypot(a[:, 0] - b[:, 0], a[:, 1] - b[:, 1])
     keep = (u != v) & (w > 0)
     u, v, w = u[keep], v[keep], w[keep]
@@ -145,9 +145,7 @@ def pair_network_distances(
 
     network = np.full(len(result), np.nan)
     if by_vertex:
-        graph = csr_matrix(
-            (weights, indices, indptr), shape=(len(node_xy), len(node_xy))
-        )
+        graph = csr_matrix((weights, indices, indptr), shape=(len(node_xy), len(node_xy)))
         a_uids = result["stop_uid_a"].to_numpy()
         b_uids = result["stop_uid_b"].to_numpy()
         source_vertices = sorted(by_vertex)
@@ -177,9 +175,12 @@ def _finalize_pairs(pairs: pd.DataFrame) -> pd.DataFrame:
     log.info(
         "Walk network: %d/%d near pair(s) routed on streets (%d fell back to "
         "straight line); mean detour %.0f%%",
-        int(routed.sum()), len(pairs), int((~routed).sum()),
+        int(routed.sum()),
+        len(pairs),
+        int((~routed).sum()),
         ((pairs.loc[measurable, "distance_m"] / pairs.loc[measurable, "line_m"]).mean() - 1) * 100
-        if measurable.any() else 0.0,
+        if measurable.any()
+        else 0.0,
     )
     return pairs.drop(columns=["network_m"])
 
@@ -190,7 +191,7 @@ def _build_or_load_graph(
     crs: str,
     line_table: str,
     geom_column: str,
-    cache_dir: Optional[Path],
+    cache_dir: Path | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Load the walk graph from the cache, or build (and cache) it."""
     key = None
@@ -205,7 +206,9 @@ def _build_or_load_graph(
             if cached is not None:
                 log.info(
                     "Walk graph cache hit (%s): %d vertices loaded in %.2fs",
-                    key[:12], len(cached[0]), time.perf_counter() - started,
+                    key[:12],
+                    len(cached[0]),
+                    time.perf_counter() - started,
                 )
                 return cached
         except Exception as exc:  # noqa: BLE001 - caching must never break a run
@@ -217,7 +220,8 @@ def _build_or_load_graph(
     node_xy, indptr, indices, weights = build_walk_graph(lines.to_crs(crs))
     log.info(
         "Walk graph built in %.1fs (%d vertices)%s",
-        time.perf_counter() - started, len(node_xy),
+        time.perf_counter() - started,
+        len(node_xy),
         "" if key is None else "; caching",
     )
     if key is not None:
@@ -233,11 +237,11 @@ def network_distances(
     stops: gpd.GeoDataFrame,
     stop_pairs: pd.DataFrame,
     feed_ids: list[str],
-    metric_crs: Optional[str] = None,
+    metric_crs: str | None = None,
     cutoff_m: float = 800.0,
     line_table: str = "planet_osm_line",
     geom_column: str = "way",
-    cache_dir: Optional[Path] = None,
+    cache_dir: Path | None = None,
 ) -> pd.DataFrame:
     """Replace pair distances with street walking distances where a path exists.
 
@@ -252,6 +256,5 @@ def network_distances(
 
     projected = stops.drop_duplicates("stop_uid").set_index("stop_uid").geometry.to_crs(crs)
     stop_xy = pd.DataFrame({"x": projected.x, "y": projected.y})
-    pairs = pair_network_distances(node_xy, indptr, indices, weights,
-                                   stop_xy, stop_pairs, cutoff_m)
+    pairs = pair_network_distances(node_xy, indptr, indices, weights, stop_xy, stop_pairs, cutoff_m)
     return _finalize_pairs(pairs)

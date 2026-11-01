@@ -27,8 +27,7 @@ VALID_FEED: dict[str, str] = {
         "S3,Central Platform,40.0101,-75.0099,0,S2\n"
     ),
     "routes.txt": (
-        "route_id,agency_id,route_short_name,route_long_name,route_type\n"
-        "R1,A1,10,Main Line,3\n"
+        "route_id,agency_id,route_short_name,route_long_name,route_type\nR1,A1,10,Main Line,3\n"
     ),
     "trips.txt": "route_id,service_id,trip_id\nR1,WK,T1\n",
     "stop_times.txt": (
@@ -41,8 +40,7 @@ VALID_FEED: dict[str, str] = {
         "WK,1,1,1,1,1,0,0,20260101,20261231\n"
     ),
     "feed_info.txt": (
-        "feed_publisher_name,feed_publisher_url,feed_lang\n"
-        "Metro Transit,https://metro.example,en\n"
+        "feed_publisher_name,feed_publisher_url,feed_lang\nMetro Transit,https://metro.example,en\n"
     ),
 }
 
@@ -85,9 +83,7 @@ def load_dir_feed(base: Path, name: str, files: dict[str, str]) -> LoadedFeed:
 #: A stops-only CSV whose two stops sit ~35 m and ~90 m from VALID_FEED's S1
 #: (40.0, -75.0), close enough to become proximity neighbours of it.
 STOPS_CSV: str = (
-    "id,name,latitude,longitude\n"
-    "C1,Main St Kiosk,40.0003,-75.0\n"
-    "C2,Market Corner,40.0,-75.001\n"
+    "id,name,latitude,longitude\nC1,Main St Kiosk,40.0003,-75.0\nC2,Market Corner,40.0,-75.001\n"
 )
 
 

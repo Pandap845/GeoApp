@@ -10,7 +10,7 @@ labelled with its strongest connection.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import geopandas as gpd
 import pandas as pd
@@ -20,7 +20,11 @@ log = logging.getLogger(__name__)
 
 PAIR_KEY = ["route_a", "route_b"]
 EDGE_COLUMNS = PAIR_KEY + [
-    "feed_id_a", "feed_id_b", "connection_type", "shared_stop_count", "min_stop_distance_m",
+    "feed_id_a",
+    "feed_id_b",
+    "connection_type",
+    "shared_stop_count",
+    "min_stop_distance_m",
 ]
 
 
@@ -75,6 +79,7 @@ def proximity_pairs_postgis(
           ON a.stop_uid < b.stop_uid
          AND ST_DWithin(a.geom::geography, b.geom::geography, :threshold)
         WHERE a.feed_id = ANY(:feeds) AND b.feed_id = ANY(:feeds)
+        ORDER BY a.stop_uid, b.stop_uid
         """
     )
     with engine.connect() as conn:
@@ -96,13 +101,15 @@ def proximity_pairs_local(stops: gpd.GeoDataFrame, threshold_m: float) -> pd.Dat
     distances = joined.geometry.distance(
         gpd.GeoSeries(right_geoms, index=joined.index, crs=projected.crs)
     )
-    return pd.DataFrame(
+    pairs = pd.DataFrame(
         {
             "stop_uid_a": joined["stop_uid_left"].to_numpy(),
             "stop_uid_b": joined["stop_uid_right"].to_numpy(),
             "distance_m": distances.to_numpy(),
         }
     )
+    # Same order as the PostGIS query.
+    return pairs.sort_values(["stop_uid_a", "stop_uid_b"], kind="mergesort").reset_index(drop=True)
 
 
 def _normalize_pairs(df: pd.DataFrame) -> pd.DataFrame:
@@ -121,9 +128,7 @@ def _same_stop_pairs(route_stops: pd.DataFrame) -> pd.DataFrame:
     )
     if pairs.empty:
         return pd.DataFrame(columns=PAIR_KEY + ["shared_stop_count"])
-    return (
-        pairs.groupby(PAIR_KEY)["stop_uid"].nunique().rename("shared_stop_count").reset_index()
-    )
+    return pairs.groupby(PAIR_KEY)["stop_uid"].nunique().rename("shared_stop_count").reset_index()
 
 
 def _parent_station_pairs(route_stops: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
@@ -140,9 +145,7 @@ def _dedup_station_pairs(route_stops: pd.DataFrame, canonical: pd.DataFrame) -> 
     """Route pairs serving stops of the same dedupe group."""
     if canonical.empty:
         return pd.DataFrame(columns=PAIR_KEY)
-    with_canon = route_stops.merge(
-        canonical[["stop_uid", "canonical_uid"]], on="stop_uid"
-    )
+    with_canon = route_stops.merge(canonical[["stop_uid", "canonical_uid"]], on="stop_uid")
     joined = with_canon.merge(with_canon, on="canonical_uid", suffixes=("_a", "_b"))
     pairs = _normalize_pairs(
         joined.rename(columns={"route_uid_a": "route_a", "route_uid_b": "route_b"})
@@ -155,23 +158,24 @@ def _proximity_pairs(route_stops: pd.DataFrame, stop_pairs: pd.DataFrame) -> pd.
     if stop_pairs.empty:
         return pd.DataFrame(columns=PAIR_KEY + ["min_stop_distance_m"])
     routes_at = route_stops[["stop_uid", "route_uid"]]
-    joined = (
-        stop_pairs.merge(routes_at.rename(columns={"stop_uid": "stop_uid_a", "route_uid": "route_a"}), on="stop_uid_a")
-        .merge(routes_at.rename(columns={"stop_uid": "stop_uid_b", "route_uid": "route_b"}), on="stop_uid_b")
+    joined = stop_pairs.merge(
+        routes_at.rename(columns={"stop_uid": "stop_uid_a", "route_uid": "route_a"}),
+        on="stop_uid_a",
+    ).merge(
+        routes_at.rename(columns={"stop_uid": "stop_uid_b", "route_uid": "route_b"}),
+        on="stop_uid_b",
     )
     pairs = _normalize_pairs(joined)
     if pairs.empty:
         return pd.DataFrame(columns=PAIR_KEY + ["min_stop_distance_m"])
-    return (
-        pairs.groupby(PAIR_KEY)["distance_m"].min().rename("min_stop_distance_m").reset_index()
-    )
+    return pairs.groupby(PAIR_KEY)["distance_m"].min().rename("min_stop_distance_m").reset_index()
 
 
 def build_edges(
     route_stops: pd.DataFrame,
     stations: pd.DataFrame,
-    stop_pairs: Optional[pd.DataFrame] = None,
-    canonical: Optional[pd.DataFrame] = None,
+    stop_pairs: pd.DataFrame | None = None,
+    canonical: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One row per connected route pair, labelled with its strongest connection type."""
     if route_stops.empty:
@@ -214,6 +218,7 @@ def build_edges(
     log.info(
         "Connectivity: %d route pairs (%s)",
         len(result),
-        ", ".join(f"{k}={v}" for k, v in result["connection_type"].value_counts().items()) or "none",
+        ", ".join(f"{k}={v}" for k, v in result["connection_type"].value_counts().items())
+        or "none",
     )
     return result

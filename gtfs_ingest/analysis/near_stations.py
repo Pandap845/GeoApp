@@ -3,8 +3,8 @@
 Each row lists neighbours as [(ID, station, linea, minutes), ...] sorted by
 walking time, one tuple per (neighbour, line). Conventions:
 
-- ID is a sequential 1..N row id used by every relation column; stop_uid is
-  the durable key.
+- ID is 1..N in stop_uid order and is used by every relation column. It is
+  only meaningful inside one run's files; stop_uid is the durable key.
 - linea is route_short_name, else route_id. A neighbour served by no line
   that day (a dock, a parent station) still appears, with linea "-".
 - Walking minutes = straight-line distance / 83 m/min (or the street
@@ -40,14 +40,27 @@ UNSERVED_LINE = "-"
 #: Quality sidecar columns. walk_source: network/straight_line/mixed/unsnapped/none;
 #: travel_source: observed/estimated/mixed/none; coord_confidence: score/needs_review/no_match/unavailable.
 QUALITY_COLUMNS = [
-    "ID", "stop_uid", "walk_source", "travel_source", "travel_n_obs",
-    "coord_confidence", "station_dedup",
+    "ID",
+    "stop_uid",
+    "walk_source",
+    "travel_source",
+    "travel_n_obs",
+    "coord_confidence",
+    "station_dedup",
 ]
 
 #: Exported columns (feed_id is the prefix of stop_uid, so it isn't repeated).
 COLUMNS = [
-    "ID", "stop_uid", "station", "system", "stop_id",
-    "stop_lat", "stop_lon", "stop_line_ids", "near_stations", "same_line_stations",
+    "ID",
+    "stop_uid",
+    "station",
+    "system",
+    "stop_id",
+    "stop_lat",
+    "stop_lon",
+    "stop_line_ids",
+    "near_stations",
+    "same_line_stations",
 ]
 
 #: Mean earth radius in meters.
@@ -84,12 +97,11 @@ def build_near_stations(
     stop_links: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One row per stop with its near_stations and same_line_stations lists."""
-    base = stops[
-        ["stop_uid", "stop_id", "stop_name", "stop_lat", "stop_lon"]
-    ].copy()
+    base = stops[["stop_uid", "stop_id", "stop_name", "stop_lat", "stop_lon"]].copy()
     base = base.rename(columns={"stop_name": "station"})
     base["station"] = base["station"].fillna("")
-    # Sequential id, 1..N in row order.
+    # Number by stop_uid so the IDs don't depend on input row order.
+    base = base.sort_values("stop_uid", kind="mergesort").reset_index(drop=True)
     base.insert(0, "ID", range(1, len(base) + 1))
 
     lines_at = _lines_at_stops(route_stops, routes)
@@ -117,10 +129,19 @@ def build_near_stations(
         base["near_stations"] = "[]"
         return base[COLUMNS]
 
-    entries = entries.sort_values(["stop_uid", "minutes", "near_station", "line"])
+    entries = entries.sort_values(
+        ["stop_uid", "minutes", "near_station", "line", "near_num_id"], kind="mergesort"
+    )
     entries["tuple"] = (
-        "(" + entries["near_num_id"].astype(str) + ", " + entries["near_station"] + ", "
-        + entries["line"].astype(str) + ", " + entries["minutes"].astype(str) + ")"
+        "("
+        + entries["near_num_id"].astype(str)
+        + ", "
+        + entries["near_station"]
+        + ", "
+        + entries["line"].astype(str)
+        + ", "
+        + entries["minutes"].astype(str)
+        + ")"
     )
     rendered = (
         entries.groupby("stop_uid")["tuple"]
@@ -162,8 +183,7 @@ def _lines_at_stops(route_stops: pd.DataFrame, routes: pd.DataFrame) -> pd.DataF
         return pd.DataFrame(columns=["stop_uid", "combo_line"])
     lines = (
         route_stops[["stop_uid", "route_uid"]]
-        .merge(_line_labels(routes), on="route_uid")
-        [["stop_uid", "line"]]
+        .merge(_line_labels(routes), on="route_uid")[["stop_uid", "line"]]
         .drop_duplicates()
         .rename(columns={"line": "combo_line"})
     )
@@ -213,9 +233,7 @@ def _near_entries(
     return entries[columns]
 
 
-def _haversine_m(
-    lat1: pd.Series, lon1: pd.Series, lat2: pd.Series, lon2: pd.Series
-) -> pd.Series:
+def _haversine_m(lat1: pd.Series, lon1: pd.Series, lat2: pd.Series, lon2: pd.Series) -> pd.Series:
     """Great-circle meters between two point series."""
     p1, p2 = np.radians(lat1), np.radians(lat2)
     dphi = np.radians(lat2 - lat1)
@@ -227,12 +245,23 @@ def _haversine_m(
 
 def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> pd.DataFrame:
     """Previous and next stop per line and direction, with scheduled (or estimated) minutes."""
-    columns = ["stop_uid", "near_num_id", "near_station", "linea", "direction_id",
-               "minutes", "travel_min", "n_obs"]
+    columns = [
+        "stop_uid",
+        "near_num_id",
+        "near_station",
+        "linea",
+        "direction_id",
+        "minutes",
+        "travel_min",
+        "n_obs",
+    ]
     if stop_links is None or stop_links.empty:
         return pd.DataFrame(columns=columns)
     keep = ["stop_uid", "near_uid", "linea", "direction_id"]
-    links = stop_links.copy()
+    # Sorted so drop_duplicates below keeps the same row whatever the feed order.
+    links = stop_links.sort_values(
+        ["stop_uid_a", "stop_uid_b", "linea", "direction_id"], kind="mergesort"
+    )
     if "travel_min" not in links.columns:
         links["travel_min"] = pd.NA
     if "n_obs" not in links.columns:
@@ -244,8 +273,11 @@ def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> p
 
     near_attr = base[["stop_uid", "ID", "station", "stop_lat", "stop_lon"]].rename(
         columns={
-            "stop_uid": "near_uid", "ID": "near_num_id",
-            "station": "near_station", "stop_lat": "near_lat", "stop_lon": "near_lon",
+            "stop_uid": "near_uid",
+            "ID": "near_num_id",
+            "station": "near_station",
+            "stop_lat": "near_lat",
+            "stop_lon": "near_lon",
         }
     )
     entries = both.merge(near_attr, on="near_uid", how="inner").merge(
@@ -255,8 +287,10 @@ def _same_line_entries(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> p
         return pd.DataFrame(columns=columns)
     entries["near_station"] = entries["near_station"].fillna("")
     estimate = (
-        _haversine_m(entries["stop_lat"], entries["stop_lon"],
-                     entries["near_lat"], entries["near_lon"]) / VEHICLE_M_PER_MIN
+        _haversine_m(
+            entries["stop_lat"], entries["stop_lon"], entries["near_lat"], entries["near_lon"]
+        )
+        / VEHICLE_M_PER_MIN
     ).round(1)
     entries["minutes"] = pd.to_numeric(entries["travel_min"], errors="coerce").fillna(estimate)
     return entries[columns]
@@ -269,12 +303,20 @@ def _attach_same_line(base: pd.DataFrame, stop_links: pd.DataFrame | None) -> pd
         base["same_line_stations"] = "[]"
         return base
     entries = entries.sort_values(
-        ["stop_uid", "linea", "direction_id", "minutes", "near_num_id"]
+        ["stop_uid", "linea", "direction_id", "minutes", "near_num_id"], kind="mergesort"
     )
     entries["tuple"] = (
-        "(" + entries["near_num_id"].astype(str) + ", " + entries["near_station"] + ", "
-        + entries["linea"].astype(str) + ", dir" + entries["direction_id"].astype(str) + ", "
-        + entries["minutes"].astype(str) + ")"
+        "("
+        + entries["near_num_id"].astype(str)
+        + ", "
+        + entries["near_station"]
+        + ", "
+        + entries["linea"].astype(str)
+        + ", dir"
+        + entries["direction_id"].astype(str)
+        + ", "
+        + entries["minutes"].astype(str)
+        + ")"
     )
     rendered = (
         entries.groupby("stop_uid")["tuple"]
@@ -303,9 +345,11 @@ def _stop_snap_m(stop_pairs: pd.DataFrame) -> pd.Series:
     snaps = pd.concat(
         [
             stop_pairs[["stop_uid_a", "snap_m_a"]].rename(
-                columns={"stop_uid_a": "stop_uid", "snap_m_a": "snap_m"}),
+                columns={"stop_uid_a": "stop_uid", "snap_m_a": "snap_m"}
+            ),
             stop_pairs[["stop_uid_b", "snap_m_b"]].rename(
-                columns={"stop_uid_b": "stop_uid", "snap_m_b": "snap_m"}),
+                columns={"stop_uid_b": "stop_uid", "snap_m_b": "snap_m"}
+            ),
         ],
         ignore_index=True,
     ).dropna(subset=["snap_m"])
@@ -376,9 +420,13 @@ def build_quality(
         matched = out["stop_uid"].isin(m.index)
         sub = m.reindex(out.loc[matched, "stop_uid"])
         verdict = np.where(
-            sub["osm_id"].isna(), "no_match",
-            np.where(sub["needs_review"], "needs_review",
-                     sub["match_confidence"].map(lambda c: f"{c:.3f}")),
+            sub["osm_id"].isna(),
+            "no_match",
+            np.where(
+                sub["needs_review"],
+                "needs_review",
+                sub["match_confidence"].map(lambda c: f"{c:.3f}"),
+            ),
         )
         conf.loc[matched] = verdict
         out["coord_confidence"] = conf

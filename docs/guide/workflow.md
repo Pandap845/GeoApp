@@ -367,7 +367,7 @@ Per stop, **two complementary relations**:
 ```
 [(ID, station, linea, minutes), …]              # times are bare numbers, always minutes
 ID            = the near stop's sequential node id (the CSV's first column:
-                1..N in row order — the key all relation columns reference;
+                1..N in stop_uid order — the key all relation columns reference;
                 stop_uid remains the durable cross-run key)
 linea         = route_short_name, falling back to route_id
 minutes       = max(1, round(distance_m / 83))   # walking; 83 m/min ≈ 5 km/h, straight-line

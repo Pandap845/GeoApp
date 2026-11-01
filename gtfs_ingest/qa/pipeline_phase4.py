@@ -8,9 +8,8 @@ report with our ids only. --dry-run makes no calls and no writes.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -27,10 +26,10 @@ QA_MD = "google_qa_report.md"
 class QaConfig(BaseModel):
     """Configuration of one google-qa run (api_key comes from the environment only)."""
 
-    database_url: Optional[str] = None
+    database_url: str | None = None
     report_dir: Path = Path("out")
     enabled: bool = False
-    api_key: Optional[str] = Field(default=None, repr=False)
+    api_key: str | None = Field(default=None, repr=False)
     max_calls: int = Field(default=200, ge=1)
     radius_m: float = Field(default=50.0, gt=0)
     interchange_radius_m: float = Field(default=150.0, gt=0)
@@ -63,7 +62,7 @@ def run_google_qa(config: QaConfig) -> QaReport:
     Raises:
         ValueError: enabled without a database URL.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     report = QaReport(
         generated_at=now.isoformat(timespec="seconds"),
         status="ran",
@@ -117,7 +116,9 @@ def run_google_qa(config: QaConfig) -> QaReport:
         for row in interchanges:
             try:
                 places = client.search_nearby(
-                    row["lat"], row["lon"], config.interchange_radius_m,
+                    row["lat"],
+                    row["lon"],
+                    config.interchange_radius_m,
                     field_mask=crosscheck.INTERCHANGE_FIELD_MASK,
                     included_types=crosscheck.TRANSIT_PLACE_TYPES,
                 )
@@ -138,7 +139,10 @@ def run_google_qa(config: QaConfig) -> QaReport:
             )
             if verdict == "CONFLICT":
                 report.conflicts.append(
-                    {"cluster_id": int(row["cluster_id"]), "our_modes": list(row["mode_names"] or [])}
+                    {
+                        "cluster_id": int(row["cluster_id"]),
+                        "our_modes": list(row["mode_names"] or []),
+                    }
                 )
 
         # Needs-review stops: check a transit place exists nearby.
@@ -146,7 +150,9 @@ def run_google_qa(config: QaConfig) -> QaReport:
             for row in stops:
                 try:
                     places = client.search_nearby(
-                        row["lat"], row["lon"], config.radius_m,
+                        row["lat"],
+                        row["lon"],
+                        config.radius_m,
                         field_mask=crosscheck.STOP_FIELD_MASK,
                         included_types=crosscheck.TRANSIT_PLACE_TYPES,
                     )
@@ -187,7 +193,10 @@ def run_google_qa(config: QaConfig) -> QaReport:
     _write(report, config.report_dir)
     log.info(
         "Google QA complete: %d interchange(s), %d stop(s) checked with %d call(s); %d conflict(s)",
-        report.checked_interchanges, report.checked_stops, report.calls_made, len(report.conflicts),
+        report.checked_interchanges,
+        report.checked_stops,
+        report.calls_made,
+        len(report.conflicts),
     )
     return report
 
@@ -212,16 +221,20 @@ def _markdown(report: QaReport) -> str:
         "",
         f"Generated: {report.generated_at}  ",
         f"Status: **{report.status}**  ",
-        f"API calls: {report.calls_made} of {report.max_calls} "
-        f"(remaining budget: {report.budget_remaining})",
+        (
+            f"API calls: {report.calls_made} of {report.max_calls} "
+            f"(remaining budget: {report.budget_remaining})"
+        ),
         "",
         "Only our identifiers and computed verdicts appear below - no Google",
         "content is stored or reported (see the README licensing note).",
         "",
         "## Eligibility",
         "",
-        f"- Multimodal interchanges: {report.eligible_interchanges} eligible, "
-        f"{report.checked_interchanges} checked",
+        (
+            f"- Multimodal interchanges: {report.eligible_interchanges} eligible, "
+            f"{report.checked_interchanges} checked"
+        ),
         f"- Needs-review stops: {report.eligible_stops} eligible, {report.checked_stops} checked",
         f"- Left unchecked (budget): {report.unchecked_due_to_budget}",
         "",

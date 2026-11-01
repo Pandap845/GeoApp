@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional, Sequence
 
 from .models import OPTIONAL_FILES, FeedReport, RunReport, Severity
 
@@ -18,11 +18,11 @@ MARKDOWN_NAME = "validation_report.md"
 def build_run_report(
     feeds: Sequence[FeedReport],
     dry_run: bool,
-    generated_at: Optional[datetime] = None,
-    analysis_date: Optional[str] = None,
+    generated_at: datetime | None = None,
+    analysis_date: str | None = None,
 ) -> RunReport:
     """Assemble the run report; *generated_at* defaults to now (UTC)."""
-    ts = generated_at or datetime.now(timezone.utc)
+    ts = generated_at or datetime.now(UTC)
     return RunReport(
         generated_at=ts.isoformat(timespec="seconds"),
         dry_run=dry_run,
@@ -77,13 +77,25 @@ def render_markdown(report: RunReport) -> str:
         lines.append(f"| {f.feed_id} | {cells} |")
 
     for f in report.feeds:
-        lines += ["", f"## Feed: {f.feed_id}", "", f"Source: `{f.source_path}`  ", f"Status: **{f.status}**", ""]
+        lines += [
+            "",
+            f"## Feed: {f.feed_id}",
+            "",
+            f"Source: `{f.source_path}`  ",
+            f"Status: **{f.status}**",
+            "",
+        ]
         if f.row_counts:
             lines += ["### Row counts", "", "| File | Rows |", "| --- | ---: |"]
             lines += [f"| {name} | {count} |" for name, count in sorted(f.row_counts.items())]
             lines.append("")
         if f.findings:
-            lines += ["### Findings", "", "| Severity | Code | File | Count | Message |", "| --- | --- | --- | ---: | --- |"]
+            lines += [
+                "### Findings",
+                "",
+                "| Severity | Code | File | Count | Message |",
+                "| --- | --- | --- | ---: | --- |",
+            ]
             for finding in f.findings:
                 msg = finding.message.replace("|", "\\|")
                 lines.append(

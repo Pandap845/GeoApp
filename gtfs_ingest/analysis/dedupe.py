@@ -44,8 +44,15 @@ EQUIVALENCES_NAME = "stop_equivalences.csv"
 
 #: One row per accepted pair, tagged with its group.
 EQUIVALENCE_COLUMNS = [
-    "group_id", "canonical_uid", "stop_uid_a", "stop_uid_b",
-    "distance_m", "name_score", "shared_routes", "score", "match_kind",
+    "group_id",
+    "canonical_uid",
+    "stop_uid_a",
+    "stop_uid_b",
+    "distance_m",
+    "name_score",
+    "shared_routes",
+    "score",
+    "match_kind",
 ]
 
 #: match_kind values.
@@ -103,8 +110,15 @@ def find_equivalences(
     *exclude_feeds* are never matched. score (half closeness, half name) is
     for review only, never a filter.
     """
-    columns = ["stop_uid_a", "stop_uid_b", "distance_m", "name_score",
-               "shared_routes", "score", "match_kind"]
+    columns = [
+        "stop_uid_a",
+        "stop_uid_b",
+        "distance_m",
+        "name_score",
+        "shared_routes",
+        "score",
+        "match_kind",
+    ]
     if exclude_feeds:
         stops = stops[~stops["feed_id"].isin(list(exclude_feeds))]
     if len(stops) < 2:
@@ -117,16 +131,16 @@ def find_equivalences(
         return pd.DataFrame(columns=columns)
 
     meta = pd.DataFrame(stops[["stop_uid", "feed_id", "stop_name"]])
-    candidates = (
-        candidates
-        .merge(meta.rename(columns={
-            "stop_uid": "stop_uid_a", "feed_id": "feed_a", "stop_name": "name_a"}), on="stop_uid_a")
-        .merge(meta.rename(columns={
-            "stop_uid": "stop_uid_b", "feed_id": "feed_b", "stop_name": "name_b"}), on="stop_uid_b")
+    candidates = candidates.merge(
+        meta.rename(columns={"stop_uid": "stop_uid_a", "feed_id": "feed_a", "stop_name": "name_a"}),
+        on="stop_uid_a",
+    ).merge(
+        meta.rename(columns={"stop_uid": "stop_uid_b", "feed_id": "feed_b", "stop_name": "name_b"}),
+        on="stop_uid_b",
     )
     same_feed = candidates["feed_a"] == candidates["feed_b"]
     distance = candidates["distance_m"].astype(float)
-    in_scope = (~same_feed & (distance <= distance_m))
+    in_scope = ~same_feed & (distance <= distance_m)
     if within_feed_distance_m is not None:
         in_scope |= same_feed & (distance <= float(within_feed_distance_m))
     candidates = candidates[in_scope]
@@ -167,15 +181,19 @@ def find_equivalences(
         0.5 * (1.0 - accepted["distance_m"] / radius) + 0.5 * accepted["name_score"]
     ).round(3)
     result = (
-        accepted[columns].sort_values(["stop_uid_a", "stop_uid_b"], kind="mergesort")
+        accepted[columns]
+        .sort_values(["stop_uid_a", "stop_uid_b"], kind="mergesort")
         .reset_index(drop=True)
     )
     n_within = int((result["match_kind"] == WITHIN_FEED).sum())
     log.info(
         "Dedupe: %d alias pair(s) accepted - %d cross-feed within %.0f m, "
         "%d within-feed within %.0f m",
-        len(result), len(result) - n_within, distance_m,
-        n_within, within_feed_distance_m or 0.0,
+        len(result),
+        len(result) - n_within,
+        distance_m,
+        n_within,
+        within_feed_distance_m or 0.0,
     )
     return result
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import networkx as nx
 import pandas as pd
@@ -119,7 +118,7 @@ class Neo4jInputs:
     nodes: pd.DataFrame
     edges: pd.DataFrame
     routes: pd.DataFrame
-    equivalences: Optional[pd.DataFrame]
+    equivalences: pd.DataFrame | None
 
 
 def load_inputs(report_dir: Path) -> Neo4jInputs:
@@ -144,9 +143,7 @@ def load_inputs(report_dir: Path) -> Neo4jInputs:
             [{"route_uid": uid, **attrs} for uid, attrs in graph.nodes(data=True)]
         )
     else:
-        log.warning(
-            "%s not found; :Route nodes will carry only route_uid/feed", GRAPHML_FILE
-        )
+        log.warning("%s not found; :Route nodes will carry only route_uid/feed", GRAPHML_FILE)
         routes = pd.DataFrame(columns=["route_uid"])
 
     equivalences = None
@@ -177,7 +174,8 @@ def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
     if routes.empty or "route_uid" not in routes.columns:
         uids = (
             edges.loc[edges["edge_type"] == "in_vehicle", "route_uid"].dropna().unique()
-            if not edges.empty else []
+            if not edges.empty
+            else []
         )
         routes = pd.DataFrame({"route_uid": sorted(uids)})
         routes["feed_id"] = routes["route_uid"].str.split(":", n=1).str[0]
@@ -194,19 +192,22 @@ def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
         members = stops[sizes > 1]
         if not members.empty:
             canon_rows = stops.set_index("stop_uid")
-            stations = (
-                members.groupby("canonical_uid", as_index=False)
-                .agg(n_stops=("stop_uid", "size"))
+            stations = members.groupby("canonical_uid", as_index=False).agg(
+                n_stops=("stop_uid", "size")
             )
             stations["name"] = stations["canonical_uid"].map(canon_rows["name"])
             stations["lat"] = stations["canonical_uid"].map(canon_rows["lat"])
             stations["lon"] = stations["canonical_uid"].map(canon_rows["lon"])
-            stations = stations[list(ADMIN_HEADERS["stations"])].sort_values(
-                "canonical_uid", kind="mergesort"
-            ).reset_index(drop=True)
-            part_of = members[["stop_uid", "canonical_uid"]].sort_values(
-                "stop_uid", kind="mergesort"
-            ).reset_index(drop=True)
+            stations = (
+                stations[list(ADMIN_HEADERS["stations"])]
+                .sort_values("canonical_uid", kind="mergesort")
+                .reset_index(drop=True)
+            )
+            part_of = (
+                members[["stop_uid", "canonical_uid"]]
+                .sort_values("stop_uid", kind="mergesort")
+                .reset_index(drop=True)
+            )
 
     # Stop-Stop relationships from the typed edges.
     in_vehicle = pd.DataFrame(columns=list(ADMIN_HEADERS["rel_in_vehicle"]))
@@ -218,7 +219,9 @@ def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
         if not iv.empty:
             iv["direction_id"] = (
                 pd.to_numeric(iv["direction_id"], errors="coerce")
-                .fillna(-1).astype(int).astype(str)
+                .fillna(-1)
+                .astype(int)
+                .astype(str)
             )
             in_vehicle = iv[list(ADMIN_HEADERS["rel_in_vehicle"])].reset_index(drop=True)
 
@@ -234,7 +237,8 @@ def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
                     inputs.equivalences[
                         ["stop_uid_a", "stop_uid_b", "distance_m", "name_score", "score"]
                     ],
-                    on=["stop_uid_a", "stop_uid_b"], how="left",
+                    on=["stop_uid_a", "stop_uid_b"],
+                    how="left",
                 )
             for col in ("distance_m", "name_score", "score"):
                 if col not in ss.columns:
@@ -272,7 +276,6 @@ def build_package(inputs: Neo4jInputs) -> dict[str, pd.DataFrame]:
     return frames
 
 
-
 def _col(frame_key: str, plain: str) -> str:
     """Backticked admin-header column name for Cypher."""
     return f"row.`{ADMIN_HEADERS[frame_key][plain]}`"
@@ -300,10 +303,10 @@ def render_load_cypher(frames: dict[str, pd.DataFrame]) -> str:
         "CALL {",
         "  WITH row",
         f"  MERGE (s:Stop {{stop_uid: {_col('stops', 'stop_uid')}}})",
-        f"  SET s.name = row.name, s.feed = row.feed,",
+        "  SET s.name = row.name, s.feed = row.feed,",
         f"      s.near_id = toInteger({_col('stops', 'near_id')}),",
         f"      s.lat = toFloat({_col('stops', 'lat')}), s.lon = toFloat({_col('stops', 'lon')}),",
-        f"      s.canonical_uid = row.canonical_uid,",
+        "      s.canonical_uid = row.canonical_uid,",
         f"      s.location = point({{latitude: toFloat({_col('stops', 'lat')}),",
         f"                           longitude: toFloat({_col('stops', 'lon')})}})",
         "} IN TRANSACTIONS OF 1000 ROWS;",
@@ -443,7 +446,7 @@ def write_package(frames: dict[str, pd.DataFrame], out_dir: Path) -> list[Path]:
     return written
 
 
-def run_export(report_dir: Path, out_dir: Optional[Path] = None) -> list[Path]:
+def run_export(report_dir: Path, out_dir: Path | None = None) -> list[Path]:
     """Build and write the package; *out_dir* defaults to <report_dir>/neo4j.
 
     Raises:

@@ -27,9 +27,7 @@ from gtfs_ingest.qa.pipeline_phase4 import QaConfig, run_google_qa
 
 
 def place(pid="p1", types=(), transit=None) -> PlaceResult:
-    return PlaceResult.model_validate(
-        {"id": pid, "types": list(types), "transitStation": transit}
-    )
+    return PlaceResult.model_validate({"id": pid, "types": list(types), "transitStation": transit})
 
 
 # Mode extraction
@@ -43,15 +41,20 @@ def test_vehicle_types_extracted_from_nested_payload() -> None:
 def test_mode_set_maps_vehicle_types_with_place_type_fallback() -> None:
     places = [
         place("a", types=["transit_station"], transit={"lines": [{"vehicleType": "SUBWAY"}]}),
-        place("b", types=["bus_station"]),           # no transitStation -> fallback
+        place("b", types=["bus_station"]),  # no transitStation -> fallback
     ]
-    assert google_mode_set(places) == {1, 3}         # metro + bus
+    assert google_mode_set(places) == {1, 3}  # metro + bus
 
 
 # Verdicts
 def test_interchange_verdicts() -> None:
-    bus_rail = [place("g1", types=["transit_station"],
-                      transit={"lines": [{"vehicleType": "BUS"}, {"vehicleType": "RAIL"}]})]
+    bus_rail = [
+        place(
+            "g1",
+            types=["transit_station"],
+            transit={"lines": [{"vehicleType": "BUS"}, {"vehicleType": "RAIL"}]},
+        )
+    ]
     bus_only = [place("g2", types=["bus_station"])]
     no_evidence = [place("g3", types=["restaurant"])]
 
@@ -71,8 +74,8 @@ def test_interchange_verdicts() -> None:
 def test_stop_verdicts() -> None:
     assert stop_verdict([place("g9", types=["bus_stop"])]) == ("STATION_FOUND", "g9")
     assert stop_verdict([place("x", types=["restaurant"])]) == ("NOT_FOUND", None)
-    assert stop_verdict([]) == ("NOT_FOUND", None)     # Google answered: nothing there
-    assert stop_verdict(None) == ("NO_DATA", None)     # call failed: no answer
+    assert stop_verdict([]) == ("NOT_FOUND", None)  # Google answered: nothing there
+    assert stop_verdict(None) == ("NO_DATA", None)  # call failed: no answer
 
 
 # Client (httpx.MockTransport - no network)
@@ -80,8 +83,8 @@ def make_client(handler, max_calls=10) -> GooglePlacesClient:
     return GooglePlacesClient(
         api_key="test-key",
         max_calls=max_calls,
-        rate_per_s=0,           # no throttling in tests
-        backoff_base=0,         # no backoff sleeps in tests
+        rate_per_s=0,  # no throttling in tests
+        backoff_base=0,  # no backoff sleeps in tests
         transport=httpx.MockTransport(handler),
     )
 
@@ -143,7 +146,7 @@ def test_client_retries_429_then_succeeds_counting_one_call() -> None:
     places = client.search_nearby(0, 0, 50, field_mask=INTERCHANGE_FIELD_MASK)
     assert places is not None and places[0].id == "ok"
     assert attempts["n"] == 3
-    assert client.calls_made == 1   # retries are one logical (billed) call
+    assert client.calls_made == 1  # retries are one logical (billed) call
 
 
 def test_client_returns_none_after_persistent_5xx() -> None:

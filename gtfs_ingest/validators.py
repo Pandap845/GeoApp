@@ -9,8 +9,8 @@ validator_crash ERROR instead of stopping the feed.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import date
-from typing import Callable, Optional
 
 import pandas as pd
 
@@ -40,7 +40,7 @@ def _clean_ids(series: pd.Series) -> pd.Series:
     return series.astype("string").str.strip()
 
 
-def validate_feed(loaded: LoadedFeed, analysis_date: Optional[date] = None) -> list[Finding]:
+def validate_feed(loaded: LoadedFeed, analysis_date: date | None = None) -> list[Finding]:
     """All findings for one feed, in check order (empty = clean). Never raises.
 
     *analysis_date* is the reference date for the expiry check (default: today).
@@ -76,7 +76,7 @@ def validate_feed(loaded: LoadedFeed, analysis_date: Optional[date] = None) -> l
     for check in checks:
         try:
             check(loaded, findings)
-        except Exception as exc:  # noqa: BLE001 - a crashing check must not kill the run
+        except Exception as exc:  # a crashing check must not kill the run
             log.exception("Feed %s: check %s crashed", loaded.feed_id, check.__name__)
             findings.append(
                 Finding(
@@ -253,11 +253,11 @@ def _check_stops(loaded: LoadedFeed, findings: list[Finding]) -> None:
                     severity=Severity.WARNING,
                     code="dangling_parent_station",
                     message=(
-                        f"stops.txt has {int(len(dangling))} row(s) whose parent_station "
+                        f"stops.txt has {len(dangling)} row(s) whose parent_station "
                         "does not match any stop_id; the stops are kept, the link is unusable"
                     ),
                     file="stops.txt",
-                    count=int(len(dangling)),
+                    count=len(dangling),
                     sample=_sample(dangling),
                 )
             )
@@ -265,10 +265,10 @@ def _check_stops(loaded: LoadedFeed, findings: list[Finding]) -> None:
 
 def _ref_check(
     findings: list[Finding],
-    child: Optional[pd.DataFrame],
+    child: pd.DataFrame | None,
     child_file: str,
     child_col: str,
-    parent: Optional[pd.DataFrame],
+    parent: pd.DataFrame | None,
     parent_file: str,
     parent_col: str,
 ) -> None:
@@ -291,7 +291,7 @@ def _ref_check(
                     f"missing from {parent_file}.{parent_col} ({len(dangling)} row(s) affected)"
                 ),
                 file=child_file,
-                count=int(len(dangling)),
+                count=len(dangling),
                 sample=_sample(dangling),
             )
         )
@@ -310,14 +310,15 @@ def _check_referential_integrity(loaded: LoadedFeed, findings: list[Finding]) ->
 
 
 def calendar_range(
-    calendar: Optional[pd.DataFrame],
-    calendar_dates: Optional[pd.DataFrame],
-) -> tuple[Optional[date], Optional[date]]:
+    calendar: pd.DataFrame | None,
+    calendar_dates: pd.DataFrame | None,
+) -> tuple[date | None, date | None]:
     """(first, last) service date from calendar.txt plus added calendar_dates; Nones if none.
 
     Removed dates (exception_type 2) never extend the range. Used by Phase 2 too.
     """
-    def _dates(frame: Optional[pd.DataFrame], column: str) -> pd.Series:
+
+    def _dates(frame: pd.DataFrame | None, column: str) -> pd.Series:
         if frame is None or frame.empty or column not in frame.columns:
             return pd.Series(dtype="datetime64[ns]")
         return pd.to_datetime(
@@ -341,12 +342,10 @@ def calendar_range(
 
 
 def _check_calendar_expiry(
-    loaded: LoadedFeed, findings: list[Finding], today: Optional[date] = None
+    loaded: LoadedFeed, findings: list[Finding], today: date | None = None
 ) -> None:
     """WARNING when all of the feed's service ended before *today* (default: real today)."""
-    _, end = calendar_range(
-        loaded.table("calendar.txt"), loaded.table("calendar_dates.txt")
-    )
+    _, end = calendar_range(loaded.table("calendar.txt"), loaded.table("calendar_dates.txt"))
     if end is None:
         return  # missing/unreadable calendars have their own findings
     today = today or date.today()

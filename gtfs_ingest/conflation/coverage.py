@@ -63,7 +63,7 @@ def osm_only_stops(
                OR p.public_transport IN :pt_values
                OR p.railway IN :railway_values)
           AND (n.distance_m IS NULL OR n.distance_m > :radius_m)
-        ORDER BY n.distance_m DESC NULLS FIRST
+        ORDER BY n.distance_m DESC NULLS FIRST, p.osm_id
         """
     ).bindparams(
         bindparam("pt_values", value=list(PT_VALUES), expanding=True),

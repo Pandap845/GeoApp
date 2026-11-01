@@ -1,0 +1,4 @@
+feed_id,service_date,route_id,direction_id,time_window,mean_headway_s,stop_count,stops_with_headway,trip_count
+metro,2026-01-06,R1,0,am_peak,,1,0,1
+metro,2026-01-06,R2,0,midday,,2,0,1
+other,2026-01-06,RX,-1,am_peak,,1,0,1

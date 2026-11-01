@@ -8,9 +8,10 @@ midnight; values past 24:00 are kept as-is (25:10:00 -> 90600).
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Literal
 
 import partridge as ptg
 
@@ -28,9 +29,9 @@ class ServiceSelection:
     source: Literal["explicit", "busiest", "common"]  # who picked the date
 
 
-def common_service_date(paths: Sequence[str]) -> Optional[date]:
+def common_service_date(paths: Sequence[str]) -> date | None:
     """Latest date on which every feed has service, or None if there is none."""
-    common: Optional[set[date]] = None
+    common: set[date] | None = None
     for path in paths:
         served = {d for d, ids in ptg.read_service_ids_by_date(path).items() if ids}
         common = served if common is None else common & served
@@ -42,17 +43,13 @@ def common_service_date(paths: Sequence[str]) -> Optional[date]:
 def service_ids_in_range(path: str, start: date, end: date) -> dict[date, frozenset[str]]:
     """Dates in [start, end] that have service, mapped to their service_ids (sorted)."""
     by_date = ptg.read_service_ids_by_date(path)
-    return {
-        d: frozenset(ids)
-        for d, ids in sorted(by_date.items())
-        if start <= d <= end and ids
-    }
+    return {d: frozenset(ids) for d, ids in sorted(by_date.items()) if start <= d <= end and ids}
 
 
 def load_feed_for_service_ids(
     source: FeedSource,
     service_ids: frozenset[str],
-    route_ids: Optional[set[str]] = None,
+    route_ids: set[str] | None = None,
 ) -> Any:
     """Load a feed filtered to given service_ids (used for each day of a date range)."""
     view: dict[str, dict[str, Any]] = {"trips.txt": {"service_id": service_ids}}
@@ -63,7 +60,7 @@ def load_feed_for_service_ids(
 
 def resolve_service(
     path: str,
-    service_date: Optional[date],
+    service_date: date | None,
     label: Literal["explicit", "common"] = "explicit",
 ) -> ServiceSelection:
     """Service date and active service_ids; None picks the feed's busiest date.
@@ -82,8 +79,8 @@ def resolve_service(
 
 def load_service_feed(
     source: FeedSource,
-    service_date: Optional[date],
-    route_ids: Optional[set[str]] = None,
+    service_date: date | None,
+    route_ids: set[str] | None = None,
     label: Literal["explicit", "common"] = "explicit",
 ) -> tuple[Any, ServiceSelection]:
     """Load the feed filtered to one service day (and optionally to *route_ids*).

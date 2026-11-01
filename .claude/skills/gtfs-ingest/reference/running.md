@@ -34,11 +34,16 @@ Quick check without a database: add `--dry-run` (not possible for `conflate-osm`
 ## Tests and docs
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q                 # ~285 pass, 4 DB tests skip
+.venv/Scripts/python.exe -m pytest tests -q                 # ~300 pass, 4 DB tests skip
+.venv/Scripts/python.exe -m ruff check . && .venv/Scripts/python.exe -m ruff format --check .
 DOCS_NO_INTERSPHINX=1 .venv/Scripts/python.exe -m sphinx -b html -W --keep-going docs /tmp/docs_html
 ```
 
-CI (`.github/workflows/tests.yml`): lint (advisory), unit matrix, integration against a PostGIS service, Sphinx with `-W`.
+Live DB tests: point `GTFS_TEST_DATABASE_URL` at the separate `gtfs_test` database in the
+same container, never at `transit` (the tests replace its tables).
+Golden CSVs: `tests/golden/`; regenerate on purpose with `GTFS_UPDATE_GOLDEN=1`.
+
+CI (`.github/workflows/tests.yml`): lint (ruff check + format, blocking), unit matrix, integration against a PostGIS service, Sphinx with `-W`.
 
 ## Useful flags
 

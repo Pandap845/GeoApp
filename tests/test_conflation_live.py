@@ -35,25 +35,33 @@ def test_conflate_osm_live(valid_feed, tmp_path: Path) -> None:
     # ~11 m north and a west->east street ~11 m south.
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS test_osm_point, test_osm_line"))
-        conn.execute(text(
-            "CREATE TABLE test_osm_point (osm_id bigint, highway text, railway text, "
-            "public_transport text, name text, way geometry(Point, 4326))"
-        ))
-        conn.execute(text(
-            "CREATE TABLE test_osm_line (osm_id bigint, highway text, oneway text, "
-            "name text, way geometry(LineString, 4326))"
-        ))
-        conn.execute(text(
-            "INSERT INTO test_osm_point VALUES "
-            "(9001, 'bus_stop', NULL, NULL, 'Main St Stop', "
-            " ST_SetSRID(ST_MakePoint(-75.0, 40.0001), 4326))"
-        ))
-        conn.execute(text(
-            "INSERT INTO test_osm_line VALUES "
-            "(9101, 'residential', NULL, 'Main St', "
-            " ST_SetSRID(ST_MakeLine(ST_MakePoint(-75.001, 39.9999), "
-            "                        ST_MakePoint(-74.999, 39.9999)), 4326))"
-        ))
+        conn.execute(
+            text(
+                "CREATE TABLE test_osm_point (osm_id bigint, highway text, railway text, "
+                "public_transport text, name text, way geometry(Point, 4326))"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE test_osm_line (osm_id bigint, highway text, oneway text, "
+                "name text, way geometry(LineString, 4326))"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO test_osm_point VALUES "
+                "(9001, 'bus_stop', NULL, NULL, 'Main St Stop', "
+                " ST_SetSRID(ST_MakePoint(-75.0, 40.0001), 4326))"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO test_osm_line VALUES "
+                "(9101, 'residential', NULL, 'Main St', "
+                " ST_SetSRID(ST_MakeLine(ST_MakePoint(-75.001, 39.9999), "
+                "                        ST_MakePoint(-74.999, 39.9999)), 4326))"
+            )
+        )
 
     report = run_conflation(
         ConflationConfig(
@@ -65,16 +73,18 @@ def test_conflate_osm_live(valid_feed, tmp_path: Path) -> None:
         )
     )
     assert report.stops_total >= 3
-    assert report.matched >= 1                       # S1 matches the bus_stop
-    assert report.side_distribution.get("left", 0) >= 1   # S1 north of the eastbound street
+    assert report.matched >= 1  # S1 matches the bus_stop
+    assert report.side_distribution.get("left", 0) >= 1  # S1 north of the eastbound street
 
     with engine.connect() as conn:
-        match = conn.execute(text(
-            "SELECT osm_id, needs_review FROM stop_osm_matches WHERE stop_uid = :u"
-        ), {"u": f"{valid_feed.feed_id}:S1"}).one()
-        side = conn.execute(text(
-            "SELECT osm_way_id, side FROM stop_side_of_street WHERE stop_uid = :u"
-        ), {"u": f"{valid_feed.feed_id}:S1"}).one()
+        match = conn.execute(
+            text("SELECT osm_id, needs_review FROM stop_osm_matches WHERE stop_uid = :u"),
+            {"u": f"{valid_feed.feed_id}:S1"},
+        ).one()
+        side = conn.execute(
+            text("SELECT osm_way_id, side FROM stop_side_of_street WHERE stop_uid = :u"),
+            {"u": f"{valid_feed.feed_id}:S1"},
+        ).one()
         conn.execute(text("DROP TABLE IF EXISTS test_osm_point, test_osm_line"))
     assert match.osm_id == 9001 and match.needs_review is False
     assert side.osm_way_id == 9101 and side.side == "left"

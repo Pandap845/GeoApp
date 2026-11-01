@@ -20,7 +20,7 @@ def _clean_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in attrs.items()
-        if value is not None and not (pd.isna(value) is True)
+        if value is not None and pd.isna(value) is not True
     }
 
 
@@ -53,5 +53,10 @@ def write_graphml(graph: nx.Graph, path: Path) -> Path:
     """Write the graph as GraphML, creating parent folders."""
     path.parent.mkdir(parents=True, exist_ok=True)
     nx.write_graphml(graph, path)
-    log.info("GraphML written: %s (%d nodes, %d edges)", path, graph.number_of_nodes(), graph.number_of_edges())
+    log.info(
+        "GraphML written: %s (%d nodes, %d edges)",
+        path,
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
+    )
     return path

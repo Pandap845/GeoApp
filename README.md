@@ -211,6 +211,13 @@ uses its own sequential `ID` (1..N) for the node relations instead —
   count, sample values), normalized/loaded stop counts.
 - `validation_report.md` — human-readable: run summary, a
   **feed × optional-file matrix**, and per-feed row counts + findings.
+- `run_manifest.json` — written by every command, one entry per command:
+  the sha256 of each input file, the git commit (and whether tracked files
+  had local changes), a sha256 of the package's own code (so uncommitted
+  edits show up too), the package versions and every parameter value.
+  Secrets (database URL, API key) and output paths are left out, and there
+  is no timestamp, so **two runs with equal manifests must give equal
+  outputs**. Compare manifests before comparing results.
 
 ## 7. CLI reference
 
@@ -397,11 +404,25 @@ pytest                # full suite, no database required
 ```
 
 A live PostGIS integration test (schema DDL + idempotent reload + SRID
-check) runs only when `GTFS_TEST_DATABASE_URL` is set, e.g.:
+check) runs only when `GTFS_TEST_DATABASE_URL` is set. Point it at a
+separate database: the live tests replace the `stops` and match tables.
 
 ```powershell
-$env:GTFS_TEST_DATABASE_URL = "postgresql+psycopg://transit:cambia_esto@localhost:5432/transit"
-pytest tests/test_db.py
+docker exec transit-db psql -U transit -d transit -c "CREATE DATABASE gtfs_test"
+$env:GTFS_TEST_DATABASE_URL = "postgresql+psycopg://transit:cambia_esto@localhost:5432/gtfs_test"
+pytest
+```
+
+`tests/test_golden.py` compares a fixed two-feed run with the CSVs in
+`tests/golden/`. When a change to ordering, rounding or formatting is
+intended, regenerate them with `GTFS_UPDATE_GOLDEN=1 pytest tests/test_golden.py`
+and review the diff.
+
+Lint and format (CI runs both and fails on any finding; rules live in
+`pyproject.toml`):
+
+```bash
+ruff check . && ruff format --check .
 ```
 
 ## 10. Documentation site
@@ -818,9 +839,10 @@ Files in `--report DIR`:
   same_line_stations = [(ID, station, linea, dirD, minutes), ...]    # route order, same line
   ```
 
-  Conventions: `ID` is the file's own **sequential node id** (1..N in row
-  order, starts at 1) — the key every relation column references; use
-  `stop_uid` to join against the database. `system` is the serving
+  Conventions: `ID` is the file's own **sequential node id** (1..N in
+  `stop_uid` order, starts at 1) — the key every relation column references.
+  It is only meaningful inside one run's files: adding a stop shifts the IDs
+  after it. Use `stop_uid` to join across runs or against the database. `system` is the serving
   system(s) (agency names, e.g. `Mi Macro, Sitren`). `stop_line_ids` is
   the row's own `"{ID}-{line}"` combos (e.g. `17-C98`). `linea` is
   `route_short_name` (falling back to `route_id`), restricted to lines

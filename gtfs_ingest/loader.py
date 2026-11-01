@@ -14,8 +14,8 @@ import hashlib
 import logging
 import re
 import zipfile
+from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Sequence
 
 import partridge as ptg
 

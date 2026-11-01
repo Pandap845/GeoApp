@@ -10,7 +10,7 @@ import enum
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -89,9 +89,9 @@ class Finding(BaseModel):
     severity: Severity
     code: str
     message: str
-    file: Optional[str] = None
-    count: Optional[int] = None
-    sample: Optional[list[str]] = None  # a few example offending values
+    file: str | None = None
+    count: int | None = None
+    sample: list[str] | None = None  # a few example offending values
 
 
 class FeedSource(BaseModel):
@@ -119,10 +119,10 @@ class LoadedFeed:
     source: FeedSource
     feed: Any
     files_present: set[str]
-    load_error: Optional[str] = None
+    load_error: str | None = None
     table_errors: dict[str, str] = field(default_factory=dict)
     load_findings: list[Finding] = field(default_factory=list)
-    _tables: dict[str, Optional[pd.DataFrame]] = field(default_factory=dict, repr=False)
+    _tables: dict[str, pd.DataFrame | None] = field(default_factory=dict, repr=False)
 
     @property
     def feed_id(self) -> str:
@@ -132,11 +132,11 @@ class LoadedFeed:
     def is_stops_only(self) -> bool:
         return self.source.is_stops_only
 
-    def table(self, filename: str) -> Optional[pd.DataFrame]:
+    def table(self, filename: str) -> pd.DataFrame | None:
         """The raw table (all strings), or None if absent or unreadable."""
         if filename in self._tables:
             return self._tables[filename]
-        df: Optional[pd.DataFrame] = None
+        df: pd.DataFrame | None = None
         if self.feed is not None and filename in self.files_present:
             try:
                 df = self.feed.get(filename)
@@ -151,7 +151,7 @@ class LoadedFeed:
         for name in sorted(self.files_present):
             df = self.table(name)
             if df is not None:
-                counts[name] = int(len(df))
+                counts[name] = len(df)
         return counts
 
 
@@ -162,11 +162,11 @@ class StopRecord(BaseModel):
     stop_num_id: int
     feed_id: str
     stop_id: str
-    stop_name: Optional[str] = None
+    stop_name: str | None = None
     stop_lat: float = Field(ge=-90.0, le=90.0)
     stop_lon: float = Field(ge=-180.0, le=180.0)
     location_type: int = 0
-    parent_station: Optional[str] = None
+    parent_station: str | None = None
 
 
 #: Column order of the normalized stops frame (without geometry).
@@ -196,5 +196,5 @@ class RunReport(BaseModel):
 
     generated_at: str
     dry_run: bool
-    analysis_date: Optional[str] = None
+    analysis_date: str | None = None
     feeds: list[FeedReport] = Field(default_factory=list)

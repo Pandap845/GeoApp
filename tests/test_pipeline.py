@@ -70,9 +70,7 @@ def test_fail_on_error_exit_code(tmp_path: Path) -> None:
 def test_no_feeds_found_is_exit_1(tmp_path: Path) -> None:
     empty = tmp_path / "nothing"
     empty.mkdir()
-    exit_code = cli.main(
-        ["--feeds", str(empty), "--report", str(tmp_path / "out"), "--dry-run"]
-    )
+    exit_code = cli.main(["--feeds", str(empty), "--report", str(tmp_path / "out"), "--dry-run"])
     assert exit_code == 1
 
 
@@ -97,9 +95,7 @@ def test_dry_run_ingests_stops_csv_alongside_gtfs(tmp_path: Path) -> None:
     csv_path = write_stops_csv(tmp_path, "extra_stops.csv")
     out = tmp_path / "out"
 
-    exit_code = cli.main(
-        ["--feeds", str(feeds), str(csv_path), "--report", str(out), "--dry-run"]
-    )
+    exit_code = cli.main(["--feeds", str(feeds), str(csv_path), "--report", str(out), "--dry-run"])
 
     assert exit_code == 0
     report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
@@ -133,9 +129,7 @@ def test_csv_only_run_succeeds(tmp_path: Path) -> None:
 
 
 def test_unresolvable_csv_header_fails_the_gate(tmp_path: Path) -> None:
-    csv_path = write_stops_csv(
-        tmp_path, "bad.csv", "ID_PARADA,DESC,X,Y\n1,Centro,20.6,-103.3\n"
-    )
+    csv_path = write_stops_csv(tmp_path, "bad.csv", "ID_PARADA,DESC,X,Y\n1,Centro,20.6,-103.3\n")
     out = tmp_path / "out"
 
     exit_code = cli.main(
@@ -147,4 +141,4 @@ def test_unresolvable_csv_header_fails_the_gate(tmp_path: Path) -> None:
     (feed,) = report["feeds"]
     assert feed["status"] == "failed"
     (finding,) = [f for f in feed["findings"] if f["code"] == "unresolved_csv_header"]
-    assert "latitude" in finding["message"]     # tells the user the accepted spelling
+    assert "latitude" in finding["message"]  # tells the user the accepted spelling

@@ -77,8 +77,9 @@ def _to_records(df: pd.DataFrame) -> list[dict]:
     """Rows as dicts with NaN turned into None; list values pass through."""
     cleaned = df.copy()
     for col in cleaned.columns:
-        cleaned[col] = [None if not isinstance(v, (list, tuple)) and pd.isna(v) else v
-                        for v in cleaned[col]]
+        cleaned[col] = [
+            None if not isinstance(v, (list, tuple)) and pd.isna(v) else v for v in cleaned[col]
+        ]
     return cleaned.to_dict("records")
 
 

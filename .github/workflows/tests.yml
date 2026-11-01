@@ -3,7 +3,7 @@ name: Tests
 # Testing pipeline for gtfs-ingest.
 #
 # Three jobs:
-#   * lint        - advisory style/lint pass (never blocks a merge).
+#   * lint        - ruff check + ruff format --check (rules in pyproject.toml).
 #   * unit        - fast pytest run with no database, across an OS/Python
 #                   matrix. DB-backed tests self-skip when
 #                   GTFS_TEST_DATABASE_URL is unset (see tests/test_db.py,
@@ -30,7 +30,7 @@ env:
 
 jobs:
   lint:
-    name: Lint (advisory)
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,17 +41,14 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # Pinned (same as the dev extra), so a ruff release never breaks the build.
       - name: Install ruff
-        run: pip install ruff
+        run: pip install ruff==0.16.6
 
-      # Advisory only: surfaces issues as GitHub annotations but does not fail
-      # the pipeline. Drop `continue-on-error` once the codebase is ruff-clean.
       - name: ruff check
-        continue-on-error: true
         run: ruff check --output-format=github .
 
       - name: ruff format --check
-        continue-on-error: true
         run: ruff format --check .
 
   unit:
@@ -80,6 +77,13 @@ jobs:
       # skip and only the pure-unit suite runs.
       - name: Run pytest
         run: pytest -v --durations=10
+
+      # A regular (non-editable) install must ship every subpackage.
+      - name: Check the wheel contents
+        shell: bash
+        run: |
+          python -m pip wheel . --no-deps -w dist
+          python -c "import sys, zipfile, glob; names = zipfile.ZipFile(glob.glob('dist/gtfs_ingest-*.whl')[0]).namelist(); missing = [p for p in ('analysis', 'conflation', 'qa', 'export') if f'gtfs_ingest/{p}/__init__.py' not in names]; sys.exit(f'missing subpackages: {missing}' if missing else 0)"
 
   integration:
     name: Integration (PostGIS)

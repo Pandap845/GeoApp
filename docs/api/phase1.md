@@ -70,3 +70,9 @@ JSON report produced here.
 ```{eval-rst}
 .. automodule:: gtfs_ingest.report
 ```
+
+## Run manifest
+
+```{eval-rst}
+.. automodule:: gtfs_ingest.manifest
+```

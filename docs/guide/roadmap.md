@@ -306,7 +306,7 @@ add an optional sidecar `near_stations_quality.csv` keyed by `ID` with:
 
 | Step | Item | Effort | Payoff |
 |---|---|---|---|
-| 1 | Pin CSV row order + tie-breaks (§3.1 gaps 1–3) | ~1 h | Deterministic contract file |
+| 1 | ✅ **DONE** — Pin CSV row order + tie-breaks (§3.1 gaps 1–3), run manifest and golden test (gap 5); IDs are per file (gap 4, option A) | ~1 h | Deterministic contract file |
 
 
 | 4 | ✅ **DONE** — Cross-feed dedupe (§1.3): `analysis/dedupe.py`, `stop_equivalences.csv`/table, `same_station_dedup` edges, `physical_stop_count` | ~2–3 days | Kills phantom interchanges and alias "near" rows |

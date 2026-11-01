@@ -37,14 +37,14 @@ release = _version
 # -- General configuration ---------------------------------------------------
 
 extensions = [
-    "sphinx.ext.autodoc",       # pull docstrings out of the package
-    "sphinx.ext.napoleon",      # understand Google-style Args:/Returns:/Attributes:
-    "sphinx.ext.viewcode",      # "[source]" links next to every object
-    "sphinx.ext.intersphinx",   # link pandas/shapely/... types to their own docs
+    "sphinx.ext.autodoc",  # pull docstrings out of the package
+    "sphinx.ext.napoleon",  # understand Google-style Args:/Returns:/Attributes:
+    "sphinx.ext.viewcode",  # "[source]" links next to every object
+    "sphinx.ext.intersphinx",  # link pandas/shapely/... types to their own docs
     "sphinx.ext.todo",
-    "myst_parser",              # let the existing Markdown docs into the build
-    "sphinx_copybutton",        # copy button on the many CLI snippets
-    "sphinxcontrib.mermaid",    # render ```mermaid fences as diagrams
+    "myst_parser",  # let the existing Markdown docs into the build
+    "sphinx_copybutton",  # copy button on the many CLI snippets
+    "sphinxcontrib.mermaid",  # render ```mermaid fences as diagrams
 ]
 
 # Smart typography is actively harmful here: it rewrites the ``--`` in a CLI
@@ -95,10 +95,10 @@ napoleon_use_rtype = False  # fold the return type into the Returns: line
 # -- MyST --------------------------------------------------------------------
 
 myst_enable_extensions = [
-    "colon_fence",      # ::: fences, friendlier than ``` inside Markdown
+    "colon_fence",  # ::: fences, friendlier than ``` inside Markdown
     "deflist",
     "fieldlist",
-    "linkify",          # bare URLs in the Markdown docs become links
+    "linkify",  # bare URLs in the Markdown docs become links
     "substitution",
     "tasklist",
 ]
@@ -145,8 +145,13 @@ html_theme_options = {
 # -- LaTeX / PDF output ------------------------------------------------------
 
 latex_documents = [
-    ("index", "gtfs-ingest.tex", "gtfs-ingest: GTFS + OSM Transit Analysis Pipeline",
-     author, "manual"),
+    (
+        "index",
+        "gtfs-ingest.tex",
+        "gtfs-ingest: GTFS + OSM Transit Analysis Pipeline",
+        author,
+        "manual",
+    ),
 ]
 latex_elements = {
     "papersize": "letterpaper",

@@ -41,9 +41,9 @@ def test_canonical_header_resolves(tmp_path: Path) -> None:
         "stop_id,stop_name,stop_lat,stop_lon",
         "codigo,nombre,latitud,longitud",
         "clave,estacion,lat,lng",
-        "Id , Nombre , LATITUD , Longitud ",   # stray whitespace
-        "ID,ESTACIÓN,Latitud,Longitud",        # accents
-        "id;name;latitude;longitude",          # semicolon-delimited
+        "Id , Nombre , LATITUD , Longitud ",  # stray whitespace
+        "ID,ESTACIÓN,Latitud,Longitud",  # accents
+        "id;name;latitude;longitude",  # semicolon-delimited
     ],
 )
 def test_aliases_resolve_case_accent_and_punctuation_insensitively(
@@ -78,7 +78,7 @@ def test_ambiguous_header_warns_and_keeps_first(tmp_path: Path) -> None:
     frame, findings = read_stops_csv(write(tmp_path, "stops.csv", text))
 
     assert frame is not None
-    assert frame["stop_lat"].tolist() == ["20.67"]     # the first column won
+    assert frame["stop_lat"].tolist() == ["20.67"]  # the first column won
     (warning,) = [f for f in findings if f.code == "ambiguous_csv_header"]
     assert warning.severity is Severity.WARNING
 
@@ -115,7 +115,7 @@ def test_unresolved_header_returns_finding_not_exception(tmp_path: Path) -> None
         assert name in finding.message
         for alias in ALIASES[name]:
             assert alias in finding.message
-    assert "ID_PARADA" in finding.message           # what was actually found
+    assert "ID_PARADA" in finding.message  # what was actually found
     assert finding.sample == ["ID_PARADA", "DESC", "X", "Y"]
 
 
@@ -125,8 +125,8 @@ def test_partially_resolved_header_reports_what_resolved(tmp_path: Path) -> None
 
     assert frame is None
     (finding,) = [f for f in findings if f.code == "unresolved_csv_header"]
-    assert "stop_id <- id" in finding.message       # tells the user what already worked
-    assert finding.count == 2                        # stop_lat + stop_lon
+    assert "stop_id <- id" in finding.message  # tells the user what already worked
+    assert finding.count == 2  # stop_lat + stop_lon
 
 
 def test_headerless_file_is_unresolved(tmp_path: Path) -> None:
@@ -147,8 +147,8 @@ def test_utf8_bom_header_resolves(tmp_path: Path) -> None:
     frame, findings = read_stops_csv(path)
 
     assert frame is not None
-    assert list(frame.columns)[0] == "stop_id"      # not "﻿stop_id"
-    assert "csv_encoding" not in codes(findings)    # utf-8-sig is the expected case
+    assert frame.columns[0] == "stop_id"  # not "﻿stop_id"
+    assert "csv_encoding" not in codes(findings)  # utf-8-sig is the expected case
 
 
 def test_utf16_is_decoded(tmp_path: Path) -> None:
@@ -183,7 +183,7 @@ def test_decimal_comma_warns_with_actionable_message(tmp_path: Path) -> None:
     text = "id;name;latitud;longitud\nS1;Centro;20,6736;-103,344\n"
     frame, findings = read_stops_csv(write(tmp_path, "stops.csv", text))
 
-    assert frame is not None                        # parsed, but flagged
+    assert frame is not None  # parsed, but flagged
     (warning,) = [f for f in findings if f.code == "csv_decimal_comma"]
     assert warning.severity is Severity.WARNING
     assert "decimal point" in warning.message
@@ -208,9 +208,7 @@ def test_values_are_whitespace_stripped(tmp_path: Path) -> None:
 
 
 def test_header_only_file_yields_empty_frame(tmp_path: Path) -> None:
-    frame, findings = read_stops_csv(
-        write(tmp_path, "stops.csv", "id,name,latitude,longitude\n")
-    )
+    frame, findings = read_stops_csv(write(tmp_path, "stops.csv", "id,name,latitude,longitude\n"))
 
     assert frame is not None
     assert frame.empty

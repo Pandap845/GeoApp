@@ -6,8 +6,8 @@ from pathlib import Path
 
 import networkx as nx
 import pandas as pd
+from test_near_stations import make_stops, routes_meta
 
-from gtfs_ingest.analysis import connectivity, station_network
 from gtfs_ingest.analysis.near_stations import build_near_stations
 from gtfs_ingest.analysis.station_network import (
     EDGE_COLUMNS,
@@ -20,34 +20,42 @@ from gtfs_ingest.analysis.station_network import (
 )
 
 from test_connectivity import rs
-from test_near_stations import make_stops, routes_meta
 
 
 def _fixture():
     """Two feeds: fa:A --(r1)--> fa:B; fb:X1 aliases fa:A; fb:X2 near fa:B."""
     stops = make_stops(
         ("fa", "A", "Main St", 40.0, -75.0),
-        ("fa", "B", "Second", 40.009, -75.0),          # ~1 km from A
-        ("fb", "X1", "Main St", 40.00009, -75.0),      # ~10 m: alias of A
-        ("fb", "X2", "Third", 40.0095, -75.0),         # ~55 m from B
+        ("fa", "B", "Second", 40.009, -75.0),  # ~1 km from A
+        ("fb", "X1", "Main St", 40.00009, -75.0),  # ~10 m: alias of A
+        ("fb", "X2", "Third", 40.0095, -75.0),  # ~55 m from B
     )
     route_stops = rs(("fa", "r1", "A"), ("fa", "r1", "B"), ("fb", "rX", "X1"), ("fb", "rX", "X2"))
     routes = routes_meta(("fa", "r1", "10"), ("fb", "rX", "X9"))
     stop_links = pd.DataFrame(
         {
-            "route_uid": ["fa:r1"], "feed_id": ["fa"], "route_id": ["r1"],
-            "linea": ["10"], "direction_id": [0],
-            "stop_uid_a": ["fa:A"], "stop_uid_b": ["fa:B"],
-            "travel_min": [4.0], "n_obs": [3],
+            "route_uid": ["fa:r1"],
+            "feed_id": ["fa"],
+            "route_id": ["r1"],
+            "linea": ["10"],
+            "direction_id": [0],
+            "stop_uid_a": ["fa:A"],
+            "stop_uid_b": ["fa:B"],
+            "travel_min": [4.0],
+            "n_obs": [3],
         }
     )
     # Dedupe outputs: A and X1 are one physical station.
     equivalences = pd.DataFrame(
         {
-            "group_id": [0], "canonical_uid": ["fa:A"],
-            "stop_uid_a": ["fa:A"], "stop_uid_b": ["fb:X1"],
-            "distance_m": [10.0], "name_score": [1.0],
-            "shared_routes": [0], "score": [0.8],
+            "group_id": [0],
+            "canonical_uid": ["fa:A"],
+            "stop_uid_a": ["fa:A"],
+            "stop_uid_b": ["fb:X1"],
+            "distance_m": [10.0],
+            "name_score": [1.0],
+            "shared_routes": [0],
+            "score": [0.8],
         }
     )
     canonical = pd.DataFrame(
@@ -69,8 +77,8 @@ def test_nodes_carry_attributes_and_canonical_fallback() -> None:
     a = graph.nodes["fa:A"]
     assert a["name"] == "Main St" and a["feed"] == "fa"
     assert a["canonical_uid"] == "fa:A"
-    assert graph.nodes["fb:X1"]["canonical_uid"] == "fa:A"     # alias mapped
-    assert graph.nodes["fa:B"]["canonical_uid"] == "fa:B"      # fallback: own uid
+    assert graph.nodes["fb:X1"]["canonical_uid"] == "fa:A"  # alias mapped
+    assert graph.nodes["fa:B"]["canonical_uid"] == "fa:B"  # fallback: own uid
     assert a["near_id"] == int(near.loc[near["stop_uid"] == "fa:A", "ID"].item())
     assert isinstance(a["lat"], float) and isinstance(a["lon"], float)
 
@@ -103,14 +111,15 @@ def test_parallel_edges_coexist() -> None:
     stops, near, links, pairs, equiv, canonical = _fixture()
     # A walk pair on the SAME stops as the in_vehicle link.
     pairs2 = pd.concat(
-        [pairs, pd.DataFrame(
-            {"stop_uid_a": ["fa:A"], "stop_uid_b": ["fa:B"], "distance_m": [995.0]}
-        )],
+        [
+            pairs,
+            pd.DataFrame({"stop_uid_a": ["fa:A"], "stop_uid_b": ["fa:B"], "distance_m": [995.0]}),
+        ],
         ignore_index=True,
     )
     graph = build_station_graph(stops, near, links, pairs2, equiv, canonical)
     keys = set(graph["fa:A"]["fa:B"])
-    assert keys == {"in_vehicle:fa:r1:0", "walk"}                # both survive
+    assert keys == {"in_vehicle:fa:r1:0", "walk"}  # both survive
 
 
 def test_graphml_roundtrip(tmp_path: Path) -> None:
@@ -132,13 +141,15 @@ def test_stats_and_flat_frames() -> None:
     stats = station_graph_stats(graph)
     assert stats["n_stops"] == 4
     assert stats["edges_by_type"] == {"in_vehicle": 1, "same_station": 2, "walk": 2}
-    assert stats["n_weak_components"] == 1                       # all connected
+    assert stats["n_weak_components"] == 1  # all connected
 
     edges = station_edges_frame(graph)
     assert list(edges.columns) == EDGE_COLUMNS
     # Reciprocal arcs collapse to one row per pair; in_vehicle per direction.
     assert edges["edge_type"].value_counts().to_dict() == {
-        "in_vehicle": 1, "same_station": 1, "walk": 1,
+        "in_vehicle": 1,
+        "same_station": 1,
+        "walk": 1,
     }
     nodes = station_nodes_frame(graph)
     assert list(nodes.columns) == NODE_COLUMNS
@@ -153,10 +164,16 @@ def test_stops_only_feed_is_left_out_with_its_walk_arcs() -> None:
     dock = make_stops(("mibici", "D", "Dock", 40.0045, -75.0))
     stops = pd.concat([stops, dock], ignore_index=True)
     pairs = pd.concat(
-        [pairs, pd.DataFrame({
-            "stop_uid_a": ["fa:A", "fa:B"], "stop_uid_b": ["mibici:D", "mibici:D"],
-            "distance_m": [250.0, 250.0],
-        })],
+        [
+            pairs,
+            pd.DataFrame(
+                {
+                    "stop_uid_a": ["fa:A", "fa:B"],
+                    "stop_uid_b": ["mibici:D", "mibici:D"],
+                    "distance_m": [250.0, 250.0],
+                }
+            ),
+        ],
         ignore_index=True,
     )
 
@@ -170,8 +187,8 @@ def test_stops_only_feed_is_left_out_with_its_walk_arcs() -> None:
     # D stays a node (it is still exported), but carries no arc at all...
     assert graph.nodes["mibici:D"]["stops_only"] is True
     assert graph.degree("mibici:D") == 0
-    assert not nx.has_path(graph, "fa:B", "fa:A")                 # ...so no shortcut
-    assert graph.has_edge("fa:B", "fb:X2", "walk")                # transit walks intact
+    assert not nx.has_path(graph, "fa:B", "fa:A")  # ...so no shortcut
+    assert graph.has_edge("fa:B", "fb:X2", "walk")  # transit walks intact
     # Components are counted over transit stops; the dock is reported apart.
     stats = station_graph_stats(graph)
     assert stats["n_weak_components"] == 1
@@ -186,7 +203,7 @@ def test_empty_inputs_yield_empty_graph(tmp_path: Path) -> None:
         empty, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     )
     assert graph.number_of_nodes() == 0
-    write_station_graphml(graph, tmp_path / "empty.graphml")     # still writes
+    write_station_graphml(graph, tmp_path / "empty.graphml")  # still writes
     assert station_edges_frame(graph).empty
 
 

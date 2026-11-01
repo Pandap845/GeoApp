@@ -12,7 +12,6 @@ from gtfs_ingest.analysis.route_filter import (
     parse_routes,
 )
 
-
 ROUTES = pd.DataFrame(
     {
         "route_id": ["R1", "R2", "R3", "R4"],
@@ -26,7 +25,7 @@ def test_parse_modes_accepts_names_codes_and_commas() -> None:
     assert parse_modes(["bus"]) == frozenset({3})
     assert parse_modes(["BUS", "rail"]) == frozenset({3, 2})
     assert parse_modes(["bus,tram", "metro"]) == frozenset({3, 0, 1})
-    assert parse_modes(["700"]) == frozenset({3})     # extended code normalizes
+    assert parse_modes(["700"]) == frozenset({3})  # extended code normalizes
     assert parse_modes(["3"]) == frozenset({3})
 
 
@@ -55,8 +54,8 @@ def test_mode_filter_selects_by_normalized_route_type() -> None:
 
 
 def test_route_filter_matches_id_or_short_name() -> None:
-    assert allowed_route_ids(ROUTES, None, frozenset({"C98"})) == {"R2"}   # short name
-    assert allowed_route_ids(ROUTES, None, frozenset({"R4"})) == {"R4"}    # route_id
+    assert allowed_route_ids(ROUTES, None, frozenset({"C98"})) == {"R2"}  # short name
+    assert allowed_route_ids(ROUTES, None, frozenset({"R4"})) == {"R4"}  # route_id
 
 
 def test_mode_and_route_filters_are_a_union() -> None:
@@ -65,8 +64,8 @@ def test_mode_and_route_filters_are_a_union() -> None:
 
 
 def test_filter_with_no_matching_routes_is_empty_not_none() -> None:
-    assert allowed_route_ids(ROUTES, frozenset({4}), None) == set()       # no ferry
-    assert allowed_route_ids(None, frozenset({3}), None) == set()         # no routes.txt
+    assert allowed_route_ids(ROUTES, frozenset({4}), None) == set()  # no ferry
+    assert allowed_route_ids(None, frozenset({3}), None) == set()  # no routes.txt
     assert allowed_route_ids(pd.DataFrame(), frozenset({3}), None) == set()
 
 
@@ -74,9 +73,17 @@ def test_cli_accepts_transport_mode_and_route_flags() -> None:
     from gtfs_ingest.cli import build_parser
 
     args = build_parser().parse_args(
-        ["analyze-frequency", "--feeds", "x.zip",
-         "--transport-mode", "bus,rail", "--transport-mode", "0",
-         "--route", "C98"]
+        [
+            "analyze-frequency",
+            "--feeds",
+            "x.zip",
+            "--transport-mode",
+            "bus,rail",
+            "--transport-mode",
+            "0",
+            "--route",
+            "C98",
+        ]
     )
     assert args.transport_mode == ["bus,rail", "0"]
     assert args.route == ["C98"]

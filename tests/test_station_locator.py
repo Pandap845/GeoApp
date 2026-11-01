@@ -27,8 +27,8 @@ def make_client(handler, max_calls=20) -> GooglePlacesClient:
     return GooglePlacesClient(
         api_key=API_KEY,
         max_calls=max_calls,
-        rate_per_s=0,           # no throttling in tests
-        backoff_base=0,         # no backoff sleeps in tests
+        rate_per_s=0,  # no throttling in tests
+        backoff_base=0,  # no backoff sleeps in tests
         transport=httpx.MockTransport(handler),
     )
 
@@ -158,9 +158,7 @@ def run_locator(tmp_path, handler, stations="Central, Juárez, Periférico", **o
     original = sl.GooglePlacesClient
 
     def patched(**kwargs):
-        return original(
-            **kwargs, backoff_base=0, transport=httpx.MockTransport(handler)
-        )
+        return original(**kwargs, backoff_base=0, transport=httpx.MockTransport(handler))
 
     sl.GooglePlacesClient = patched
     try:
@@ -208,8 +206,15 @@ def test_full_run_anchoring_and_real_times(tmp_path: Path) -> None:
 
     sheet = load_workbook(tmp_path / "stations_route.xlsx").active
     rows = list(sheet.iter_rows(values_only=True))
-    assert rows[0] == ("ID", "Nombre_Estación", "Modalidad", "Línea",
-                       "Latitud", "Longitud", "Estacion_Proxima")
+    assert rows[0] == (
+        "ID",
+        "Nombre_Estación",
+        "Modalidad",
+        "Línea",
+        "Latitud",
+        "Longitud",
+        "Estacion_Proxima",
+    )
     assert rows[1][:4] == (1, "Central", "SITREN", "2")
     assert rows[1][6] == "(Juárez, 2, 5.0min)"
     assert rows[3][6] == "N/A"  # last station has no next
@@ -282,8 +287,11 @@ def test_unresolved_station_gets_generic_edge_time(tmp_path: Path) -> None:
         raise AssertionError(f"unexpected request: {request.url}")
 
     report = run_locator(
-        tmp_path, handler, stations="Central, Fantasma",
-        use_distance_matrix=False, max_route_minutes=60.0,
+        tmp_path,
+        handler,
+        stations="Central, Fantasma",
+        use_distance_matrix=False,
+        max_route_minutes=60.0,
     )
     assert report.unresolved == ["Fantasma"]
     assert report.edges_generic == 1  # 60 / 2 stations = 30 min generic estimate
@@ -298,9 +306,7 @@ def test_noop_when_disabled(tmp_path: Path) -> None:
 
 
 def test_noop_when_key_missing(tmp_path: Path) -> None:
-    report = run_station_locator(
-        LocatorConfig(enabled=True, api_key=None, report_dir=tmp_path)
-    )
+    report = run_station_locator(LocatorConfig(enabled=True, api_key=None, report_dir=tmp_path))
     assert report.status == "skipped_no_key"
     assert report.calls_made == 0
 
@@ -310,8 +316,11 @@ def test_dry_run_reads_stations_but_makes_no_calls(tmp_path: Path) -> None:
     stations.write_text("A, B, C", encoding="utf-8")
     report = run_station_locator(
         LocatorConfig(
-            enabled=True, api_key=API_KEY, stations_file=stations,
-            report_dir=tmp_path, dry_run=True,
+            enabled=True,
+            api_key=API_KEY,
+            stations_file=stations,
+            report_dir=tmp_path,
+            dry_run=True,
         )
     )
     assert report.status == "dry_run"
@@ -324,8 +333,10 @@ def test_missing_stations_file_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="stations file"):
         run_station_locator(
             LocatorConfig(
-                enabled=True, api_key=API_KEY,
-                stations_file=tmp_path / "missing.txt", report_dir=tmp_path,
+                enabled=True,
+                api_key=API_KEY,
+                stations_file=tmp_path / "missing.txt",
+                report_dir=tmp_path,
             )
         )
 

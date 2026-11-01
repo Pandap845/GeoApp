@@ -10,7 +10,8 @@ Everything here works on a single feed.
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -37,7 +38,7 @@ class TimeWindow(BaseModel):
     end_s: int = Field(gt=0)
 
     @model_validator(mode="after")
-    def _ordered(self) -> "TimeWindow":
+    def _ordered(self) -> TimeWindow:
         if self.end_s <= self.start_s:
             raise ValueError(
                 f"window {self.name!r}: end must be after start "
@@ -46,7 +47,7 @@ class TimeWindow(BaseModel):
         return self
 
     @classmethod
-    def parse(cls, name: str, spec: str) -> "TimeWindow":
+    def parse(cls, name: str, spec: str) -> TimeWindow:
         """Window from "HH:MM-HH:MM" (e.g. "23:00-26:00"); raises ValueError if invalid."""
         try:
             start, end = spec.split("-")
@@ -102,8 +103,10 @@ def expand_frequencies(
     for col in ("start_time", "end_time", "headway_secs"):
         freq[col] = pd.to_numeric(freq[col], errors="coerce")
     valid = (
-        freq["start_time"].notna() & freq["end_time"].notna()
-        & freq["headway_secs"].notna() & (freq["headway_secs"] > 0)
+        freq["start_time"].notna()
+        & freq["end_time"].notna()
+        & freq["headway_secs"].notna()
+        & (freq["headway_secs"] > 0)
         & (freq["end_time"] > freq["start_time"])
     )
     if (~valid).any():
@@ -112,13 +115,12 @@ def expand_frequencies(
     if freq.empty:
         return pd.DataFrame(columns=columns)
 
-    n_runs = np.ceil(
-        (freq["end_time"] - freq["start_time"]) / freq["headway_secs"]
-    ).astype(int)
+    n_runs = np.ceil((freq["end_time"] - freq["start_time"]) / freq["headway_secs"]).astype(int)
     if (n_runs > max_runs).any():
         log.warning(
             "frequencies.txt: %d row(s) capped at %d run(s) each",
-            int((n_runs > max_runs).sum()), max_runs,
+            int((n_runs > max_runs).sum()),
+            max_runs,
         )
         n_runs = n_runs.clip(upper=max_runs)
 
@@ -133,9 +135,9 @@ def expand_frequencies(
     )
 
     # Offsets of each stop from the trip's first departure.
-    template = stop_times[
-        stop_times["trip_id"].isin(set(freq["trip_id"]))
-    ][["trip_id", "stop_id", "departure_time"]].dropna(subset=["departure_time"])
+    template = stop_times[stop_times["trip_id"].isin(set(freq["trip_id"]))][
+        ["trip_id", "stop_id", "departure_time"]
+    ].dropna(subset=["departure_time"])
     if template.empty:
         return pd.DataFrame(columns=columns)
     template = template.copy()
@@ -192,9 +194,7 @@ def stop_departures(feed: Any) -> pd.DataFrame:
     return merged[columns]
 
 
-def compute_stop_headways(
-    departures: pd.DataFrame, windows: Sequence[TimeWindow]
-) -> pd.DataFrame:
+def compute_stop_headways(departures: pd.DataFrame, windows: Sequence[TimeWindow]) -> pd.DataFrame:
     """Headway stats per (route, direction, stop, window) with at least one departure."""
     out_columns = GROUP_KEY + ["time_window", "trip_count"] + STAT_COLUMNS
     frames: list[pd.DataFrame] = []
@@ -230,8 +230,13 @@ def compute_stop_headways(
 def route_rollup(stop_headways: pd.DataFrame) -> pd.DataFrame:
     """Per route, direction and window: average of the stop mean headways, max trip count."""
     columns = [
-        "route_id", "direction_id", "time_window",
-        "mean_headway_s", "stop_count", "stops_with_headway", "trip_count",
+        "route_id",
+        "direction_id",
+        "time_window",
+        "mean_headway_s",
+        "stop_count",
+        "stops_with_headway",
+        "trip_count",
     ]
     if stop_headways.empty:
         return pd.DataFrame(columns=columns)

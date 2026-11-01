@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional
+from itertools import pairwise
 
 import geopandas as gpd
 import pandas as pd
@@ -23,7 +23,7 @@ from shapely import wkt as shapely_wkt
 from shapely.geometry import LineString, Point
 from sqlalchemy import Engine, text
 
-from .osm_match import OsmSchema
+from .osm_match import KNN_CANDIDATES, OsmSchema
 
 log = logging.getLogger(__name__)
 
@@ -35,8 +35,16 @@ ENDPOINT_TOLERANCE_M = 10.0
 NEARLY_COLLINEAR_M = 2.0
 
 SIDE_COLUMNS = [
-    "stop_uid", "feed_id", "stop_id", "osm_way_id", "highway", "oneway",
-    "perpendicular_distance_m", "side", "side_confidence", "near_endpoint",
+    "stop_uid",
+    "feed_id",
+    "stop_id",
+    "osm_way_id",
+    "highway",
+    "oneway",
+    "perpendicular_distance_m",
+    "side",
+    "side_confidence",
+    "near_endpoint",
 ]
 
 
@@ -53,7 +61,7 @@ class SideResult:
 def side_of_line(
     line: LineString,
     point: Point,
-    oneway: Optional[str] = None,
+    oneway: str | None = None,
     on_tolerance_m: float = ON_TOLERANCE_M,
     endpoint_tolerance_m: float = ENDPOINT_TOLERANCE_M,
 ) -> SideResult:
@@ -87,7 +95,7 @@ def _segment_at(line: LineString, along: float) -> tuple[tuple[float, float], tu
     """The segment that contains the point at distance *along* on the line."""
     coords = list(line.coords)
     cumulative = 0.0
-    for start, end in zip(coords, coords[1:]):
+    for start, end in pairwise(coords):
         length = math.dist(start, end)
         if along <= cumulative + length or end == coords[-1]:
             return (start[0], start[1]), (end[0], end[1])
@@ -109,27 +117,42 @@ def nearest_streets(engine: Engine, schema: OsmSchema) -> pd.DataFrame:
                            ST_Transform(w.{g}, 4326)::geography) AS distance_m
         FROM stops s
         LEFT JOIN LATERAL (
-            SELECT l.osm_id, l.highway, l.oneway, l.{g}
-            FROM {schema.line_table} l
-            WHERE l.highway IS NOT NULL
-            ORDER BY l.{g} <-> ST_Transform(s.geom, :line_srid)
+            SELECT osm_id, highway, oneway, {g} FROM (
+                SELECT l.osm_id, l.highway, l.oneway, l.{g},
+                       l.{g} <-> ST_Transform(s.geom, :line_srid) AS knn_d
+                FROM {schema.line_table} l
+                WHERE l.highway IS NOT NULL
+                ORDER BY l.{g} <-> ST_Transform(s.geom, :line_srid)
+                LIMIT {KNN_CANDIDATES}
+            ) candidates
+            ORDER BY knn_d, osm_id
             LIMIT 1
         ) w ON TRUE
+        ORDER BY s.stop_uid
         """
     ).bindparams(line_srid=schema.line_srid)
     with engine.connect() as conn:
         rows = conn.execute(sql).mappings().all()
     return pd.DataFrame(
         rows,
-        columns=["stop_uid", "feed_id", "stop_id", "stop_wkt",
-                 "osm_id", "highway", "oneway", "way_wkt", "distance_m"],
+        columns=[
+            "stop_uid",
+            "feed_id",
+            "stop_id",
+            "stop_wkt",
+            "osm_id",
+            "highway",
+            "oneway",
+            "way_wkt",
+            "distance_m",
+        ],
     )
 
 
 def compute_sides(
     streets: pd.DataFrame,
     threshold_m: float,
-    metric_crs: Optional[str] = None,
+    metric_crs: str | None = None,
 ) -> pd.DataFrame:
     """Side of street per stop; streets farther than *threshold_m* leave the row empty."""
     if streets.empty:
@@ -148,10 +171,12 @@ def compute_sides(
         return base[SIDE_COLUMNS]
 
     subset = streets[usable]
-    points = gpd.GeoSeries(subset["stop_wkt"].map(shapely_wkt.loads).to_list(),
-                           index=subset.index, crs="EPSG:4326")
-    lines = gpd.GeoSeries(subset["way_wkt"].map(shapely_wkt.loads).to_list(),
-                          index=subset.index, crs="EPSG:4326")
+    points = gpd.GeoSeries(
+        subset["stop_wkt"].map(shapely_wkt.loads).to_list(), index=subset.index, crs="EPSG:4326"
+    )
+    lines = gpd.GeoSeries(
+        subset["way_wkt"].map(shapely_wkt.loads).to_list(), index=subset.index, crs="EPSG:4326"
+    )
     crs = metric_crs or points.estimate_utm_crs()
     points, lines = points.to_crs(crs), lines.to_crs(crs)
 
@@ -163,7 +188,9 @@ def compute_sides(
             continue  # keep the NULL "needs data" row
         result = side_of_line(line, points.loc[idx], subset.at[idx, "oneway"])
         base.loc[idx, ["osm_way_id", "highway", "oneway"]] = (
-            subset.at[idx, "osm_id"], subset.at[idx, "highway"], subset.at[idx, "oneway"],
+            subset.at[idx, "osm_id"],
+            subset.at[idx, "highway"],
+            subset.at[idx, "oneway"],
         )
         base.loc[idx, "perpendicular_distance_m"] = round(result.perpendicular_distance_m, 2)
         base.loc[idx, "side"] = result.side
@@ -172,7 +199,8 @@ def compute_sides(
 
     log.info(
         "Side-of-street: %d/%d stops resolved (%d low confidence)",
-        int(base["side"].notna().sum()), len(base),
+        int(base["side"].notna().sum()),
+        len(base),
         int((base["side_confidence"] == "low").sum()),
     )
     return base[SIDE_COLUMNS]

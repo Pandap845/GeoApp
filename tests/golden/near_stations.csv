@@ -1,0 +1,5 @@
+ID,stop_uid,station,system,stop_id,stop_lat,stop_lon,stop_line_ids,near_stations,same_line_stations
+1,metro:S1,Main St,Metro Transit,S1,40.0,-75.0,"1-10, 1-20",[],"[(3, Central Platform, 10, dir0, 1030.0), (3, Central Platform, 20, dir0, 10.0)]"
+2,metro:S2,Central Station,,S2,40.01,-75.01,,"[(3, Central Platform, 10, 1), (3, Central Platform, 20, 1)]",[]
+3,metro:S3,Central Platform,Metro Transit,S3,40.0101,-75.0099,"3-10, 3-20","[(2, Central Station, -, 1)]","[(1, Main St, 10, dir0, 1030.0), (1, Main St, 20, dir0, 10.0)]"
+4,other:X1,Main St,Other Transit,X1,40.00009,-75.0,4-X9,[],[]

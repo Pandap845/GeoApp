@@ -1,0 +1,2 @@
+group_id,canonical_uid,stop_uid_a,stop_uid_b,distance_m,name_score,shared_routes,score,match_kind
+0,metro:S1,metro:S1,other:X1,9.99,1.0,0,0.834,cross_feed

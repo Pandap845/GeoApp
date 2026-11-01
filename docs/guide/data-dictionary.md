@@ -112,7 +112,7 @@ conectividad ni topología de misma línea; se reporta con estado `stops_only`.
 
 | Columna | Significado |
 | --- | --- |
-| `ID` | Id secuencial de nodo **de este archivo** (1..N en orden de fila). Es la clave que usan todas las columnas de relación. No es estable entre corridas con feeds distintos; para cruces durables usar `stop_uid` |
+| `ID` | Id secuencial de nodo **de este archivo** (1..N en orden de `stop_uid`). Es la clave que usan todas las columnas de relación. No es estable entre corridas con feeds distintos; para cruces durables usar `stop_uid` |
 | `stop_uid` | Clave global durable (`feed:stop`); une con la tabla `stops` de PostGIS |
 | `station` | Nombre de la parada (`stop_name`) |
 | `system` | Sistema(s) que la sirven — `agency_name` de las líneas activas; varios se unen por coma ("Mi Macro, Sitren"); vacío = sin servicio ese día |

@@ -10,7 +10,7 @@ Two layers of defense are asserted:
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -27,9 +27,23 @@ from gtfs_ingest.qa.storage import (
 
 #: Google content that must NEVER become a column.
 FORBIDDEN_COLUMNS = {
-    "name", "display_name", "google_name", "formatted_address", "address",
-    "rating", "phone", "latitude", "longitude", "lat", "lon", "location",
-    "types", "transit_station", "vehicle_type", "lines", "agency",
+    "name",
+    "display_name",
+    "google_name",
+    "formatted_address",
+    "address",
+    "rating",
+    "phone",
+    "latitude",
+    "longitude",
+    "lat",
+    "lon",
+    "location",
+    "types",
+    "transit_station",
+    "vehicle_type",
+    "lines",
+    "agency",
 }
 
 
@@ -39,16 +53,20 @@ def valid_interchange_record() -> dict:
         "verdict": "CONFIRMED",
         "mode_agreement": True,
         "google_place_id": "opaque-id",
-        "checked_at": datetime.now(timezone.utc),
+        "checked_at": datetime.now(UTC),
     }
 
 
 def test_allowlists_contain_only_permitted_concepts() -> None:
     # place_id (opaque), verdict/flags, timestamp, and OUR keys - nothing else.
-    assert ALLOWED_INTERCHANGE_COLUMNS == {
-        "interchange_cluster_id", "verdict", "mode_agreement", "google_place_id", "checked_at",
-    }
-    assert ALLOWED_STOP_COLUMNS == {"stop_uid", "verdict", "google_place_id", "checked_at"}
+    assert {
+        "interchange_cluster_id",
+        "verdict",
+        "mode_agreement",
+        "google_place_id",
+        "checked_at",
+    } == ALLOWED_INTERCHANGE_COLUMNS
+    assert {"stop_uid", "verdict", "google_place_id", "checked_at"} == ALLOWED_STOP_COLUMNS
     assert not (ALLOWED_INTERCHANGE_COLUMNS | ALLOWED_STOP_COLUMNS) & FORBIDDEN_COLUMNS
 
 
@@ -61,15 +79,19 @@ def test_runtime_guard_rejects_extra_columns_before_any_sql() -> None:
     with pytest.raises(StorageViolation, match="rating"):
         upsert_stop_verdicts(  # type: ignore[arg-type]
             None,
-            [{"stop_uid": "f:S1", "verdict": "STATION_FOUND",
-              "google_place_id": None, "checked_at": datetime.now(timezone.utc),
-              "rating": 4.5}],
+            [
+                {
+                    "stop_uid": "f:S1",
+                    "verdict": "STATION_FOUND",
+                    "google_place_id": None,
+                    "checked_at": datetime.now(UTC),
+                    "rating": 4.5,
+                }
+            ],
         )
 
 
-@pytest.mark.parametrize(
-    "forbidden", ["displayName", "formattedAddress", "location", "rating"]
-)
+@pytest.mark.parametrize("forbidden", ["displayName", "formattedAddress", "location", "rating"])
 def test_runtime_guard_rejects_raw_google_fields(forbidden: str) -> None:
     with pytest.raises(StorageViolation):
         _assert_persistable(
@@ -103,7 +125,9 @@ def test_insert_statements_use_only_allowlisted_columns() -> None:
     for match in re.finditer(r"INSERT INTO (\w+)\s*\(([^)]*)\)", source):
         table, cols = match.group(1), {c.strip().lower() for c in match.group(2).split(",")}
         allowed = (
-            ALLOWED_INTERCHANGE_COLUMNS if table == "google_qa_interchange" else ALLOWED_STOP_COLUMNS
+            ALLOWED_INTERCHANGE_COLUMNS
+            if table == "google_qa_interchange"
+            else ALLOWED_STOP_COLUMNS
         )
         assert cols <= allowed, f"{table} INSERT writes non-allowlisted columns: {cols - allowed}"
         assert not cols & FORBIDDEN_COLUMNS
