@@ -38,7 +38,7 @@ Ignore `gtfs_ingest/.venv` (a stray second virtualenv); the project env is the r
 
 | Module | Role |
 | --- | --- |
-| `service_filter.py` | pick the service date (explicit, busiest, common, or a range) and filter the feed to it |
+| `service_filter.py` | pick the service date (explicit, typical weekday (default), busiest, common, or a range) and filter the feed to it |
 | `headways.py` | headways per (route, direction, stop, window); expands `frequencies.txt` |
 | `connectivity.py` | route–stop map, proximity pairs, route-to-route edges |
 | `dedupe.py` | station deduplication (cross-feed + within-feed) |

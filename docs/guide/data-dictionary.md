@@ -110,6 +110,11 @@ conectividad ni topología de misma línea; se reporta con estado `stops_only`.
 
 ## 2. near_stations.csv — una fila por parada
 
+La fecha analizada es, por defecto, un **día hábil típico** de cada feed: el
+patrón de servicio de lunes a viernes más común en días sin excepciones de
+`calendar_dates.txt` (se excluyen los feriados), en un martes a jueves. La
+fecha usada y el motivo quedan en `analysis_report.json`.
+
 Por defecto solo incluye paradas que **algún viaje usa**: una parada
 (`location_type` 0) que no aparece en ninguna fila de `stop_times.txt` no se
 puede abordar y se omite (`--no-drop-unserved-stops` la conserva). Sigue en

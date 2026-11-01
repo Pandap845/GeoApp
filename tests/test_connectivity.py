@@ -430,9 +430,11 @@ def test_incoherent_dates_flagged_and_analysis_date_recorded(tmp_path: Path) -> 
     report = json.loads((out / JSON_NAME).read_text(encoding="utf-8"))
     assert report["analysis_date"] == "2026-07-12"
     assert report["service_dates_coherent"] is False
-    assert len(report["service_dates"]) == 2  # busiest 2020 vs 2026
+    assert len(report["service_dates"]) == 2  # a 2020 and a 2026 weekday
+    assert "share no date with service" in report["service_dates_note"]
+    assert {f["service_date_source"] for f in report["feeds"]} == {"typical_weekday"}
     md = (out / MARKDOWN_NAME).read_text(encoding="utf-8")
-    assert "DIFFERENT service dates" in md
+    assert "DIFFERENT service dates" in md and "share no date" in md
     # The expired 2020 feed gets deterministic notes against the clock.
     old_feed = next(f for f in report["feeds"] if f["feed_id"] == "old")
     assert old_feed["calendar_status"] == "expired"
@@ -1031,3 +1033,65 @@ def test_analyze_writes_route_connection_csvs(tmp_path: Path) -> None:
     assert len(routes) == report["graph"]["n_routes"]
     assert list(routes.columns)[:3] == ["route_uid", "feed_id", "route_id"]
     assert list(served.columns) == ["route_uid", "stop_uid"]
+
+
+def test_feed_service_date_pins_one_feed(tmp_path: Path) -> None:
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+
+    report = json.loads(
+        (_run_cli_report(tmp_path, "out", "--feed-service-date", "metro=2026-01-03")).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    (feed,) = report["feeds"]
+    assert feed["service_date"] == "2026-01-03"  # a Saturday, pinned
+    assert feed["service_date_source"] == "explicit"
+
+
+def test_bad_feed_service_date_spec_exits_1(tmp_path: Path) -> None:
+    from gtfs_ingest import cli
+
+    write_feed_dir(tmp_path / "feeds", "metro", ANALYSIS_FEED)
+    base = [
+        "analyze-frequency",
+        "--feeds",
+        str(tmp_path / "feeds"),
+        "--dry-run",
+        "--report",
+        str(tmp_path / "out"),
+    ]
+    assert cli.main([*base, "--feed-service-date", "metro"]) == 1
+    assert cli.main([*base, "--feed-service-date", "metro=2026-01-03", "--common-date"]) == 1
+
+
+def test_date_rule_default_is_the_same_in_cli_and_config() -> None:
+    from gtfs_ingest import cli
+    from gtfs_ingest.analysis.pipeline_phase2 import AnalysisConfig
+    from gtfs_ingest.analysis.service_filter import DEFAULT_DATE_RULE
+
+    args = cli.build_parser().parse_args(["analyze-frequency", "--feeds", "x", "--dry-run"])
+    assert args.date_rule == DEFAULT_DATE_RULE
+    assert AnalysisConfig(feed_paths=[]).date_rule == DEFAULT_DATE_RULE
+
+
+def _run_cli_report(tmp_path: Path, out_name: str, *extra: str) -> Path:
+    """Run analyze-frequency (dry run, no --service-date) and return the JSON path."""
+    from gtfs_ingest import cli
+
+    out = tmp_path / out_name
+    assert (
+        cli.main(
+            [
+                "analyze-frequency",
+                "--feeds",
+                str(tmp_path / "feeds"),
+                "--report",
+                str(out),
+                "--dry-run",
+                *extra,
+            ]
+        )
+        == 0
+    )
+    return out / JSON_NAME

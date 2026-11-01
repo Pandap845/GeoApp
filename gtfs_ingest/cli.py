@@ -158,6 +158,7 @@ def _add_ingest_parser(subparsers: Any) -> None:
 
 
 def _add_analyze_parser(subparsers: Any) -> None:
+    from .analysis.service_filter import DATE_RULES, DEFAULT_DATE_RULE
     from .analysis.station_network import PRUNE_STATION_NETWORK
 
     analyze = subparsers.add_parser(
@@ -170,7 +171,24 @@ def _add_analyze_parser(subparsers: Any) -> None:
         default=None,
         metavar="YYYY-MM-DD",
         help="Service date to analyze (calendar + calendar_dates honored). "
-        "Default: each feed's busiest date.",
+        "Default: each feed's date from --date-rule.",
+    )
+    analyze.add_argument(
+        "--date-rule",
+        choices=DATE_RULES,
+        default=DEFAULT_DATE_RULE,
+        help="How to pick a feed's date when none is given: typical-weekday (the "
+        "most common Monday-Friday service on days without calendar_dates "
+        "exceptions, middle Tue-Thu date) or busiest (most trips; in these feeds "
+        "a holiday). Default: typical-weekday.",
+    )
+    analyze.add_argument(
+        "--feed-service-date",
+        action="append",
+        default=None,
+        metavar="FEED_ID=YYYY-MM-DD",
+        help="Pin one feed's service date (repeatable). Needed when feeds' "
+        "calendars don't overlap. Other feeds keep --service-date or the rule.",
     )
     analyze.add_argument(
         "--service-date-range",
@@ -185,7 +203,7 @@ def _add_analyze_parser(subparsers: Any) -> None:
         "--common-date",
         action="store_true",
         help="Resolve ONE service date shared by ALL feeds (the latest date "
-        "every feed has active service) instead of per-feed busiest dates; "
+        "every feed has active service) instead of per-feed dates; "
         "exits 1 when the feeds' calendars share no such date.",
     )
     _add_analysis_date(
@@ -600,13 +618,30 @@ def _date_options(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if len(date_modes) > 1:
         raise ValueError(f"{' and '.join(date_modes)} are mutually exclusive")
+    if args.feed_service_date and (args.service_date_range or args.common_date):
+        raise ValueError(
+            "--feed-service-date can't be combined with --service-date-range or --common-date"
+        )
     return {
         "service_date": date.fromisoformat(args.service_date) if args.service_date else None,
         "service_date_range": (
             _parse_date_range(args.service_date_range) if args.service_date_range else None
         ),
         "common_date": args.common_date,
+        "date_rule": args.date_rule,
+        "feed_service_dates": _feed_dates(args.feed_service_date),
     }
+
+
+def _feed_dates(specs: list[str] | None) -> dict[str, date]:
+    """--feed-service-date FEED_ID=YYYY-MM-DD values as {feed_id: date}."""
+    pins: dict[str, date] = {}
+    for spec in specs or []:
+        feed_id, sep, day = spec.partition("=")
+        if not sep or not feed_id.strip() or not day.strip():
+            raise ValueError(f"--feed-service-date {spec!r}: expected FEED_ID=YYYY-MM-DD")
+        pins[feed_id.strip()] = date.fromisoformat(day.strip())
+    return pins
 
 
 def _windows(specs: list[str] | None) -> list:

@@ -225,8 +225,17 @@ report.
 Headways depend on *which trips run that day*. partridge resolves the
 active `service_id`s from `calendar.txt` (weekday pattern + validity range)
 **and** `calendar_dates.txt` exceptions (type 1 added / type 2 removed).
-Without `--service-date`, each feed's **busiest date** (most active trips)
-is used and recorded. The filter cascades through the feed's dependency
+Without `--service-date`, each feed's date comes from `--date-rule`:
+**`typical-weekday`** (default) takes the most common Monday–Friday service
+pattern on days that `calendar_dates.txt` doesn't touch (so holidays never
+count) and picks the middle Tuesday–Thursday date with that pattern;
+**`busiest`** takes the date with most trips. In the Guadalajara feeds
+`busiest` is a holiday: holidays add Sunday service on top of the
+Monday–Saturday service, so they have more trips than any real day (mdb:
+807 against 511 on a weekday). `--feed-service-date FEED_ID=YYYY-MM-DD`
+pins one feed, which is needed when the feeds' calendars don't overlap.
+The report records the date, how it was picked and why.
+The filter cascades through the feed's dependency
 graph. Times become **seconds since service-day midnight**; GTFS times past
 24:00 stay as-is (`25:10:00` → 90600 s).
 
@@ -265,16 +274,17 @@ mean/median/min/max_headway_s = statistics over gaps      # seconds
   feed's declared service (calendar + added calendar_dates) ends before
   today; Phase 2 records `calendar_end`/`calendar_status` per feed and
   notes expired calendars, out-of-validity analysis dates, and auto-picked
-  "busiest" dates more than 30 days in the past. Nothing blocks — the
+  dates more than 30 days in the past. Nothing blocks — the
   analysis is valid *for its date*; the reader just learns how old that
   date is. All these judgments compare against the run's **analysis
   clock** (`--analysis-date` / `GTFS_ANALYSIS_DATE`, default today,
   resolved once per run and recorded in the reports) — identical inputs +
   identical clock ⇒ identical findings.
 - **Service-date coherence**: when the analyzed feeds resolve to different
-  service days (e.g. per-feed busiest dates years apart), the report sets
-  `service_dates_coherent: false` and warns — the cross-feed outputs mix
-  non-contemporaneous schedules. `--common-date` resolves one day every
+  service days, the report sets `service_dates_coherent: false` and
+  `service_dates_note` says why: the calendars share no date (each feed
+  then uses its own typical weekday, as in Guadalajara: 2020–2022 vs
+  2024), or they overlap and `--common-date` would give one shared day. `--common-date` resolves one day every
   feed serves (latest such date; exit 1 when the calendars don't overlap).
 - **Date ranges** (`--service-date-range START..END`, ≤ 31 days): each
   served day in the window is analyzed separately (headway gaps never span

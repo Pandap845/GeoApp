@@ -167,11 +167,88 @@ def test_calendar_dates_exception_removes_service(tmp_path: Path) -> None:
     assert selection.service_ids == frozenset()
 
 
-def test_busiest_date_fallback(tmp_path: Path) -> None:
+def test_typical_weekday_is_the_default(tmp_path: Path) -> None:
     source = analysis_source(tmp_path)
     _, selection = load_service_feed(source, None)
+    assert selection.source == "typical_weekday"
+    assert selection.service_ids == frozenset({"WK"})
+    assert selection.service_date.weekday() in (1, 2, 3)  # Tuesday-Thursday
+    assert selection.service_date != date(2026, 1, 5)  # the calendar_dates exception
+    assert "typical weekday" in selection.note
+
+
+def test_busiest_rule_is_still_available(tmp_path: Path) -> None:
+    source = analysis_source(tmp_path)
+    _, selection = load_service_feed(source, None, rule="busiest")
     assert selection.source == "busiest"
     assert selection.service_ids  # non-empty
+
+
+#: Like the Guadalajara feeds: on a holiday, calendar_dates adds Sunday service
+#: D on top of Monday-Saturday LS and removes weekday-only LV.
+HOLIDAY_FEED = feed_files(
+    replace={
+        "calendar.txt": (
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            "LS,1,1,1,1,1,1,0,20260101,20261231\n"
+            "LV,1,1,1,1,1,0,0,20260101,20261231\n"
+            "D,0,0,0,0,0,0,1,20260101,20261231\n"
+        ),
+        "calendar_dates.txt": ("service_id,date,exception_type\nD,20260317,1\nLV,20260317,2\n"),
+        "trips.txt": (
+            "route_id,service_id,trip_id\nR1,LS,T1\nR1,LV,T2\nR1,D,T3\nR1,D,T4\nR1,D,T5\n"
+        ),
+        "stop_times.txt": (
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+            + "".join(f"T{i},08:00:00,08:00:00,S1,1\n" for i in range(1, 6))
+        ),
+    }
+)
+
+
+def test_holiday_is_busiest_but_not_the_typical_weekday(tmp_path: Path) -> None:
+    from gtfs_ingest.analysis.service_filter import typical_weekday
+
+    path = str(write_feed_dir(tmp_path, "holiday", HOLIDAY_FEED))
+
+    busiest = resolve_service(path, None, rule="busiest")
+    typical = typical_weekday(path)
+
+    assert busiest.service_date == date(2026, 3, 17)  # LS + D = 4 trips
+    assert typical is not None
+    assert typical.service_ids == frozenset({"LS", "LV"})
+    assert typical.service_date != date(2026, 3, 17)
+
+
+def test_typical_weekday_falls_back_to_busiest_without_weekdays(tmp_path: Path) -> None:
+    weekend = feed_files(
+        replace={
+            "calendar.txt": (
+                "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+                "SA,0,0,0,0,0,1,0,20260101,20261231\n"
+            ),
+            "trips.txt": "route_id,service_id,trip_id\nR1,SA,T1\n",
+        }
+    )
+    path = str(write_feed_dir(tmp_path, "weekend", weekend))
+
+    selection = resolve_service(path, None)
+
+    assert selection.source == "busiest"
+    assert "no regular weekday" in selection.note
+
+
+def test_most_common_pattern_breaks_ties_by_trips() -> None:
+    from collections import Counter
+
+    from gtfs_ingest.analysis.service_filter import _most_common_pattern
+
+    candidates = {
+        date(2026, 1, 6): frozenset({"A"}),
+        date(2026, 1, 7): frozenset({"B"}),
+    }
+    assert _most_common_pattern(candidates, Counter({"A": 1, "B": 5})) == frozenset({"B"})
+    assert _most_common_pattern(candidates, Counter()) == frozenset({"A"})  # then by ids
 
 
 def test_post_24h_times_parsed_as_seconds(tmp_path: Path) -> None:

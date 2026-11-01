@@ -45,7 +45,7 @@ import pandas as pd
 import pyogrio
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT_DIR = ROOT / "outputs" / "out_mibici_v8"
+OUT_DIR = ROOT / "outputs" / "out_mibici_v9"
 
 NEAR_STATIONS = OUT_DIR / "near_stations.csv"
 ROUTE_STOPS = OUT_DIR / "route_stops.csv"

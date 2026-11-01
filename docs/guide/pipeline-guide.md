@@ -1183,15 +1183,15 @@ erDiagram
 
 | Step | Result |
 | --- | --- |
-| 6 Service date | 2020-01-01 and 2024-01-01 (busiest per feed) — **not coherent** |
-| 8 Headways | 102,460 stop-level rows, 2,001 route rollups, 274 routes |
+| 6 Service date | typical weekday per feed: 2021-05-04 (improved) and 2024-06-27 (mdb); the calendars don't overlap, so **not coherent** (the old "busiest" rule picked the holidays 2020-01-01 and 2024-01-01) |
+| 8 Headways | 106,174 stop-level rows, 2,076 route rollups, 287 routes (84 + 511 trips) |
 | 11 Dedupe | 3,584 pairs accepted among served stops; 772 rejected as same-feed conflicts |
 | 11 Stations | 12,768 served records → **10,203** physical stations (11,054 keeping unserved stops, 10,533 before the conflict rule) |
-| 12 Connectivity | 9,112 route pairs: 3,669 `same_stop`, 1,428 `same_station_dedup`, 4,015 `proximity` |
+| 12 Connectivity | 10,255 route pairs: 3,887 `same_stop`, 1,619 `same_station_dedup`, 4,749 `proximity` |
 | 13 Walk graph | 129,039 ways → 512,420 vertices, 1,186,804 directed edges |
 | 13 Routing | 87,708 of 91,773 pairs on streets; typical walk 1.33× the straight line |
 | 15 `walk_source` | network 12,252 · mixed 1,356 · none 451 · straight_line 290 |
-| 16 Station network | 12,768 nodes (1,581 never-served stops left out); 25,485 in_vehicle + 144,572 walk + 5,624 same_station arcs; **1 weak component** among transit stops; 42,557 walk + 247 same_station pairs redundant (with `--prune-station-network`: 59,458 walk + 5,130 same_station arcs, same shortest times) |
+| 16 Station network | 12,768 nodes (1,581 never-served stops left out); 26,418 in_vehicle + 144,572 walk + 5,624 same_station arcs; **1 weak component** among transit stops, 9 stops one-way reachable (route terminals); 42,557 walk + 247 same_station pairs redundant (with `--prune-station-network`: 59,458 walk + 5,130 same_station arcs, same shortest times) |
 
 ### Phase 3
 
@@ -1215,6 +1215,8 @@ A "neighbour" here is a stop of a **different** physical station. At 150 m,
 Raising the threshold to 300 m connects 2,110 records; the 451 still isolated
 lie mostly along outer radial corridors where stops really are far apart.
 
+Measured on the October 2026 runs (busiest date, unserved stops kept):
+
 | | 150 m | 300 m |
 | --- | ---: | ---: |
 | Isolated stations | 1,236 | 206 |
@@ -1229,7 +1231,7 @@ lie mostly along outer radial corridors where stops really are far apart.
 | Parameter | Default | Step | Controls |
 | --- | --- | --- | --- |
 | `--analysis-date` | today | 3, 6 | reference date for expiry and staleness notes |
-| `--service-date` | busiest per feed | 6 | the day analyzed |
+| `--service-date` / `--date-rule` | typical weekday per feed | 6 | the day analyzed |
 | `--common-date` | off | 6 | one shared day across feeds |
 | `--service-date-range` | — | 6 | every served day in a window, ≤ 31 |
 | `--window NAME=HH:MM-HH:MM` | 4 windows | 8 | headway windows |

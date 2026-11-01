@@ -249,7 +249,9 @@ Flags shared by both subcommands:
 
 | Flag | Description |
 | --- | --- |
-| `--service-date YYYY-MM-DD` | Service date to analyze (calendar + calendar_dates honored). Default: each feed's **busiest** date. |
+| `--service-date YYYY-MM-DD` | Service date to analyze (calendar + calendar_dates honored). Default: each feed's date from `--date-rule`. |
+| `--date-rule typical-weekday\|busiest` | How to pick a feed's date when none is given. Default **typical-weekday**: the most common Monday–Friday service on days without `calendar_dates` exceptions, middle Tue–Thu date. `busiest` = most trips (a holiday in these feeds). |
+| `--feed-service-date FEED_ID=YYYY-MM-DD` | Pin one feed's date (repeatable); other feeds keep `--service-date` or the rule. Not combinable with `--common-date` / `--service-date-range`. |
 | `--service-date-range START..END` | Analyze every served day in the window (max 31 days). Headways get **one row per day** (the DB PKs include `service_date`; existing databases are migrated automatically and idempotently on the next run); connectivity/near-stations use the union of days. The report shows `service_date` as `START..END` with `days_analyzed`. |
 | `--common-date` | Resolve ONE service date shared by ALL feeds (the latest date every feed has active service) — coherent cross-feed outputs by construction. Exits 1 when the calendars share no such date. |
 | `--analysis-date YYYY-MM-DD` | Reference date for expiry/staleness notes (also `GTFS_ANALYSIS_DATE`; default today, resolved once per run). Makes reports reproducible — also accepted by `ingest` for the `feed_expired` check. |
@@ -743,10 +745,19 @@ proximity falls back to local computation (see below).
 Trips are filtered to those active on the chosen date using partridge,
 honoring **both** `calendar.txt` (weekday pattern + validity range) and
 `calendar_dates.txt` exceptions (added/removed service), including feeds
-that ship only `calendar_dates.txt`. Without `--service-date`, each feed's
-**busiest date** (most active trips) is auto-selected and recorded in the
-report. A date with no service in a feed marks that feed `no_service` and
-the run continues.
+that ship only `calendar_dates.txt`. A date with no service in a feed
+marks that feed `no_service` and the run continues.
+
+Without `--service-date`, each feed's date comes from `--date-rule`:
+**`typical-weekday`** (default) takes the most common Monday–Friday service
+pattern on days that `calendar_dates.txt` doesn't touch (so holidays never
+count) and picks the middle Tuesday–Thursday date with that pattern;
+**`busiest`** takes the date with most trips. In the Guadalajara feeds
+`busiest` is a holiday: holidays add Sunday service on top of the
+Monday–Saturday service, so they have more trips than any real day (mdb:
+807 against 511 on a weekday). `--feed-service-date FEED_ID=YYYY-MM-DD`
+pins one feed, which is needed when the feeds' calendars don't overlap.
+The report records the date, how it was picked and why.
 
 ## Headway definition (exact)
 
@@ -969,7 +980,7 @@ Files in `--report DIR`:
   reads the un-expanded template pattern.
 - Expired calendars don't block analysis: the report carries
   `calendar_status`/`calendar_end` per feed plus notes for expired feeds
-  and stale auto-picked busiest dates (> 30 days old).
+  and stale auto-picked dates (> 30 days old).
 - The route rollup is unweighted across stops (each stop counts equally).
 - A feed that fails anywhere in analysis is recorded `failed` with the
   exception message in its notes; the run continues (same isolation

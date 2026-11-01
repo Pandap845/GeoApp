@@ -25,6 +25,7 @@ $PY -m gtfs_ingest.cli analyze-frequency   --feeds $FEEDS --report $OUT --networ
 ```
 
 `analyze-frequency` runs twice because the quality sidecar needs the OSM matches that only `conflate-osm` writes.
+Service dates: each feed gets its typical weekday (2021-05-04 improved, 2024-06-27 mdb). To freeze them, add `--feed-service-date improved_gtfs_mimacro_mitren_sitren=2021-05-04 --feed-service-date mdb_2366_202502241922=2024-06-27` to both `analyze-frequency` lines.
 Each run replaces the database tables, so only the files in `outputs/` keep older results.
 Use a new `outputs/<name>` folder per run and compare folders, never overwrite the reference runs.
 
@@ -51,7 +52,8 @@ CI (`.github/workflows/tests.yml`): lint (ruff check + format, blocking), unit m
 | `--proximity-m` | 150 | paper runs use 300 |
 | `--dedupe-distance-m` | 30 | cross-feed radius |
 | `--dedupe-within-feed-distance-m` | 5 | `0` disables; must equal `WITHIN_FEED_DISTANCE_M` |
-| `--service-date` / `--common-date` / `--service-date-range` | busiest per feed | see data-findings.md before relying on "busiest" |
+| `--service-date` / `--common-date` / `--service-date-range` | typical weekday per feed | `--date-rule busiest` for the old rule (picks holidays here) |
+| `--feed-service-date FEED_ID=DATE` | — | pin one feed; the feeds' calendars don't overlap |
 | `--network-walk` | off | OSM street walking distances |
 | `--no-dedupe` | dedupe on | |
 | `--no-drop-unserved-stops` | unserved stops dropped | keeps stops no trip uses |

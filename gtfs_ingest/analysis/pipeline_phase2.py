@@ -45,6 +45,8 @@ from .headways import (
     stop_departures,
 )
 from .service_filter import (
+    DEFAULT_DATE_RULE,
+    DateRule,
     common_service_date,
     load_feed_for_service_ids,
     load_service_feed,
@@ -72,8 +74,8 @@ ROUTE_COLUMNS = [
 JSON_NAME = "analysis_report.json"
 MARKDOWN_NAME = "analysis_report.md"
 
-#: A "busiest" date older than this many days gets a staleness note.
-STALE_BUSIEST_DAYS = 30
+#: An auto-picked date older than this many days gets a staleness note.
+STALE_AUTO_DATE_DAYS = 30
 
 #: Columns of an empty route_stops frame (no feed was analyzed).
 ROUTE_STOP_COLUMNS = ["feed_id", "route_id", "route_uid", "stop_id", "stop_uid"]
@@ -82,7 +84,8 @@ ROUTE_STOP_COLUMNS = ["feed_id", "route_id", "route_uid", "stop_id", "stop_uid"]
 class AnalysisConfig(BaseModel):
     """Configuration of one Phase 2 run.
 
-    service_date None picks each feed's busiest date. mode_codes/route_specs
+    service_date None picks each feed's date with date_rule (typical weekday by
+    default); feed_service_dates pins single feeds. mode_codes/route_specs
     keep routes matching either filter. dedupe_within_feed_distance_m defaults
     to 5 m like the CLI; None turns that rule off. drop_unserved_stops leaves
     out stops no trip uses. dry_run skips the database.
@@ -94,6 +97,8 @@ class AnalysisConfig(BaseModel):
     service_date: date | None = None
     service_date_range: tuple[date, date] | None = None
     common_date: bool = False
+    date_rule: DateRule = DEFAULT_DATE_RULE
+    feed_service_dates: dict[str, date] = Field(default_factory=dict)
     analysis_date: date = Field(default_factory=date.today)
     proximity_m: float = Field(default=150.0, gt=0)
     windows: list[TimeWindow] = Field(default_factory=lambda: list(DEFAULT_WINDOWS))
@@ -121,7 +126,8 @@ class FeedAnalysis(BaseModel):
     source_path: str
     status: str  # "analyzed" | "stops_only" | "no_service" | "filtered_out" | "failed"
     service_date: str | None = None  # ISO date, or "START..END" for ranges
-    service_date_source: str | None = None  # "explicit" | "busiest" | "common" | "range"
+    # "explicit" | "typical_weekday" | "busiest" | "common" | "range"
+    service_date_source: str | None = None
     days_analyzed: int | None = None  # served days (range runs only)
     routes_analyzed: int = 0
     trips_analyzed: int = 0
@@ -157,6 +163,8 @@ class AnalysisReport(BaseModel):
     # False when feeds were analyzed on different days (outputs then mix schedules).
     service_dates_coherent: bool = True
     service_dates: list[str] = Field(default_factory=list)
+    # Why the dates differ, when they do (empty when coherent).
+    service_dates_note: str = ""
     # Stops-only CSV sources (geometry, no schedule).
     stops_only_feeds: list[str] = Field(default_factory=list)
     stops_only_stops: int = 0
@@ -426,12 +434,14 @@ def _analyze_single_day(
     calendar: tuple[date | None, date | None],
     result: FeedAnalysis,
 ) -> _FeedData | None:
-    """Analyze one day (explicit, busiest or --common-date); None if nothing runs."""
+    """Analyze one day (pinned, explicit, rule-picked or common); None if nothing runs."""
+    pinned = config.feed_service_dates.get(source.feed_id)
     feed, selection = load_service_feed(
         source,
-        config.service_date,
+        pinned or config.service_date,
         route_ids=allowed,
-        label="common" if config.common_date else "explicit",
+        label="common" if config.common_date and pinned is None else "explicit",
+        rule=config.date_rule,
     )
     day_date = selection.service_date
     result.service_date = day_date.isoformat()
@@ -441,9 +451,12 @@ def _analyze_single_day(
         result.notes.append(
             f"analyzed service date {day_date} is outside the feed's calendar validity"
         )
+    if selection.note:
+        result.notes.append(selection.note)
     days_ago = (config.analysis_date - day_date).days
-    if selection.source == "busiest" and days_ago > STALE_BUSIEST_DAYS:
-        result.notes.append(f"busiest service date {day_date} is {days_ago} day(s) in the past")
+    auto_picked = selection.source in ("typical_weekday", "busiest")
+    if auto_picked and days_ago > STALE_AUTO_DATE_DAYS:
+        result.notes.append(f"auto-picked service date {day_date} is {days_ago} day(s) in the past")
     if not selection.service_ids:
         result.status = "no_service"
         result.notes.append(f"no service runs on {day_date}")
@@ -561,6 +574,23 @@ def _open_engine(config: AnalysisConfig) -> Engine | None:
     db.ensure_schema(engine)
     storage.ensure_analysis_schema(engine)
     return engine
+
+
+def _dates_note(config: AnalysisConfig, sources: list[FeedSource], dates: list[str]) -> str:
+    """Why the feeds were analyzed on different days ("" when they weren't)."""
+    if len(dates) <= 1:
+        return ""
+    schedule_paths = [str(s.path) for s in sources if not s.is_stops_only]
+    if common_service_date(schedule_paths) is None:
+        return (
+            "the feeds' calendars share no date with service, so each feed uses its "
+            f"own date ({config.date_rule} unless pinned); cross-feed outputs combine "
+            "schedules from different periods"
+        )
+    return (
+        "the feeds were analyzed on different days although their calendars overlap; "
+        "use --common-date or one --service-date for a shared day"
+    )
 
 
 def _analyzed_dates(feed_results: list[FeedAnalysis]) -> list[str]:
@@ -707,6 +737,7 @@ def _build_report(
     config: AnalysisConfig,
     feed_results: list[FeedAnalysis],
     analyzed_dates: list[str],
+    dates_note: str,
     stops_only_ids: list[str],
     all_stops: gpd.GeoDataFrame,
     canonical: pd.DataFrame,
@@ -753,6 +784,7 @@ def _build_report(
         windows={w.name: w.label for w in config.windows},
         service_dates_coherent=len(analyzed_dates) <= 1,
         service_dates=analyzed_dates,
+        service_dates_note=dates_note,
         stops_only_feeds=stops_only_ids,
         stops_only_stops=stops_only_stops,
         feeds=feed_results,
@@ -877,6 +909,10 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
     feed_results = [result for result, _ in analyzed]
     feed_data = [data for _, data in analyzed]
     analyzed_dates = _analyzed_dates(feed_results)
+    dates_note = _dates_note(config, sources, analyzed_dates)
+    unknown_pins = sorted(set(config.feed_service_dates) - {s.feed_id for s in sources})
+    if unknown_pins:
+        log.warning("--feed-service-date for unknown feed(s): %s", ", ".join(unknown_pins))
     feeds = _combine_feeds(feed_data)
 
     # Every feed with stops, schedule or not; the PostGIS query filters on this
@@ -937,6 +973,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         config,
         feed_results,
         analyzed_dates,
+        dates_note,
         stops_only_ids,
         feeds.stops,
         canonical,
@@ -1071,9 +1108,8 @@ def _md_warnings(report: AnalysisReport) -> list[str]:
             "",
             (
                 "> **Warning:** feeds were analyzed on DIFFERENT service dates "
-                f"({', '.join(report.service_dates)}). Cross-feed connectivity and "
-                "near-stations mix non-contemporaneous schedules. Use "
-                "`--service-date`, or `--common-date` if the calendars overlap."
+                f"({', '.join(report.service_dates)}): "
+                f"{report.service_dates_note or 'cross-feed outputs mix schedules'}."
             ),
         ]
     return lines
