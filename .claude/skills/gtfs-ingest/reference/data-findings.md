@@ -40,4 +40,4 @@ Every T16B branch is scheduled at 70 min whatever its length; `T16B-C07-C`/`T16B
 - 1,581 mdb stops are in `stops.txt` but in no `stop_times` row (738 duplicate a served stop of the other feed). Until Nov 2026 they were kept; 111 of them formed the 49 small pieces of the station network. Now dropped by default (#8, `--no-drop-unserved-stops` keeps them); still in the PostGIS `stops` table.
 - Redundant station-network arcs (#10): 42,557 of 72,286 walk pairs and 247 of 2,812 same_station pairs change no shortest time. Always counted in the report; `--prune-station-network` (off by default) drops them.
 - MiBici docks used to have walk arcs (5,756 pairs) and acted as stepping stones between bus stops; now unlinked.
-- `scripts/build_branch_gpkg.py` used to read `out/transit_gdl_2.0.gpkg`, a renamed run GeoPackage; it now reads `outputs/out_mibici_v3/transit_analysis.gpkg`.
+- `scripts/build_branch_gpkg.py` used to read `out/transit_gdl_2.0.gpkg`, a renamed run GeoPackage; it now reads `outputs/out_mibici_v9/transit_analysis.gpkg`.

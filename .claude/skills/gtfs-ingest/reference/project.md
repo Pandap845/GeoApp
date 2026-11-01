@@ -5,14 +5,13 @@
 | Path | Contents |
 | --- | --- |
 | `gtfs_ingest/` | the package |
-| `tests/` | pytest suite (~280 tests; DB tests skip without `GTFS_TEST_DATABASE_URL`) |
+| `tests/` | pytest suite (~350 tests; DB tests skip without `GTFS_TEST_DATABASE_URL`) |
 | `data/mexico.osm.pbf` | OSM extract (loaded into PostGIS with osm2pgsql) |
 | `data/feeds/` | `improved-gtfs-mimacro-mitren-sitren.zip`, `mdb-2366-202502241922.zip`, `mibici.csv` |
-| `outputs/` | gitignored runs: `out_mibici_v2` (50 m within-feed dedupe, docks linked) and `out_mibici_v3` (current) |
+| `outputs/` | gitignored runs; the latest is `out_mibici_v12` (`v12b` = same command, byte-identical) |
 | `docs/` | Sphinx site: `guide/` narrative docs, `api/` autodoc pages, `plans/` design notes (not built), `figures/` charts + `make_figures.py` |
-| `presentations/` | LaTeX decks (`.tex` ignored by git, `.pdf` tracked); compile from inside the folder |
-| `scripts/build_branch_gpkg.py` | branch-coloured GeoPackage for QGIS, built from `outputs/out_mibici_v3` |
-| `paper/` | article draft |
+| `presentations/` | `workflow.tex` (whole workflow) and `changes_since_dedupe.tex` (changes since dedupe + MiBici), `.tex` and `.pdf` tracked; `old/` = earlier decks (`.tex` ignored). Numbers from v12. Compile with `pdflatex` twice from inside the folder (MiKTeX's `latexmk` fails here) |
+| `scripts/build_branch_gpkg.py` | branch-coloured GeoPackage for QGIS, built from `outputs/out_mibici_v9` |
 | `init/`, `docker-compose.yaml` | PostGIS container |
 
 Ignore `gtfs_ingest/.venv` (a stray second virtualenv); the project env is the root `.venv`.

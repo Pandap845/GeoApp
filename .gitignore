@@ -20,8 +20,9 @@ data/*.osm.pbf
 # Sphinx build output
 docs/_build/
 
-# LaTeX: sources stay local, PDFs are tracked
+# LaTeX: the two current decks are tracked (source + PDF); old/ and others stay local
 *.tex
+!/presentations/*.tex
 *.aux
 *.log
 *.nav

@@ -36,14 +36,13 @@ considered stable.
 
 | Path | Contents |
 | --- | --- |
-| `gtfs_ingest/` | the Python package (one subpackage per phase: `analysis/`, `conflation/`, `qa/`, `export/`) |
+| `gtfs_ingest/` | the Python package (one subpackage per phase: `analysis/`, `conflation/`, `qa/`) |
 | `tests/` | pytest suite |
 | `data/` | inputs: `mexico.osm.pbf` and `feeds/` (the two GTFS zips and `mibici.csv`) |
-| `outputs/` | analysis runs (gitignored): `out_mibici_v2` (before) and `out_mibici_v3` (current) |
+| `outputs/` | analysis runs (gitignored); the latest is `out_mibici_v12` (`v12b` is its reproducibility twin) |
 | `docs/` | Sphinx site; `guide/` holds the narrative docs, `plans/` the design notes, `figures/` the charts |
-| `presentations/` | LaTeX decks and their PDFs (compile from inside that folder) |
+| `presentations/` | two LaTeX decks with their PDFs: `workflow.tex` (the whole workflow) and `changes_since_dedupe.tex` (what changed since the dedupe and MiBici work); `old/` keeps the earlier decks. Compile from inside the folder with `pdflatex` (twice) |
 | `scripts/` | one-off helpers, e.g. `build_branch_gpkg.py` |
-| `paper/` | the article draft |
 | `init/`, `docker-compose.yaml` | PostGIS container setup |
 
 ---

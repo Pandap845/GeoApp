@@ -10,8 +10,8 @@ Two kinds of figure:
 Usage (from the repo root; needs matplotlib, which is not a runtime
 dependency)::
 
-    python docs/figures/make_figures.py                     # reads ./outputs/out_mibici_v2
-    python docs/figures/make_figures.py --run ./outputs/out_mibici_v2 --out docs/figures
+    python docs/figures/make_figures.py                     # reads ./outputs/out_mibici_v12
+    python docs/figures/make_figures.py --run ./outputs/out_mibici_v12 --before ./outputs/out_mibici_v9
 
 The measured figures expect a run made with ``--network-walk``, with the
 ``detect-interchanges`` and ``conflate-osm`` reports in the same directory.
@@ -38,6 +38,13 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import Circle, FancyArrowPatch, Rectangle
 from scipy.spatial import cKDTree
+
+from gtfs_ingest.analysis.dedupe import (
+    DEDUPE_DISTANCE_M,
+    NAME_SIM_THRESHOLD,
+    WITHIN_FEED_DISTANCE_M,
+)
+from gtfs_ingest.analysis.route_dedupe import ROUTE_MATCH_MIN_JACCARD
 
 # --------------------------------------------------------------------------
 # Palette. Categorical slots 1-3 were run through the palette validator and
@@ -430,22 +437,34 @@ def r1_records_to_stations(run: Run, out: Path) -> None:
 def r2_dedupe_distances(run: Run, out: Path) -> None:
     fig, axes = plt.subplots(2, 1, figsize=(9, 5.4), sharex=True, gridspec_kw={"hspace": 0.62})
     panels = (
-        ("cross_feed", 30, BLUE, "name similarity ≥ 0.75 OR a shared route"),
-        ("within_feed", 50, ORANGE, "a shared route ONLY — names are not evidence"),
+        (
+            "cross_feed",
+            DEDUPE_DISTANCE_M,
+            BLUE,
+            f"name similarity ≥ {NAME_SIM_THRESHOLD:g} OR a shared route",
+        ),
+        (
+            "within_feed",
+            WITHIN_FEED_DISTANCE_M,
+            ORANGE,
+            "a shared route ONLY — names are not evidence",
+        ),
     )
     for ax, (kind, radius, colour, rule) in zip(axes, panels):
         sub = run.equiv.loc[run.equiv["match_kind"] == kind, "distance_m"]
         ax.grid(axis="y", zorder=0)
-        ax.hist(sub, bins=np.arange(0, 52, 2), color=colour, rwidth=0.82, zorder=3)
+        ax.hist(
+            sub, bins=np.arange(0, DEDUPE_DISTANCE_M + 2, 1), color=colour, rwidth=0.82, zorder=3
+        )
         ax.axvline(radius, color=INK_2, lw=1.0)
         ax.text(
-            radius - 0.6,
+            radius + 0.4,
             ax.get_ylim()[1] * 0.95,
-            f"radius {radius} m",
+            f"radius {radius:g} m",
             fontsize=8.5,
             color=INK_2,
             va="top",
-            ha="right",
+            ha="left",
             bbox=LABEL_BOX,
         )
         ax.set_ylabel("pairs")
@@ -859,11 +878,15 @@ def r8_headways_by_window(run: Run, out: Path) -> None:
     ax.set_xlabel("route mean headway (minutes; values above 60 are drawn at 60)")
     ax.set_ylabel("share of route-directions")
     low, high = min(medians.values()), max(medians.values())
+    spread = (
+        f"every median is {low:.1f} min"
+        if low == high
+        else f"medians span {low:.1f}–{high:.1f} min"
+    )
     _title(
         ax,
         "Service frequency barely changes through the day",
-        f"cumulative distribution per window — the four curves overlap; medians span only "
-        f"{low:.1f}–{high:.1f} min",
+        f"cumulative distribution per window — the four curves overlap; {spread}",
     )
     _save(fig, out, "r8_headways_by_window.png")
 
@@ -968,9 +991,138 @@ def r10_osm_match_outcomes(run: Run, out: Path) -> None:
     _save(fig, out, "r10_osm_match_outcomes.png")
 
 
+def _feed_label(route_uid: str) -> str:
+    return route_uid.split(":", 1)[1]
+
+
+def r11_route_jaccard(run: Run, out: Path) -> None:
+    """Stop overlap of every cross-feed route pair that shares a station."""
+    route_stops = pd.read_csv(run.path / "route_stops.csv", dtype=str)
+    route_stops["feed"] = route_stops["route_uid"].str.split(":", n=1).str[0]
+    route_stops["station"] = route_stops["stop_uid"].map(run.canon).fillna(route_stops["stop_uid"])
+    stations = route_stops.drop_duplicates(["route_uid", "station"])
+    sizes = stations.groupby("route_uid").size()
+    joined = stations.merge(stations, on="station", suffixes=("_a", "_b"))
+    joined = joined[(joined["feed_a"] < joined["feed_b"])]
+    pairs = joined.groupby(["route_uid_a", "route_uid_b"]).size().rename("shared").reset_index()
+    union = pairs["route_uid_a"].map(sizes) + pairs["route_uid_b"].map(sizes) - pairs["shared"]
+    pairs["jaccard"] = pairs["shared"] / union
+    matched = pd.read_csv(run.path / "route_equivalences.csv")
+    is_match = pairs.set_index(["route_uid_a", "route_uid_b"]).index.isin(
+        list(zip(matched["dropped_route_uid"], matched["kept_route_uid"]))
+    ) | pairs.set_index(["route_uid_a", "route_uid_b"]).index.isin(
+        list(zip(matched["kept_route_uid"], matched["dropped_route_uid"]))
+    )
+
+    fig, ax = plt.subplots(figsize=(9, 3.8))
+    ax.grid(axis="y", zorder=0)
+    bins = np.arange(0, 1.0001, 0.025)
+    ax.hist(pairs.loc[~is_match, "jaccard"], bins=bins, color=CONTEXT, rwidth=0.85, zorder=3)
+    ax.hist(pairs.loc[is_match, "jaccard"], bins=bins, color=BLUE, rwidth=0.85, zorder=4)
+    ax.set_yscale("log")
+    ax.set_ylim(bottom=0.7)  # keep single pairs visible
+    ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("{x:,.0f}"))
+    ax.axvline(ROUTE_MATCH_MIN_JACCARD, color=INK_2, lw=1.0)
+    ax.text(
+        ROUTE_MATCH_MIN_JACCARD - 0.01,
+        ax.get_ylim()[1] * 0.6,
+        f"match ≥ {ROUTE_MATCH_MIN_JACCARD:g}",
+        fontsize=8.5,
+        color=INK_2,
+        ha="right",
+        va="top",
+        bbox=LABEL_BOX,
+    )
+    best_other = pairs.loc[~is_match, "jaccard"].max()
+    ax.set_xlabel("Jaccard index of the two routes' stations (shared ÷ union)")
+    ax.set_ylabel("route pairs")
+    _title(
+        ax,
+        f"The same line in two feeds: {is_match.sum()} matches, a clean gap",
+        f"{len(pairs):,} cross-feed route pairs share a station · matches (blue) score ≥ "
+        f"{pairs.loc[is_match, 'jaccard'].min():.2f}, every other pair ≤ {best_other:.2f}",
+    )
+    _save(fig, out, "r11_route_jaccard.png")
+
+
+def r12_direction_fix(run: Run, before: Path, out: Path) -> None:
+    """AM-peak mean headway of the relabelled routes, before and after the direction fix."""
+    fixes = pd.read_csv(run.path / "direction_fixes.csv", dtype={"route_id": str})
+    fixes["route_uid"] = fixes["feed_id"] + ":" + fixes["route_id"]
+    meta = pd.read_csv(run.path / "routes.csv", dtype=str)
+    # Twins left out by route dedupe would repeat the same line.
+    routing = set(meta.loc[meta["duplicate_of"].isna(), "route_uid"])
+    routes = sorted(uid for uid in fixes["route_uid"].unique() if uid in routing)
+
+    def peak(path: Path) -> pd.DataFrame:
+        rollup = pd.read_csv(path / "route_headways.csv", dtype={"route_id": str})
+        rollup["route_uid"] = rollup["feed_id"] + ":" + rollup["route_id"]
+        return rollup[(rollup["time_window"] == "am_peak") & rollup["route_uid"].isin(routes)]
+
+    old, new = peak(before), peak(run.path)
+    fig, ax = plt.subplots(figsize=(9, 0.42 * len(routes) + 1.4))
+    ax.grid(axis="x", zorder=0)
+    for i, route in enumerate(routes):
+        mixed = old.loc[old["route_uid"] == route, "mean_headway_s"] / 60
+        fixed = new[new["route_uid"] == route].sort_values("direction_id")
+        ax.scatter(mixed, [i] * len(mixed), s=36, color=MUTED, zorder=3)
+        for (_, row), colour in zip(fixed.iterrows(), (BLUE, ORANGE)):
+            ax.scatter(row["mean_headway_s"] / 60, i, s=36, color=colour, zorder=4)
+        if len(mixed):
+            ax.plot(
+                [mixed.iloc[0], fixed["mean_headway_s"].max() / 60],
+                [i, i],
+                color=CONTEXT,
+                lw=1.2,
+                zorder=2,
+            )
+    ax.set_yticks(range(len(routes)), [_feed_label(uid) for uid in routes])
+    ax.invert_yaxis()
+    ax.set_xlim(left=0)
+    ax.set_xlabel("am_peak mean headway (minutes)")
+    ax.scatter([], [], color=MUTED, label="before: both senses under one direction_id")
+    ax.scatter([], [], color=BLUE, label="after: direction 0")
+    ax.scatter([], [], color=ORANGE, label="after: direction 1")
+    ax.legend(loc="lower right", fontsize=8.5)
+    _title(
+        ax,
+        "Mixed directions understate the headway",
+        f"{len(routes)} routes relabelled from stop order (route-dedupe twins left out) · "
+        "each direction now shows its own headway",
+    )
+    _save(fig, out, "r12_direction_fix.png")
+
+
+def r13_timetable_by_hour(run: Run, out: Path) -> None:
+    """Vehicle runs starting per hour, from connections.csv.gz."""
+    conn = pd.read_csv(run.path / "connections.csv.gz", usecols=["trip_id", "dep_s"])
+    starts = conn.groupby("trip_id")["dep_s"].min() // 3600
+    per_hour = starts.value_counts().sort_index()
+    fig, ax = plt.subplots(figsize=(9, 3.6))
+    ax.grid(axis="y", zorder=0)
+    ax.bar(per_hour.index, per_hour.to_numpy(), width=0.8, color=BLUE, zorder=3)
+    ax.set_xticks(range(0, int(per_hour.index.max()) + 1, 2))
+    ax.set_xlabel("hour of the service day (24 and later = after midnight)")
+    ax.set_ylabel("runs starting")
+    ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("{x:,.0f}"))
+    _title(
+        ax,
+        f"The timetable: {len(conn):,} connections in {len(starts):,} runs",
+        "frequencies.txt expanded into one run per headway · every run is a sequence of "
+        "stop-to-stop connections",
+    )
+    _save(fig, out, "r13_timetable_by_hour.png")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--run", type=Path, default=Path("outputs/out_mibici_v2"))
+    parser.add_argument("--run", type=Path, default=Path("outputs/out_mibici_v12"))
+    parser.add_argument(
+        "--before",
+        type=Path,
+        default=None,
+        help="a run made before the direction fix (for r12; skipped when absent)",
+    )
     parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -992,6 +1144,10 @@ def main() -> None:
     r8_headways_by_window(run, args.out)
     r9_interchange_modes(run, args.out)
     r10_osm_match_outcomes(run, args.out)
+    r11_route_jaccard(run, args.out)
+    if args.before is not None:
+        r12_direction_fix(run, args.before, args.out)
+    r13_timetable_by_hour(run, args.out)
 
 
 if __name__ == "__main__":

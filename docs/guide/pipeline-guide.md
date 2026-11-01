@@ -13,9 +13,12 @@ it, and what to watch for when you read the result.
 **About the visuals.** Diagrams are Mermaid; they render on GitHub, in the
 Sphinx site, and in VS Code with a Mermaid preview extension. Charts are PNGs
 in `docs/figures/`. Figures prefixed `e` are synthetic explanations; figures
-prefixed `r` are measured on the Guadalajara run in `outputs/out_mibici_v2/` (two GTFS
-feeds + the MiBici stops CSV, OSM network walk, `--proximity-m 300`).
-Regenerate them with `python docs/figures/make_figures.py`.
+prefixed `r` are measured on the Guadalajara run in `outputs/out_mibici_v12/` (two GTFS
+feeds + the MiBici stops CSV, OSM network walk, `--proximity-m 300`, typical
+weekday per feed). Regenerate them with
+`python docs/figures/make_figures.py --run outputs/out_mibici_v12 --before outputs/out_mibici_v9`
+(`--before`, a run made before the direction fix, is only needed for the
+direction-fix chart).
 
 ---
 
@@ -460,7 +463,7 @@ for one `(route, direction)`, inside one half-open window `[start, end)`.
 ```text
 departures = stop_times ⋈ trips  →  (route_id, direction_id, stop_id, departure_s)
              blank direction_id → -1 ;  rows without departure_time dropped
-             mixed-sense routes: direction_id from stop order (below)
+             mixed-sense routes: direction_id from stop order (Step 9 helper)
 
 for each window w in [am_peak 06-09, midday 09-15, pm_peak 15-19, evening 19-23]:
     rows = departures where w.start <= departure_s < w.end
@@ -492,6 +495,13 @@ Measured: route headways are almost identical across the four windows (medians
 uniform headways all day, so time-of-day variation is not present in the
 source data. The step at 15 minutes marks the many routes that run exactly
 every quarter hour.
+
+**Mixed directions.** Where one `direction_id` holds trips of both senses, both
+ways would be counted as one direction and the headway would look about half as
+long. Those routes are relabelled from stop order (`--fix-directions`, default
+on; `direction_fixes.csv`):
+
+![Mixed directions understate the headway](../figures/r12_direction_fix.png)
 
 ### Step 9. Build route–stop maps and route geometry
 
@@ -679,6 +689,8 @@ inside one feed, per route:
     → one trip listed twice; the smallest trip_id is kept
 ```
 
+![The same line in two feeds](../figures/r11_route_jaccard.png)
+
 True twins score ≥ 0.91 in Guadalajara and every other pair ≤ 0.53; express
 variants (`MC-L1E` inside `MC-L1`) score below 0.5, so containment is never
 used. Only the **routing inputs** drop the duplicates: the station network
@@ -783,9 +795,9 @@ geodesic, and **before** Step 14, so walking minutes reflect real streets.
 
 ![How much longer is the real walk](../figures/r5_detour_distribution.png)
 
-Measured over 90,030 pairs at least 5 m apart: a typical walk is **1.33×** the
-straight line (median); the mean is 1.54× because of a long tail, with 1,885
-pairs above 4×. The run log reports a higher "mean detour" (63%, i.e. 1.63×)
+Measured over 75,990 pairs at least 5 m apart: a typical walk is **1.35×** the
+straight line (median); the mean is 1.64× because of a long tail, with 2,353
+pairs above 4×. The run log reports a higher "mean detour" (73%, i.e. 1.73×)
 because it averages routed pairs only and includes near-co-located stops,
 whose tiny straight-line distance inflates the ratio. **Use the median** when
 you need one factor.
@@ -942,6 +954,8 @@ footpaths:
     same_station  alias → alias          --min-transfer-s
     walk          both ways per proximity pair, walking minutes × 60
 ```
+
+![The timetable by hour](../figures/r13_timetable_by_hour.png)
 
 Times are seconds after midnight of the service day and may pass 86,400.
 Footpaths are one hop (not transitively closed). `exact_times=0` runs are
@@ -1265,8 +1279,8 @@ erDiagram
 | 11b Route dedupe | 38 lines in both feeds (Jaccard ≥ 0.909), all kept from mdb; improved keeps `MP-A05-2` and `ST_L1B`; 8 Sitren trips listed twice in mdb |
 | 12 Connectivity | 249 routes, 7,902 route pairs: 3,810 `same_stop`, 830 `same_station_dedup`, 3,262 `proximity` (287 routes and 10,255 pairs without route dedupe) |
 | 13 Walk graph | 129,039 ways → 512,420 vertices, 1,186,804 directed edges |
-| 13 Routing | 87,708 of 91,773 pairs on streets; typical walk 1.33× the straight line |
-| 15 `walk_source` | network 12,252 · mixed 1,356 · none 451 · straight_line 290 |
+| 13 Routing | 74,689 of 77,706 pairs on streets; typical walk 1.35× the straight line |
+| 15 `walk_source` | network 11,245 · mixed 1,191 · straight_line 226 · none 106 |
 | 16 Station network | 12,768 nodes (1,581 never-served stops left out); 24,036 in_vehicle + 144,572 walk + 5,624 same_station arcs; **1 weak component** among transit stops, 9 stops one-way reachable (route terminals); in_vehicle `time_quality`: ok 24,013 · too_fast 18 · too_slow 4 (T16B-C07-C, T16B-C08-M) · zero 1; 42,557 walk + 247 same_station pairs redundant (with `--prune-station-network`: 59,458 walk + 5,130 same_station arcs, same shortest times) |
 | 16b Timetable | 3,290,920 connections in 66,568 runs over 10,499 served stops (`connections.csv.gz`, 61 MB); footpaths: 101,018 walk · 10,499 self · 226 same_station (120 s change time); a CSA scan from 08:00 reaches 99.8–99.9 % of stops |
 
@@ -1274,9 +1288,9 @@ erDiagram
 
 | Step | Result |
 | --- | --- |
-| 18 Interchanges | 2,708 clusters, 71 multimodal, 809 single-station phantoms |
+| 18 Interchanges | 2,565 clusters, 73 multimodal, 150 single-station clusters |
 | 20 OSM match | 10,485 of 14,349 matched (73.1%); 3,864 need review |
-| 21 Side of street | right 9,664 · left 3,804 · on 881; 2,833 low confidence |
+| 21 Side of street | right 9,663 · left 3,805 · on 881; 2,834 low confidence |
 | 22 Coverage gaps | 34 OSM-only transit nodes |
 
 ### Choosing `--proximity-m`
@@ -1284,12 +1298,12 @@ erDiagram
 ![Choosing the proximity threshold](../figures/r6_proximity_threshold.png)
 
 A "neighbour" here is a stop of a **different** physical station. At 150 m,
-82% of transit records and 78% of MiBici docks have one; at 300 m, 97% and
+93% of transit records and 77% of MiBici docks have one; at 300 m, 99% and
 99%.
 
 ![Where the isolated stop records are](../figures/r7_isolation_map.png)
 
-Raising the threshold to 300 m connects 2,110 records; the 451 still isolated
+Raising the threshold to 300 m connects 828 records; the 106 still isolated
 lie mostly along outer radial corridors where stops really are far apart.
 
 Measured on the October 2026 runs (busiest date, unserved stops kept):
@@ -1363,7 +1377,7 @@ side-of-street tolerances 1 m / 10 m / 2 m.
    data defines uniform frequencies. That is a property of the feeds, not a
    finding about the city's service.
 
-7. **Use the median detour factor** (1.33×), not the mean (Step 13).
+7. **Use the median detour factor** (1.35×), not the mean (Step 13).
 
 8. **`needs_review` for bike docks is a matcher-scope result**, not a coordinate
    problem (Step 20).

@@ -14,7 +14,7 @@ Run from the repo root. About 10 minutes; the walk graph is cached in `.gtfs_cac
 
 ```bash
 FEEDS="data/feeds/improved-gtfs-mimacro-mitren-sitren.zip data/feeds/mdb-2366-202502241922.zip data/feeds/mibici.csv"
-OUT=outputs/out_mibici_v3
+OUT=outputs/out_mibici_v13   # next free name; v12 is the reference run
 PY=.venv/Scripts/python.exe
 
 $PY -m gtfs_ingest.cli ingest              --feeds $FEEDS --report $OUT
@@ -28,6 +28,9 @@ $PY -m gtfs_ingest.cli analyze-frequency   --feeds $FEEDS --report $OUT --networ
 Service dates: each feed gets its typical weekday (2021-05-04 improved, 2024-06-27 mdb). To freeze them, add `--feed-service-date improved_gtfs_mimacro_mitren_sitren=2021-05-04 --feed-service-date mdb_2366_202502241922=2024-06-27` to both `analyze-frequency` lines.
 Each run replaces the database tables, so only the files in `outputs/` keep older results.
 Use a new `outputs/<name>` folder per run and compare folders, never overwrite the reference runs.
+Figures: `$PY docs/figures/make_figures.py --run outputs/out_mibici_v12 --before outputs/out_mibici_v9`.
+Decks (`presentations/workflow.tex`, `changes_since_dedupe.tex`): `pdflatex` twice from inside
+`presentations/`; their numbers come from v12.
 
 Quick check without a database: add `--dry-run` (not possible for `conflate-osm`).
 
