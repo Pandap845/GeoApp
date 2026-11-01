@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import geopandas as gpd
-from test_near_stations import make_stops, routes_meta
 
 from gtfs_ingest.analysis import connectivity
 from gtfs_ingest.analysis.geopackage import GEOPACKAGE_NAME, write_geopackage
@@ -13,6 +12,7 @@ from gtfs_ingest.analysis.near_stations import build_near_stations
 from gtfs_ingest.models import numeric_stop_id
 
 from test_connectivity import rs
+from test_near_stations import make_stops, routes_meta
 
 
 def test_geopackage_two_layers_roundtrip(tmp_path: Path) -> None:

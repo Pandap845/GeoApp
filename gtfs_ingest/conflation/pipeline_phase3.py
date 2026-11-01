@@ -91,6 +91,8 @@ class InterchangeReport(BaseModel):
     dedupe_within_feed_distance_m: float | None = None
     equivalence_groups: int = 0
     stops_deduplicated: int = 0
+    # Pairs dropped because they would merge far-apart stops of one feed.
+    dedupe_rejected_pairs: int = 0
     single_physical_station_clusters: int = 0  # clusters that are just one station's aliases
     feeds: list[FeedNote]
     clusters_total: int = 0
@@ -211,6 +213,7 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
     # Dedupe is recomputed so this phase runs on its own. It sees every trip,
     # not one day, so it can find more shared-route pairs than Phase 2.
     canonical = pd.DataFrame(columns=dedupe.CANONICAL_COLUMNS)
+    rejected = pd.DataFrame(columns=dedupe.REJECTED_COLUMNS)
     if config.dedupe and len(stops):
         accepted = dedupe.find_equivalences(
             stops,
@@ -221,7 +224,11 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
             within_feed_distance_m=config.dedupe_within_feed_distance_m,
             exclude_feeds=[n.feed_id for n in notes if n.status == "stops_only"],
         )
-        canonical = dedupe.canonical_map(accepted)
+        # Same rule as Phase 2: no station mixes far-apart stops of one feed.
+        kept, rejected = dedupe.drop_conflicting_pairs(
+            accepted, stops, config.dedupe_within_feed_distance_m or 0.0
+        )
+        canonical = dedupe.canonical_map(kept)
 
     labels = (
         clustering.cluster_stops(
@@ -264,6 +271,7 @@ def run_interchanges(config: InterchangeConfig) -> InterchangeReport:
         ),
         equivalence_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
         stops_deduplicated=len(canonical),
+        dedupe_rejected_pairs=len(rejected),
         single_physical_station_clusters=(
             int((clusters["physical_stop_count"] == 1).sum()) if not clusters.empty else 0
         ),
@@ -393,7 +401,8 @@ def _interchange_markdown(report: InterchangeReport) -> str:
                 else "off"
             )
             + f") - {report.equivalence_groups} group(s), "
-            f"{report.stops_deduplicated} stop(s) merged"
+            f"{report.stops_deduplicated} stop(s) merged, "
+            f"{report.dedupe_rejected_pairs} pair(s) rejected (same-feed conflict)"
             if report.dedupe
             else "off (--no-dedupe)"
         ),

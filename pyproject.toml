@@ -66,4 +66,4 @@ ignore = [
 
 [tool.ruff.lint.isort]
 # Test helpers imported by name from tests/.
-known-local-folder = ["conftest", "test_connectivity"]
+known-local-folder = ["conftest", "test_connectivity", "test_near_stations"]

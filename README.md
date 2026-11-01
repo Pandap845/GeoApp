@@ -316,11 +316,17 @@ within 30 m of a bus stop named after the same corner, would otherwise become
 its alias. A dock is never the same station as a transit stop, so they are
 excluded up front.
 
-Known limit: the cross-feed rule can still pair one feed's platform with the
-*other* feed's opposite-direction platform when both carry the station name
-and sit within 30 m (e.g. `improved:ST_02_018` ↔ `mdb:ST_02_027`, 28.6 m).
-Of 4,376 cross-feed pairs, 3,295 are within 5 m and 1,081 lie 5–30 m apart;
-tighten `--dedupe-distance-m` if direction-level stations matter.
+**Same-feed conflicts.** Pairs are then joined into stations closest first,
+and a pair is **rejected** when it would put two stops of the *same* feed more
+than the within-feed radius (5 m) apart into one station. Without this, the
+cross-feed rule paired one feed's platform with the *other* feed's
+opposite-direction platform (same name, same route, 20–30 m away), and
+grouping chained both platforms into one station through their 0 m twins
+(e.g. `improved:…C98_STP_103` = `mdb:…C98_STP_103` at 0 m, plus
+`mdb:…C58V1_STP_01` 29 m across the street). Every rejected pair is listed
+in `stop_equivalences_rejected.csv` with the two same-feed stops it would
+have merged. With within-feed dedupe off (`0`), only coincident records of
+one feed can share a station.
 
 Aliases stop appearing in each other's `near_stations` lists (row set and
 `ID` sequence of the CSV are unchanged), their links vanish from the
@@ -345,14 +351,15 @@ On the two Guadalajara feeds plus MiBici this is not a rounding difference:
 | Level | Stations |
 | --- | ---: |
 | Raw stop records (incl. 484 MiBici docks) | 14,349 |
-| Cross-feed dedupe only | 10,534 |
-| \+ within-feed dedupe at 5 m (default) | **10,533** |
+| Dedupe (default: cross-feed 30 m, within-feed 5 m, same-feed conflicts rejected) | **11,054** |
+| *for reference: before the same-feed conflict rule* | *10,533* |
 | *for reference: within-feed at the former 50 m* | *8,877* |
 
-Within-feed at 5 m adds a single group: almost every 0 m `SITEUR_*`/`ST_*`
-duplicate is already joined through its cross-feed twin. Any density, coverage
-or accessibility figure computed on the raw record count is inflated by
-~1.36×.
+The conflict rule rejects 1,077 cross-feed pairs (all 768 at 15–30 m, 304 at
+5–15 m, 5 at 1–5 m; none at ≤ 1 m), so opposite platforms stay separate
+stations: the widest station now spans 7.5 m (median 0 m). Any density,
+coverage or accessibility figure computed on the raw record count is
+inflated by ~1.30×.
 
 `detect-interchanges` only: `--eps METERS` (DBSCAN radius, default 120),
 `--min-samples N` (default 2), `--crs EPSG:XXXXX` (metric CRS override).
@@ -869,6 +876,11 @@ Files in `--report DIR`:
   `canonical_uid` (the group's smallest `stop_uid`), both `stop_uid`s,
   `distance_m`, `name_score` (0–1 normalized-name similarity),
   `shared_routes` (shared `route_short_name` count) and `score`.
+- `stop_equivalences_rejected.csv` — accepted pairs that were **not** used
+  because they would put two stops of one feed more than the within-feed
+  radius apart into one station (written when dedupe is on): the pair's
+  columns plus `conflict_uid_a`, `conflict_uid_b` and `conflict_m`, the
+  same-feed stops and their distance.
 - `near_stations_quality.csv` — **provenance sidecar**, always written:
   one row per stop with the same `ID` key and row order as
   `near_stations.csv` (the main file's format never changes because of it).

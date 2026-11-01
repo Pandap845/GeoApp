@@ -328,11 +328,17 @@ default in `analyze-frequency` and `detect-interchanges`; disable with
   tokens sorted ("Estación Juárez" ≡ "JUAREZ, Estacion"). Missing/empty
   names score 0.0 — they can only match through shared routes.
 
-**Groups**: connected components (networkx) over the accepted pairs, sorted
+**Same-feed conflicts**: the accepted pairs join stations closest first
+(order: `distance_m`, `stop_uid_a`, `stop_uid_b`). A pair is rejected when
+the station it would create holds two stops of the same feed more than the
+within-feed radius (5 m; 0 when within-feed is off) apart. Rejected pairs go
+to `stop_equivalences_rejected.csv` with that same-feed stop pair
+(`conflict_uid_a`, `conflict_uid_b`, `conflict_m`). This stops two
+opposite platforms merging through their twins in the other feed.
+
+**Groups**: connected components (networkx) over the kept pairs, sorted
 by each group's smallest `stop_uid` (deterministic `group_id`), which is
-also the group's `canonical_uid`. Transitivity is deliberate: two same-feed
-platforms can merge via a cross-feed bridge — they are one physical station
-by transitivity.
+also the group's `canonical_uid`.
 
 **Effects** (all outputs, one canonical map):
 

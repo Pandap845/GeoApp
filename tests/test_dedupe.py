@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-from test_near_stations import make_stops, routes_meta
 
 from gtfs_ingest.analysis import connectivity, dedupe
 
 from test_connectivity import rs
+from test_near_stations import make_stops, routes_meta
 
 #: ~10 m / ~20 m / ~45 m of latitude.
 LAT_10M = 0.00009
@@ -323,3 +323,121 @@ def test_match_kind_survives_attach_groups() -> None:
 
     assert list(tagged.columns) == dedupe.EQUIVALENCE_COLUMNS
     assert tagged["match_kind"].tolist() == [dedupe.WITHIN_FEED]
+
+
+# Same-feed conflicts: a station never mixes far-apart stops of one feed
+
+LON_28M = 0.00027  # ~28 m of longitude at latitude 20
+LIMIT_M = dedupe.WITHIN_FEED_DISTANCE_M
+
+
+def _accepted(stops, route_stops=None, routes=None):
+    return dedupe.find_equivalences(
+        stops,
+        route_stops if route_stops is not None else rs(),
+        routes if routes is not None else routes_meta(),
+        within_feed_distance_m=LIMIT_M,
+    )
+
+
+def test_twin_is_kept_and_opposite_platform_rejected() -> None:
+    # Group 1169 in the real data: im:P has a twin md:P at 0 m and the
+    # opposite platform md:Q (same name) 28 m across the street.
+    stops = make_stops(
+        ("im", "P", "Avenida Delas rosas", 20.0, -103.0),
+        ("md", "P", "Avenida Delas rosas", 20.0, -103.0),
+        ("md", "Q", "Avenida Delas rosas", 20.0, -103.0 + LON_28M),
+    )
+    kept, rejected = dedupe.drop_conflicting_pairs(_accepted(stops), stops, LIMIT_M)
+
+    assert list(zip(kept["stop_uid_a"], kept["stop_uid_b"])) == [("im:P", "md:P")]
+    (row,) = rejected.to_dict("records")
+    assert (row["stop_uid_a"], row["stop_uid_b"]) == ("im:P", "md:Q")
+    assert (row["conflict_uid_a"], row["conflict_uid_b"]) == ("md:P", "md:Q")
+    assert 25 < row["conflict_m"] < 33
+    assert list(rejected.columns) == dedupe.REJECTED_COLUMNS
+
+
+def test_both_platforms_in_both_feeds_give_two_stations() -> None:
+    stops = make_stops(
+        ("im", "A", "Juarez", 20.0, -103.0),
+        ("md", "A", "Juarez", 20.0, -103.0),
+        ("im", "B", "Juarez", 20.0, -103.0 + LON_28M),
+        ("md", "B", "Juarez", 20.0, -103.0 + LON_28M),
+    )
+    kept, rejected = dedupe.drop_conflicting_pairs(_accepted(stops), stops, LIMIT_M)
+
+    canonical = dedupe.canonical_map(kept)
+    assert canonical.groupby("group_id")["stop_uid"].apply(list).tolist() == [
+        ["im:A", "md:A"],
+        ["im:B", "md:B"],
+    ]
+    assert set(zip(rejected["stop_uid_a"], rejected["stop_uid_b"])) == {
+        ("im:A", "md:B"),
+        ("im:B", "md:A"),
+    }
+
+
+def test_offset_pair_without_a_twin_is_kept() -> None:
+    # The feeds disagree by ~20 m, but no feed has two stops here: nothing to conflict.
+    stops = make_stops(
+        ("im", "A", "Juarez", 40.0, -75.0),
+        ("md", "A", "Juarez", 40.0 + LAT_20M, -75.0),
+    )
+    kept, rejected = dedupe.drop_conflicting_pairs(_accepted(stops), stops, LIMIT_M)
+
+    assert len(kept) == 1 and rejected.empty
+
+
+def test_coincident_records_of_one_feed_share_a_station() -> None:
+    # The mdb feed lists the light rail twice (SITEUR_* and ST_*) at 0 m.
+    stops = make_stops(
+        ("im", "S", "Plaza Universidad", 20.0, -103.0),
+        ("md", "SITEUR_S", "Plaza Universidad", 20.0, -103.0),
+        ("md", "ST_S", "Plaza Universidad", 20.0, -103.0),
+    )
+    kept, rejected = dedupe.drop_conflicting_pairs(_accepted(stops), stops, LIMIT_M)
+
+    assert rejected.empty
+    assert dedupe.canonical_map(kept)["group_id"].nunique() == 1
+
+
+def test_conflict_resolution_ignores_input_order() -> None:
+    rows = [
+        ("im", "A", "Juarez", 20.0, -103.0),
+        ("md", "A", "Juarez", 20.0, -103.0),
+        ("im", "B", "Juarez", 20.0, -103.0 + LON_28M),
+        ("md", "B", "Juarez", 20.0, -103.0 + LON_28M),
+    ]
+    results = []
+    for order in ([0, 1, 2, 3], [3, 1, 0, 2], [2, 3, 1, 0]):
+        stops = make_stops(*[rows[i] for i in order])
+        accepted = _accepted(stops).sample(frac=1, random_state=len(results))
+        results.append(dedupe.drop_conflicting_pairs(accepted, stops, LIMIT_M))
+    for kept, rejected in results[1:]:
+        pd.testing.assert_frame_equal(
+            kept.sort_values(["stop_uid_a", "stop_uid_b"]).reset_index(drop=True),
+            results[0][0].sort_values(["stop_uid_a", "stop_uid_b"]).reset_index(drop=True),
+        )
+        pd.testing.assert_frame_equal(rejected, results[0][1])
+
+
+def test_limit_zero_allows_only_coincident_records() -> None:
+    stops = make_stops(
+        ("im", "P", "Juarez", 40.0, -75.0),
+        ("md", "P", "Juarez", 40.0, -75.0),
+        ("md", "Q", "Juarez", 40.0 + LAT_10M / 5, -75.0),  # ~2 m away
+    )
+    accepted = dedupe.find_equivalences(stops, rs(), routes_meta())
+    kept, rejected = dedupe.drop_conflicting_pairs(accepted, stops, 0.0)
+
+    assert list(zip(kept["stop_uid_a"], kept["stop_uid_b"])) == [("im:P", "md:P")]
+    assert list(rejected["stop_uid_b"]) == ["md:Q"]
+
+
+def test_no_accepted_pairs_gives_empty_frames() -> None:
+    stops = make_stops(("im", "P", "Juarez", 40.0, -75.0))
+    kept, rejected = dedupe.drop_conflicting_pairs(
+        pd.DataFrame(columns=dedupe.PAIR_COLUMNS), stops, LIMIT_M
+    )
+    assert kept.empty and list(rejected.columns) == dedupe.REJECTED_COLUMNS

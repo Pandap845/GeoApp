@@ -8,8 +8,12 @@ Two rules:
   don't count here, and the radius is tight so the opposite-direction stop
   across the street (20-40 m away, same routes) stays separate.
 
-Accepted pairs are grouped by connected components; the smallest stop_uid of
-a group is its canonical_uid. match_kind records which rule matched.
+Accepted pairs then join stations closest first. A pair is rejected when it
+would put two stops of the same feed more than the within-feed radius apart
+into one station; this keeps opposite platforms apart even when each has a twin
+in the other feed. The kept pairs are grouped by connected components; the
+smallest stop_uid of a group is its canonical_uid. match_kind records which
+rule matched.
 Stops-only sources (MiBici) are excluded: a dock is never a transit station.
 Records are never deleted; persistence happens in pipeline_phase2.
 """
@@ -41,6 +45,22 @@ WITHIN_FEED_DISTANCE_M = 5.0
 NAME_SIM_THRESHOLD = 0.75
 
 EQUIVALENCES_NAME = "stop_equivalences.csv"
+
+REJECTED_NAME = "stop_equivalences_rejected.csv"
+
+#: One row per accepted pair, before grouping.
+PAIR_COLUMNS = [
+    "stop_uid_a",
+    "stop_uid_b",
+    "distance_m",
+    "name_score",
+    "shared_routes",
+    "score",
+    "match_kind",
+]
+
+#: A rejected pair plus the two stops of one feed it would have put in one station.
+REJECTED_COLUMNS = [*PAIR_COLUMNS, "conflict_uid_a", "conflict_uid_b", "conflict_m"]
 
 #: One row per accepted pair, tagged with its group.
 EQUIVALENCE_COLUMNS = [
@@ -110,15 +130,7 @@ def find_equivalences(
     *exclude_feeds* are never matched. score (half closeness, half name) is
     for review only, never a filter.
     """
-    columns = [
-        "stop_uid_a",
-        "stop_uid_b",
-        "distance_m",
-        "name_score",
-        "shared_routes",
-        "score",
-        "match_kind",
-    ]
+    columns = PAIR_COLUMNS
     if exclude_feeds:
         stops = stops[~stops["feed_id"].isin(list(exclude_feeds))]
     if len(stops) < 2:
@@ -198,6 +210,84 @@ def find_equivalences(
     return result
 
 
+def _same_feed_conflict(
+    group_a: list[str], group_b: list[str], feed: dict, xy: dict, limit_m: float
+) -> tuple[str, str, float] | None:
+    """First pair of same-feed stops, one from each group, farther apart than *limit_m*."""
+    for uid_a in group_a:
+        for uid_b in group_b:
+            if feed[uid_a] != feed[uid_b]:
+                continue
+            (xa, ya), (xb, yb) = xy[uid_a], xy[uid_b]
+            meters = float(np.hypot(xa - xb, ya - yb))
+            if meters > limit_m:
+                low, high = sorted((uid_a, uid_b))
+                return low, high, round(meters, 2)
+    return None
+
+
+def drop_conflicting_pairs(
+    accepted: pd.DataFrame, stops: gpd.GeoDataFrame, same_feed_limit_m: float
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split accepted pairs into (kept, rejected) so no station mixes far-apart stops of one feed.
+
+    Pairs join stations closest first. A pair that would put two stops of the
+    same feed more than *same_feed_limit_m* apart into one station is rejected;
+    the rejected row names that stop pair. Without this, chaining merges the
+    opposite platforms of a street through their twins in the other feed.
+    """
+    if accepted.empty:
+        return accepted, pd.DataFrame(columns=REJECTED_COLUMNS)
+    uids = set(accepted["stop_uid_a"]) | set(accepted["stop_uid_b"])
+    members_frame = stops[stops["stop_uid"].isin(uids)]
+    projected = members_frame.to_crs(members_frame.estimate_utm_crs())
+    xy = dict(zip(members_frame["stop_uid"], zip(projected.geometry.x, projected.geometry.y)))
+    feed = dict(zip(members_frame["stop_uid"], members_frame["feed_id"]))
+
+    root = {uid: uid for uid in uids}
+    members = {uid: [uid] for uid in uids}
+
+    def find(uid: str) -> str:
+        while root[uid] != uid:
+            root[uid] = root[root[uid]]
+            uid = root[uid]
+        return uid
+
+    order = accepted.sort_values(["distance_m", "stop_uid_a", "stop_uid_b"], kind="mergesort")
+    kept_index: list = []
+    conflicts: dict = {}
+    for index, uid_a, uid_b in zip(order.index, order["stop_uid_a"], order["stop_uid_b"]):
+        root_a, root_b = find(uid_a), find(uid_b)
+        if root_a != root_b:
+            conflict = _same_feed_conflict(
+                members[root_a], members[root_b], feed, xy, same_feed_limit_m
+            )
+            if conflict is not None:
+                conflicts[index] = conflict
+                continue
+            root[root_b] = root_a
+            members[root_a] = sorted(members[root_a] + members.pop(root_b))
+        kept_index.append(index)
+
+    kept = accepted.loc[accepted.index.isin(kept_index)].reset_index(drop=True)
+    if not conflicts:
+        return kept, pd.DataFrame(columns=REJECTED_COLUMNS)
+    rejected = accepted.loc[list(conflicts)].copy()
+    rejected[["conflict_uid_a", "conflict_uid_b", "conflict_m"]] = list(conflicts.values())
+    rejected = (
+        rejected[REJECTED_COLUMNS]
+        .sort_values(["stop_uid_a", "stop_uid_b"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    if len(rejected):
+        log.info(
+            "Dedupe: %d pair(s) rejected - they would merge stops of one feed more than %g m apart",
+            len(rejected),
+            same_feed_limit_m,
+        )
+    return kept, rejected
+
+
 def canonical_map(equivalences: pd.DataFrame) -> pd.DataFrame:
     """Group stops by connected components; canonical_uid = smallest member."""
     if equivalences.empty:
@@ -239,6 +329,15 @@ def filter_stop_pairs(stop_pairs: pd.DataFrame, canonical: pd.DataFrame) -> pd.D
     if alias.any():
         log.info("Dedupe: %d alias stop pair(s) removed from proximity set", int(alias.sum()))
     return kept
+
+
+def write_rejected(rejected: pd.DataFrame, out_dir: Path) -> Path:
+    """Write stop_equivalences_rejected.csv to *out_dir* and return its path."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / REJECTED_NAME
+    rejected.to_csv(path, index=False, encoding="utf-8")
+    log.info("Rejected alias pairs written: %s (%d pairs)", path, len(rejected))
+    return path
 
 
 def write_equivalences(equivalences: pd.DataFrame, out_dir: Path) -> Path:

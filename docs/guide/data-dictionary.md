@@ -152,7 +152,7 @@ Una fila por par de alias aceptado (solo se escribe con dedupe activo). Hay
   (`--dedupe-distance-m`) que comparten nombre normalizado (similitud ≥ 0.75,
   sin acentos ni mayúsculas, tokens ordenados) **o** al menos un
   `route_short_name` en común.
-- **`within_feed`** — paradas del **mismo** feed a ≤ 50 m
+- **`within_feed`** — paradas del **mismo** feed a ≤ 5 m
   (`--dedupe-within-feed-distance-m`) que comparten **al menos una línea, y
   nada más**. El nombre NO es evidencia aquí: dos paradas distintas de un
   mismo feed pueden llamarse igual (un corredor, una plaza), mientras que dos
@@ -175,6 +175,15 @@ Una fila por par de alias aceptado (solo se escribe con dedupe activo). Hay
 Una fuente de solo paradas (CSV) no tiene líneas, así que la regla
 `within_feed` nunca puede dispararse para ella: sus paradas jamás se fusionan.
 
+**Conflictos del mismo feed.** Los pares aceptados se unen en estaciones del
+más cercano al más lejano. Un par se **rechaza** si la estación resultante
+tendría dos paradas del mismo feed a más de 5 m (el radio `within_feed`).
+Así los andenes opuestos de una calle no se fusionan a través de sus gemelos
+del otro feed. Los pares rechazados están en
+`stop_equivalences_rejected.csv`: las mismas columnas del par más
+`conflict_uid_a`, `conflict_uid_b` (las dos paradas del mismo feed que se
+habrían juntado) y `conflict_m` (su distancia en metros).
+
 La misma información se carga en la tabla `stop_equivalences` de PostGIS
 (recarga completa por corrida; queda vacía tras una corrida `--no-dedupe`).
 
@@ -191,8 +200,9 @@ COUNT(DISTINCT COALESCE(NULLIF("station_dedup",''), "stop_uid"))
 ```
 
 Con los dos feeds de Guadalajara más MiBici la diferencia no es menor:
-14,349 registros → 10,534 con dedupe entre feeds → **8,877** añadiendo el
-dedupe dentro de cada feed.
+14,349 registros → **11,054** estaciones con la deduplicación actual (10,533
+antes de la regla de conflictos del mismo feed; 8,877 con el antiguo radio
+de 50 m dentro de cada feed).
 
 ---
 

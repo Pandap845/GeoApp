@@ -130,6 +130,8 @@ class AnalysisReport(BaseModel):
     # stop_equivalences.match_kind tells the two rules apart.
     station_groups: int = 0
     stops_deduplicated: int = 0  # stops belonging to some alias group
+    # Pairs dropped because they would merge far-apart stops of one feed.
+    dedupe_rejected_pairs: int = 0
     windows: dict[str, str]  # name -> "HH:MM-HH:MM"
     # False when feeds were analyzed on different days (outputs then mix schedules).
     service_dates_coherent: bool = True
@@ -554,16 +556,17 @@ def _apply_dedupe(
     routes: pd.DataFrame,
     stop_pairs: pd.DataFrame,
     stops_only_ids: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Station dedupe; returns (equivalences, canonical, filtered stop_pairs).
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Station dedupe; returns (equivalences, canonical, rejected, filtered stop_pairs).
 
     Aliases of one station are not each other's neighbours; their routes
     connect as same_station_dedup instead.
     """
     equivalences = pd.DataFrame(columns=dedupe.EQUIVALENCE_COLUMNS)
     canonical = pd.DataFrame(columns=dedupe.CANONICAL_COLUMNS)
+    rejected = pd.DataFrame(columns=dedupe.REJECTED_COLUMNS)
     if not config.dedupe:
-        return equivalences, canonical, stop_pairs
+        return equivalences, canonical, rejected, stop_pairs
     accepted = dedupe.find_equivalences(
         all_stops,
         route_stops,
@@ -573,9 +576,13 @@ def _apply_dedupe(
         within_feed_distance_m=config.dedupe_within_feed_distance_m,
         exclude_feeds=stops_only_ids,
     )
-    canonical = dedupe.canonical_map(accepted)
-    equivalences = dedupe.attach_groups(accepted, canonical)
-    return equivalences, canonical, dedupe.filter_stop_pairs(stop_pairs, canonical)
+    # Two stops of one feed share a station only within the within-feed radius.
+    kept, rejected = dedupe.drop_conflicting_pairs(
+        accepted, all_stops, config.dedupe_within_feed_distance_m or 0.0
+    )
+    canonical = dedupe.canonical_map(kept)
+    equivalences = dedupe.attach_groups(kept, canonical)
+    return equivalences, canonical, rejected, dedupe.filter_stop_pairs(stop_pairs, canonical)
 
 
 def _network_walk_pairs(
@@ -644,6 +651,7 @@ def _build_report(
     stops_only_ids: list[str],
     all_stops: gpd.GeoDataFrame,
     canonical: pd.DataFrame,
+    rejected: pd.DataFrame,
     edges: pd.DataFrame,
     metrics: dict[str, Any],
     station_stats: dict[str, Any],
@@ -678,6 +686,7 @@ def _build_report(
         ),
         station_groups=int(canonical["group_id"].nunique()) if not canonical.empty else 0,
         stops_deduplicated=len(canonical),
+        dedupe_rejected_pairs=len(rejected),
         windows={w.name: w.label for w in config.windows},
         service_dates_coherent=len(analyzed_dates) <= 1,
         service_dates=analyzed_dates,
@@ -732,8 +741,9 @@ def _write_near_outputs(
     stop_pairs: pd.DataFrame,
     equivalences: pd.DataFrame,
     canonical: pd.DataFrame,
+    rejected: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Write near_stations, its quality sidecar and the equivalences; returns (near, quality)."""
+    """Write near_stations, its quality sidecar and the dedupe pairs; returns (near, quality)."""
     out_dir = config.report_dir
     near = near_stations.build_near_stations(
         feeds.stops, feeds.route_stops, feeds.routes, stop_pairs, stop_links=feeds.links
@@ -756,6 +766,7 @@ def _write_near_outputs(
     near_stations.write_quality(quality, out_dir)
     if config.dedupe:
         dedupe.write_equivalences(equivalences, out_dir)
+        dedupe.write_rejected(rejected, out_dir)
     return near, quality
 
 
@@ -804,7 +815,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
 
     stations = connectivity.station_map(feeds.stops)
     stop_pairs = _proximity_pairs(engine, feeds.stops, geographic_feed_ids, config.proximity_m)
-    equivalences, canonical, stop_pairs = _apply_dedupe(
+    equivalences, canonical, rejected, stop_pairs = _apply_dedupe(
         config, feeds.stops, feeds.route_stops, feeds.routes, stop_pairs, stops_only_ids
     )
     edges = connectivity.build_edges(feeds.route_stops, stations, stop_pairs, canonical)
@@ -817,7 +828,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         )
 
     near, quality = _write_near_outputs(
-        config, engine, geographic_feed_ids, feeds, stop_pairs, equivalences, canonical
+        config, engine, geographic_feed_ids, feeds, stop_pairs, equivalences, canonical, rejected
     )
     station_graph, station_stats = _write_station_network(
         feeds.stops, near, feeds.links, stop_pairs, equivalences, canonical, stops_only_ids, out_dir
@@ -843,6 +854,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         stops_only_ids,
         feeds.stops,
         canonical,
+        rejected,
         edges,
         metrics,
         station_stats,
@@ -900,7 +912,9 @@ def _md_dedupe_line(report: AnalysisReport) -> str:
     return (
         f"Station deduplication: on (cross-feed {report.dedupe_distance_m:g} m, "
         f"within-feed {within}) - {report.station_groups} group(s), "
-        f"{report.stops_deduplicated} stop(s) merged; see `{dedupe.EQUIVALENCES_NAME}`"
+        f"{report.stops_deduplicated} stop(s) merged, {report.dedupe_rejected_pairs} "
+        f"pair(s) rejected (same-feed conflict); see `{dedupe.EQUIVALENCES_NAME}` "
+        f"and `{dedupe.REJECTED_NAME}`"
     )
 
 

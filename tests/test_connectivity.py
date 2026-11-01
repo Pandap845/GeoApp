@@ -302,6 +302,9 @@ def test_analyze_cli_two_feeds_dedupe_default(tmp_path: Path) -> None:
     equiv = pd.read_csv(out / "stop_equivalences.csv")
     (row,) = equiv.to_dict("records")
     assert (row["stop_uid_a"], row["stop_uid_b"]) == ("metro:S1", "other:X1")
+    # No same-feed conflict here: the rejected file exists and is empty.
+    assert report["dedupe_rejected_pairs"] == 0
+    assert pd.read_csv(out / "stop_equivalences_rejected.csv").empty
     assert row["canonical_uid"] == "metro:S1"
     assert row["distance_m"] <= 30.0
 

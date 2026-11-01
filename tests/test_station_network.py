@@ -6,7 +6,6 @@ from pathlib import Path
 
 import networkx as nx
 import pandas as pd
-from test_near_stations import make_stops, routes_meta
 
 from gtfs_ingest.analysis.near_stations import build_near_stations
 from gtfs_ingest.analysis.station_network import (
@@ -20,6 +19,7 @@ from gtfs_ingest.analysis.station_network import (
 )
 
 from test_connectivity import rs
+from test_near_stations import make_stops, routes_meta
 
 
 def _fixture():

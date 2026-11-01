@@ -568,7 +568,10 @@ flowchart TD
     R50 -->|yes| SR2{"≥ 1 shared route?"}
     SR2 -->|yes| ACC2["accept · within_feed"]
     SR2 -->|"no — names are NOT evidence here"| REJ
-    ACC1 & ACC2 --> GRAPH["undirected graph of accepted pairs"]
+    ACC1 & ACC2 --> ORDER["pairs closest first"]
+    ORDER --> CONF{"would the station hold two stops<br/>of one feed > 5 m apart?"}
+    CONF -->|yes| REJ2["reject · stop_equivalences_rejected.csv"]
+    CONF -->|no| GRAPH["undirected graph of kept pairs"]
     GRAPH --> CC["connected components<br/>canonical_uid = smallest stop_uid"]
 ```
 
@@ -606,10 +609,18 @@ so the within-feed rule could never fire; but the cross-feed *name* rule could
 make a dock the alias of a bus stop named after the same corner. Docks are
 therefore removed before the spatial pass (`exclude_feeds`).
 
-**Grouping** is transitive: accepted pairs form a graph, and each connected
-component is one physical station, with its smallest `stop_uid` as
-`canonical_uid`. Components are ordered by that value, so `group_id`s are
-deterministic.
+**Same-feed conflicts.** Grouping is transitive, so one wrong pair can merge
+two whole groups. The typical case: both platforms of a street exist in both
+feeds (A and B in one, A′ and B′ in the other). A–A′ and B–B′ are true twins
+at 0 m, but A–B′ also passes the cross-feed rule (same name, same route,
+~28 m), and chaining would make A, B, A′ and B′ one station. So pairs join
+stations closest first, and a pair is rejected when the station would hold
+two stops of the same feed more than 5 m apart (the within-feed radius).
+Rejected pairs are listed in `stop_equivalences_rejected.csv`.
+
+**Grouping**: the kept pairs form a graph, and each connected component is
+one physical station, with its smallest `stop_uid` as `canonical_uid`.
+Components are ordered by that value, so `group_id`s are deterministic.
 
 ![Accepted duplicate pairs by rule](../figures/r2_dedupe_distances.png)
 
@@ -624,13 +635,13 @@ This real example shows both rules at once. Around one SiTren station, 12
 records collapse into 3 physical groups: the `improved` feed's `ST_02_007`
 matches the `mdb` feed's copies across feeds (blue), and inside `mdb` the
 `SITEUR_*` and `ST_*` schemes match each other on shared routes (orange).
-It also shows the rule's main trade-off: **`ST_02_007` and `ST_02_038` are the
-two opposite-direction platforms of one line**, and they merge too, because
-they sit within 50 m and serve the same route. That is correct for counting
-stations and wrong if you need direction-level platforms.
+(The figure was drawn with the former 50 m within-feed radius, so it also
+merges the opposite-direction platforms `ST_02_007` and `ST_02_038`. With the
+5 m radius and the same-feed conflict rule they are separate stations.)
 
-Measured on real data, merged groups span a median of 24 m and at most 103 m,
-none above 150 m — the practical guard against runaway transitive chaining.
+Measured on real data, stations now span a median of 0 m and at most 7.5 m:
+the same-feed conflict rule rejected 1,077 cross-feed pairs (768 at 15–30 m,
+304 at 5–15 m, 5 at 1–5 m, none at ≤ 1 m).
 
 **Effects downstream:** alias pairs are removed from the proximity pairs (a
 station is not "near" itself); routes serving aliased stops connect as
@@ -1187,13 +1198,13 @@ erDiagram
 | --- | --- |
 | 6 Service date | 2020-01-01 and 2024-01-01 (busiest per feed) — **not coherent** |
 | 8 Headways | 102,460 stop-level rows, 2,001 route rollups, 274 routes |
-| 11 Dedupe | 4,623 pairs: 4,376 cross-feed + 247 within-feed (5 m; the former 50 m gave 2,697) |
-| 11 Stations | 14,349 records → **10,533** physical stations (8,877 with the former 50 m) |
-| 12 Connectivity | 9,112 route pairs: 3,669 `same_stop`, 1,762 `same_station_dedup`, 3,681 `proximity` |
+| 11 Dedupe | 3,546 pairs kept: 3,299 cross-feed + 247 within-feed (5 m); 1,077 rejected as same-feed conflicts |
+| 11 Stations | 14,349 records → **11,054** physical stations (10,533 before the conflict rule, 8,877 with the former 50 m) |
+| 12 Connectivity | 9,112 route pairs: 3,669 `same_stop`, 1,428 `same_station_dedup`, 4,015 `proximity` |
 | 13 Walk graph | 129,039 ways → 512,420 vertices, 1,186,804 directed edges |
 | 13 Routing | 87,708 of 91,773 pairs on streets; typical walk 1.33× the straight line |
 | 15 `walk_source` | network 12,252 · mixed 1,356 · none 451 · straight_line 290 |
-| 16 Station network | 14,349 nodes; 25,485 in_vehicle + 183,546 walk + 14,146 same_station arcs |
+| 16 Station network | 14,349 nodes; 25,485 in_vehicle + 186,150 walk + 7,092 same_station arcs |
 
 ### Phase 3
 
@@ -1261,9 +1272,9 @@ side-of-street tolerances 1 m / 10 m / 2 m.
 1. **Records are not stations.** Use `COALESCE(station_dedup, stop_uid)` for
    any station count, density or coverage figure (§1.5).
 
-2. **Within-feed dedupe merges opposite-direction platforms** of the same line
-   (Step 11). Correct for counting stations; wrong for direction-level
-   analysis.
+2. **A station is one platform group, not one name.** Opposite-direction
+   platforms stay separate stations (Step 11, same-feed conflicts); join
+   them by walking links, not by dedupe.
 
 3. **Check `service_dates_coherent`.** Different service days across feeds
    mean cross-feed outputs mix schedules. Pin one with `--service-date`.
