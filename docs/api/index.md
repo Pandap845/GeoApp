@@ -12,7 +12,6 @@ phase1
 analysis
 conflation
 qa
-export
 ```
 
 ## Package overview
@@ -28,4 +27,3 @@ export
 | {doc}`gtfs_ingest.analysis <analysis>` | 2 | Headways, connectivity, walk/station networks, spatial exports |
 | {doc}`gtfs_ingest.conflation <conflation>` | 3 | Interchange clustering, OSM matching, side-of-street |
 | {doc}`gtfs_ingest.qa <qa>` | 4 | Google Maps cross-check and station locator, behind licensing rails |
-| {doc}`gtfs_ingest.export <export>` | — | Neo4j load packages built from phase 2 outputs |

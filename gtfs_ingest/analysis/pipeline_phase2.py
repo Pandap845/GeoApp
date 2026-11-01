@@ -54,6 +54,21 @@ from .service_filter import (
 log = logging.getLogger(__name__)
 
 GRAPHML_NAME = "route_connectivity.graphml"
+ROUTE_CONNECTIONS_NAME = "route_connections.csv"
+ROUTE_CONNECTION_STOPS_NAME = "route_connection_stops.csv"
+ROUTES_NAME = "routes.csv"
+ROUTE_STOPS_NAME = "route_stops.csv"
+
+#: routes.csv columns (missing metadata stays empty).
+ROUTE_COLUMNS = [
+    "route_uid",
+    "feed_id",
+    "route_id",
+    "route_short_name",
+    "route_long_name",
+    "route_type",
+    "modalidad",
+]
 JSON_NAME = "analysis_report.json"
 MARKDOWN_NAME = "analysis_report.md"
 
@@ -95,6 +110,7 @@ class AnalysisConfig(BaseModel):
     # Same default as the CLI; None = off (cross-feed aliases only).
     dedupe_within_feed_distance_m: float | None = Field(default=WITHIN_FEED_DISTANCE_M, gt=0)
     drop_unserved_stops: bool = normalizer.DROP_UNSERVED_STOPS
+    prune_station_network: bool = station_network.PRUNE_STATION_NETWORK
     dry_run: bool = False
 
 
@@ -650,8 +666,13 @@ def _write_station_network(
     canonical: pd.DataFrame,
     stops_only_ids: list[str],
     out_dir: Path,
+    prune: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
-    """Build and write the routable station network; returns (graph, stats)."""
+    """Build and write the routable station network; returns (graph, stats).
+
+    Redundant walk/same_station pairs are always counted; with *prune* they
+    are also left out of the written network (no shortest time changes).
+    """
     graph = station_network.build_station_graph(
         all_stops,
         near,
@@ -661,8 +682,16 @@ def _write_station_network(
         canonical=canonical,
         exclude_feeds=stops_only_ids,
     )
+    redundant_walk, redundant_same = station_network.redundant_pairs(graph)
+    if prune:
+        graph = station_network.prune_station_graph(graph, redundant_walk, redundant_same)
     station_network.write_station_graphml(graph, out_dir / station_network.STATION_GRAPHML_NAME)
     stats = station_network.station_graph_stats(graph)
+    stats.update(
+        redundant_walk_pairs=len(redundant_walk),
+        redundant_same_station_pairs=len(redundant_same),
+        pruned=prune,
+    )
     _write_csv(station_network.station_nodes_frame(graph), out_dir / "station_network_nodes.csv")
     _write_csv(station_network.station_edges_frame(graph), out_dir / "station_network_edges.csv")
     return graph, stats
@@ -804,11 +833,22 @@ def _write_near_outputs(
     return near, quality
 
 
-def _write_route_graph(routes: pd.DataFrame, edges: pd.DataFrame, out_dir: Path) -> dict[str, Any]:
-    """Write the route connectivity GraphML; returns its metrics."""
-    graph = graph_export.build_graph(routes, edges)
+def _write_route_outputs(
+    feeds: _AllFeeds, edges: pd.DataFrame, connection_rows: pd.DataFrame, out_dir: Path
+) -> dict[str, Any]:
+    """Write the route graph (GraphML) and its CSVs; returns the graph metrics."""
+    graph = graph_export.build_graph(feeds.routes, edges)
     metrics = graph_export.graph_metrics(graph)
     graph_export.write_graphml(graph, out_dir / GRAPHML_NAME)
+    _write_csv(edges, out_dir / ROUTE_CONNECTIONS_NAME)
+    _write_csv(connection_rows, out_dir / ROUTE_CONNECTION_STOPS_NAME)
+    routes = feeds.routes.reindex(columns=ROUTE_COLUMNS).sort_values("route_uid")
+    _write_csv(routes, out_dir / ROUTES_NAME)
+    served = feeds.route_stops[["route_uid", "stop_uid"]].drop_duplicates()
+    _write_csv(
+        served.sort_values(["route_uid", "stop_uid"], kind="mergesort"),
+        out_dir / ROUTE_STOPS_NAME,
+    )
     return metrics
 
 
@@ -853,6 +893,10 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         config, feeds.stops, feeds.route_stops, feeds.routes, stop_pairs, stops_only_ids
     )
     edges = connectivity.build_edges(feeds.route_stops, stations, stop_pairs, canonical)
+    # Same evidence as the edges, per stop pair: where the routes connect.
+    connection_rows = connectivity.connection_stops(
+        feeds.route_stops, stations, stop_pairs, canonical, feeds.stops
+    )
 
     # --network-walk: after connectivity (which stays straight-line), before
     # near_stations and the GeoPackage, which use the walking times.
@@ -865,7 +909,15 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         config, engine, geographic_feed_ids, feeds, stop_pairs, equivalences, canonical, rejected
     )
     station_graph, station_stats = _write_station_network(
-        feeds.stops, near, feeds.links, stop_pairs, equivalences, canonical, stops_only_ids, out_dir
+        feeds.stops,
+        near,
+        feeds.links,
+        stop_pairs,
+        equivalences,
+        canonical,
+        stops_only_ids,
+        out_dir,
+        prune=config.prune_station_network,
     )
     _write_headways(feed_data, out_dir)
     geopackage.write_geopackage(
@@ -877,7 +929,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisReport:
         stop_links=feeds.links,
         station_edges=station_network.station_edges_layer(station_graph, feeds.stops),
     )
-    metrics = _write_route_graph(feeds.routes, edges, out_dir)
+    metrics = _write_route_outputs(feeds, edges, connection_rows, out_dir)
     if engine is not None:
         _store_cross_feed(engine, edges, equivalences)
 
@@ -1035,6 +1087,14 @@ def _md_connectivity(report: AnalysisReport) -> list[str]:
         if stations.get("n_stops_only")
         else ""
     )
+    redundancy = (
+        f" · redundant pairs (no shortest time changes): "
+        f"{stations['redundant_walk_pairs']} walk, "
+        f"{stations['redundant_same_station_pairs']} same_station "
+        f"({'pruned' if stations.get('pruned') else 'kept'})"
+        if "redundant_walk_pairs" in stations
+        else ""
+    )
     lines = [
         "",
         "## Route connectivity",
@@ -1048,7 +1108,8 @@ def _md_connectivity(report: AnalysisReport) -> list[str]:
         f"Station network: {stations.get('n_stops', 0)} stops · "
         f"{stations.get('n_edges', 0)} edges ({edge_types or 'none'}) · "
         f"{stations.get('n_weak_components', 0)} weak component(s) among transit stops"
-        + stops_only,
+        + stops_only
+        + redundancy,
         "",
         "| Connection type | Route pairs |",
         "| --- | ---: |",

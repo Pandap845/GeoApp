@@ -31,6 +31,9 @@ _DDL_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS ix_stops_geom ON stops USING GIST (geom)",
+    # The proximity query compares geom::geography; without this index it
+    # checks every pair of stops (minutes instead of seconds).
+    "CREATE INDEX IF NOT EXISTS ix_stops_geog ON stops USING GIST ((geom::geography))",
     "CREATE INDEX IF NOT EXISTS ix_stops_feed_id ON stops (feed_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_stops_num_id ON stops (stop_num_id)",
 )

@@ -22,7 +22,6 @@ $PY -m gtfs_ingest.cli analyze-frequency   --feeds $FEEDS --report $OUT --networ
 $PY -m gtfs_ingest.cli detect-interchanges --feeds $FEEDS --report $OUT
 $PY -m gtfs_ingest.cli conflate-osm                       --report $OUT
 $PY -m gtfs_ingest.cli analyze-frequency   --feeds $FEEDS --report $OUT --network-walk --proximity-m 300
-$PY -m gtfs_ingest.cli export-neo4j                       --report $OUT
 ```
 
 `analyze-frequency` runs twice because the quality sidecar needs the OSM matches that only `conflate-osm` writes.
@@ -55,3 +54,5 @@ CI (`.github/workflows/tests.yml`): lint (ruff check + format, blocking), unit m
 | `--service-date` / `--common-date` / `--service-date-range` | busiest per feed | see data-findings.md before relying on "busiest" |
 | `--network-walk` | off | OSM street walking distances |
 | `--no-dedupe` | dedupe on | |
+| `--no-drop-unserved-stops` | unserved stops dropped | keeps stops no trip uses |
+| `--prune-station-network` | off | drops station-network arcs that change no shortest time |

@@ -1,7 +1,7 @@
 """Command line: python -m gtfs_ingest.cli <command> ...
 
 Commands: ingest, analyze-frequency, detect-interchanges, conflate-osm,
-google-qa, locate-stations, export-neo4j. Flags without a command run ingest.
+google-qa, locate-stations. Flags without a command run ingest.
 See README.md for every flag and docs/guide/ for the full run order.
 
 Exit codes: 0 = finished (feeds may still have findings), 1 = run-level
@@ -31,7 +31,6 @@ _SUBCOMMANDS = (
     "conflate-osm",
     "google-qa",
     "locate-stations",
-    "export-neo4j",
 )
 
 #: Longest allowed --service-date-range, to avoid accidental year-long runs.
@@ -159,6 +158,8 @@ def _add_ingest_parser(subparsers: Any) -> None:
 
 
 def _add_analyze_parser(subparsers: Any) -> None:
+    from .analysis.station_network import PRUNE_STATION_NETWORK
+
     analyze = subparsers.add_parser(
         "analyze-frequency",
         help="Compute headways per route/stop/window and the route connectivity graph (Phase 2).",
@@ -249,6 +250,14 @@ def _add_analyze_parser(subparsers: Any) -> None:
     )
     _add_dedupe_args(analyze)
     _add_unserved_arg(analyze)
+    analyze.add_argument(
+        "--prune-station-network",
+        action=argparse.BooleanOptionalAction,
+        default=PRUNE_STATION_NETWORK,
+        help="Leave out walk and same_station arcs that change no shortest travel "
+        "time in the station network (another walking path is as fast). The "
+        "report always counts them. Off by default.",
+    )
 
 
 def _add_detect_parser(subparsers: Any) -> None:
@@ -501,23 +510,6 @@ def _add_locate_parser(subparsers: Any) -> None:
     )
 
 
-def _add_neo4j_parser(subparsers: Any) -> None:
-    neo = subparsers.add_parser(
-        "export-neo4j",
-        help="Build an offline Neo4j load package (CSVs + Cypher) from a report directory.",
-    )
-    # No --feeds/--db-url: works on an existing report folder.
-    _add_report(neo, "analyze-frequency report directory to read (default: ./out).")
-    neo.add_argument(
-        "--out",
-        type=Path,
-        default=None,
-        metavar="DIR",
-        help="Package destination (default: <report>/neo4j).",
-    )
-    _add_log_level(neo)
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser."""
     parser = argparse.ArgumentParser(
@@ -532,7 +524,6 @@ def build_parser() -> argparse.ArgumentParser:
         _add_conflate_parser,
         _add_qa_parser,
         _add_locate_parser,
-        _add_neo4j_parser,
     ):
         add(subparsers)
     return parser
@@ -563,8 +554,7 @@ def _settings(args: argparse.Namespace) -> Settings:
     """Settings from CLI flags, falling back to the environment and .env."""
     overrides: dict = {
         "feed_paths": list(getattr(args, "feeds", None) or []),
-        # export-neo4j has no --dry-run and never writes to the database.
-        "dry_run": getattr(args, "dry_run", True),
+        "dry_run": args.dry_run,
     }
     for flag, field in (
         ("db_url", "database_url"),
@@ -730,6 +720,7 @@ def _analysis_config(args: argparse.Namespace, settings: Settings) -> Any:
         osm_line_table=settings.osm_line_table,
         osm_geom_column=settings.osm_geom_column,
         **_stop_options(args),
+        prune_station_network=args.prune_station_network,
         dry_run=settings.dry_run,
     )
 
@@ -863,19 +854,6 @@ def _run_locate_stations(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_export_neo4j(args: argparse.Namespace) -> int:
-    """Build the Neo4j package and return the exit code."""
-    from .export.neo4j import run_export
-
-    settings = _settings(args)
-    setup_logging(settings.log_level)
-    ok, _ = _guarded("Export", lambda: run_export(settings.report_dir, out_dir=args.out))
-    if not ok:
-        return 1
-    _record_run("export-neo4j", settings.report_dir, {"out": args.out})
-    return 0
-
-
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "ingest": _run_ingest,
     "analyze-frequency": _run_analyze,
@@ -883,7 +861,6 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "conflate-osm": _run_conflate_osm,
     "google-qa": _run_google_qa,
     "locate-stations": _run_locate_stations,
-    "export-neo4j": _run_export_neo4j,
 }
 
 

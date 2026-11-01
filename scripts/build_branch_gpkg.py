@@ -13,8 +13,8 @@ spans 53 routes, but only 4 are BRT trunks (``MC-L1`` "Mi Macro Calzada",
 ``MP-T01`` "Mi Macro Periferico") - the other ~49 are ``Alimentadora ...`` /
 ``Complementaria ...`` feeders. Line labels do not disambiguate either: ``L1``
 is both a Tren Ligero line and a SITREN line. Classification is therefore done
-per *route*, joining ``out/neo4j/rel_serves.csv`` (Route -> Stop) to
-``out/neo4j/routes.csv`` (``modalidad``, ``route_long_name``), then unioning
+per *route*, joining ``route_stops.csv`` (route -> stop) to ``routes.csv``
+(``modalidad``, ``route_long_name``), then unioning
 the resulting branches onto each stop.
 
 GeoPackage stores no symbology, so the colors are carried three ways at once,
@@ -45,11 +45,11 @@ import pandas as pd
 import pyogrio
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT_DIR = ROOT / "outputs" / "out_mibici_v3"
+OUT_DIR = ROOT / "outputs" / "out_mibici_v8"
 
 NEAR_STATIONS = OUT_DIR / "near_stations.csv"
-REL_SERVES = OUT_DIR / "neo4j" / "rel_serves.csv"
-ROUTES = OUT_DIR / "neo4j" / "routes.csv"
+ROUTE_STOPS = OUT_DIR / "route_stops.csv"
+ROUTES = OUT_DIR / "routes.csv"
 SOURCE_GPKG = OUT_DIR / "transit_analysis.gpkg"
 TARGET_GPKG = OUT_DIR / "transit_branches.gpkg"
 
@@ -106,15 +106,6 @@ def classify_route(modalidad: str, long_name: str) -> str:
 def route_branches() -> pd.DataFrame:
     """``route_uid -> branch`` for every route in the analysis."""
     routes = pd.read_csv(ROUTES)
-    routes.columns = [
-        "route_uid",
-        "feed_id",
-        "route_id",
-        "route_short_name",
-        "route_long_name",
-        "route_type",
-        "modalidad",
-    ]
     routes["branch"] = [
         classify_route(m, ln)
         for m, ln in zip(routes["modalidad"].fillna(""), routes["route_long_name"].fillna(""))
@@ -124,13 +115,12 @@ def route_branches() -> pd.DataFrame:
 
 def stop_branches(rb: pd.DataFrame) -> pd.DataFrame:
     """``stop_uid -> branch`` (one row per served stop *per* branch)."""
-    serves = pd.read_csv(REL_SERVES)
-    serves.columns = ["route_uid", "stop_uid"]
+    serves = pd.read_csv(ROUTE_STOPS)
     joined = serves.merge(rb, on="route_uid", how="left")
     unjoined = int(joined["branch"].isna().sum())
     if unjoined:
         raise SystemExit(
-            f"{unjoined} rel_serves rows reference a route absent from routes.csv; "
+            f"{unjoined} route_stops rows reference a route absent from routes.csv; "
             "refusing to guess a branch."
         )
     return joined[["stop_uid", "branch"]].drop_duplicates()
@@ -268,7 +258,7 @@ def write_layer_styles(path: Path, layers: list[tuple[str, str, str]]) -> None:
 
 
 def main() -> int:
-    for required in (NEAR_STATIONS, REL_SERVES, ROUTES, SOURCE_GPKG):
+    for required in (NEAR_STATIONS, ROUTE_STOPS, ROUTES, SOURCE_GPKG):
         if not required.exists():
             raise SystemExit(f"missing required input: {required}")
 

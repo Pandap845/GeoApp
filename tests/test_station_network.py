@@ -213,3 +213,146 @@ def test_deterministic_construction() -> None:
     g2 = build_station_graph(stops, near, links, pairs, equiv, canonical)
     assert sorted(g1.edges(keys=True)) == sorted(g2.edges(keys=True))
     assert list(g1.nodes) == list(g2.nodes)
+
+
+# Redundant arcs: report always, prune on request
+def _network(walks=(), aliases=(), rides=()) -> nx.MultiDiGraph:
+    """A hand-made station network: walks/rides are (a, b, minutes), aliases (a, b)."""
+    from gtfs_ingest.analysis import station_network as sn
+
+    graph = nx.MultiDiGraph()
+    for a, b, minutes in walks:
+        for u, v in ((a, b), (b, a)):
+            graph.add_edge(
+                u,
+                v,
+                key="walk",
+                edge_type="walk",
+                time_min=float(minutes),
+                distance_m=83.0 * minutes,
+            )
+    for a, b in aliases:
+        for u, v in ((a, b), (b, a)):
+            graph.add_edge(u, v, key="same_station", edge_type="same_station", time_min=0.0)
+    for a, b, minutes in rides:
+        graph.add_edge(
+            a, b, key=f"in_vehicle:r:{a}", edge_type="in_vehicle", time_min=float(minutes)
+        )
+    assert sn.PRUNE_STATION_NETWORK is False
+    return graph
+
+
+def test_walk_pair_matched_by_a_two_leg_walk_is_redundant() -> None:
+    from gtfs_ingest.analysis.station_network import redundant_pairs
+
+    walk, same = redundant_pairs(_network(walks=[("A", "B", 1), ("B", "C", 1), ("A", "C", 2)]))
+    assert walk == {("A", "C")} and same == set()
+
+    walk, _ = redundant_pairs(_network(walks=[("A", "B", 1), ("B", "C", 1), ("A", "C", 1)]))
+    assert walk == set()
+
+
+def test_same_station_cycle_keeps_a_spanning_tree() -> None:
+    from gtfs_ingest.analysis.station_network import redundant_pairs
+
+    _, same = redundant_pairs(_network(aliases=[("A", "B"), ("B", "C"), ("A", "C")]))
+    assert same == {("B", "C")}
+
+
+def test_pruning_keeps_every_shortest_time() -> None:
+    from gtfs_ingest.analysis.station_network import prune_station_graph, redundant_pairs
+
+    graph = _network(
+        walks=[
+            ("A", "B", 1),
+            ("B", "C", 2),
+            ("A", "C", 3),
+            ("C", "D", 4),
+            ("A", "D", 7),
+            ("B", "D", 5),
+            ("D", "E", 1),
+        ],
+        aliases=[("E", "F"), ("F", "G"), ("E", "G")],
+        rides=[("A", "G", 2), ("G", "C", 1)],
+    )
+    walk, same = redundant_pairs(graph)
+    pruned = prune_station_graph(graph, walk, same)
+
+    assert walk and same
+    assert pruned.number_of_edges() == graph.number_of_edges() - 2 * (len(walk) + len(same))
+    before = dict(nx.all_pairs_dijkstra_path_length(graph, weight="time_min"))
+    after = dict(nx.all_pairs_dijkstra_path_length(pruned, weight="time_min"))
+    assert before == after
+
+
+def test_redundant_pairs_ignore_edge_insertion_order() -> None:
+    from gtfs_ingest.analysis.station_network import redundant_pairs
+
+    walks = [("A", "B", 1), ("B", "C", 1), ("A", "C", 2), ("C", "D", 1), ("B", "D", 2)]
+    aliases = [("D", "E"), ("E", "F"), ("D", "F")]
+    first = redundant_pairs(_network(walks=walks, aliases=aliases))
+    second = redundant_pairs(_network(walks=walks[::-1], aliases=aliases[::-1]))
+    assert first == second
+
+
+def test_analyze_reports_redundancy_and_prunes_on_request(tmp_path: Path) -> None:
+    import json
+
+    from test_headways import ANALYSIS_FEED
+
+    from gtfs_ingest import cli
+    from gtfs_ingest.analysis.pipeline_phase2 import JSON_NAME
+
+    from conftest import write_feed_dir
+
+    # Three stops ~80 m apart on a line: the A-C walk is matched by A-B-C.
+    feed = {
+        **ANALYSIS_FEED,
+        "stops.txt": ANALYSIS_FEED["stops.txt"]
+        + "S4,North,40.0007,-75.0,0,\nS5,Far North,40.0014,-75.0,0,\n",
+        "stop_times.txt": ANALYSIS_FEED["stop_times.txt"]
+        + "T3,09:50:00,09:50:00,S4,3\nT3,10:00:00,10:00:00,S5,4\n",
+    }
+    write_feed_dir(tmp_path / "feeds", "metro", feed)
+
+    def run(out: str, *extra: str) -> tuple[dict, pd.DataFrame]:
+        assert (
+            cli.main(
+                [
+                    "analyze-frequency",
+                    "--feeds",
+                    str(tmp_path / "feeds"),
+                    "--report",
+                    str(tmp_path / out),
+                    "--service-date",
+                    "2026-01-06",
+                    "--dry-run",
+                    "--proximity-m",
+                    "300",
+                    *extra,
+                ]
+            )
+            == 0
+        )
+        report = json.loads((tmp_path / out / JSON_NAME).read_text(encoding="utf-8"))
+        edges = pd.read_csv(tmp_path / out / "station_network_edges.csv")
+        return report["station_graph"], edges
+
+    kept, kept_edges = run("kept")
+    pruned, pruned_edges = run("pruned", "--prune-station-network")
+
+    assert kept["pruned"] is False and pruned["pruned"] is True
+    assert kept["redundant_walk_pairs"] == pruned["redundant_walk_pairs"] >= 1
+    walk = (kept_edges["edge_type"] == "walk").sum()
+    assert (pruned_edges["edge_type"] == "walk").sum() == walk - kept["redundant_walk_pairs"]
+    assert pruned["n_weak_components"] == kept["n_weak_components"]
+
+
+def test_prune_default_is_the_same_in_cli_and_config() -> None:
+    from gtfs_ingest import cli
+    from gtfs_ingest.analysis.pipeline_phase2 import AnalysisConfig
+    from gtfs_ingest.analysis.station_network import PRUNE_STATION_NETWORK
+
+    args = cli.build_parser().parse_args(["analyze-frequency", "--feeds", "x", "--dry-run"])
+    assert args.prune_station_network is PRUNE_STATION_NETWORK
+    assert AnalysisConfig(feed_paths=[]).prune_station_network is PRUNE_STATION_NETWORK

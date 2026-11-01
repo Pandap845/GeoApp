@@ -323,6 +323,10 @@ Tres formatos con el mismo contenido: `station_network.graphml`
 (MultiDiGraph de networkx), `station_network_nodes.csv` +
 `station_network_edges.csv` (planos, para pandas/Excel), y la capa
 `station_network` del GeoPackage (aristas como líneas, para QGIS).
+Con `--prune-station-network` se omiten las aristas `walk` y `same_station`
+que no cambian ningún tiempo mínimo (otro camino a pie es igual de rápido);
+el reporte las cuenta siempre (`redundant_walk_pairs`,
+`redundant_same_station_pairs`).
 A diferencia del grafo de rutas (sección 4), aquí un nodo = una PARADA y
 cada arista lleva un peso temporal `time_min`, así que
 `nx.shortest_path(g, a, b, weight="time_min")` calcula caminos mínimos
@@ -353,28 +357,17 @@ por par (`in_vehicle` conserva una fila por sentido).
 
 ---
 
-## 6. Paquete neo4j/ — carga directa a Neo4j
+## 6. Conexiones entre rutas (CSV)
 
-Generado con `export-neo4j --report ./out` a partir de los archivos
-anteriores (no recalcula nada). Contiene 8 CSVs de datos con el encabezado
-de `neo4j-admin` en la primera línea, más tres archivos generados:
+Cuatro archivos planos que acompañan a `route_connectivity.graphml`:
 
-| Archivo | Contenido |
-| --- | --- |
-| `stops.csv` | Nodos `(:Stop)` — `stop_uid:ID(Stop)`, nombre, feed, `near_id`, lat/lon, `canonical_uid` |
-| `routes.csv` | Nodos `(:Route)` — metadata de la línea (nombre corto/largo, `route_type`, `modalidad`) |
-| `stations.csv` | Nodos `(:Station)` — SOLO grupos de alias con 2+ miembros (`canonical_uid:ID(Station)`, `n_stops`) |
-| `rel_in_vehicle.csv` | `[:IN_VEHICLE {time_min, linea, direction_id, route_uid}]` — dirigida |
-| `rel_walk.csv` | `[:WALK {time_min, distance_m}]` — se guarda una vez; consultar sin dirección: `-[:WALK]-` |
-| `rel_same_station.csv` | `[:SAME_STATION]` — alias entre feeds, con métricas de la deduplicación |
-| `rel_serves.csv` | `(:Route)-[:SERVES]->(:Stop)` — derivada de los extremos de `in_vehicle` |
-| `rel_part_of.csv` | `(:Stop)-[:PART_OF]->(:Station)` — incluye a la parada canónica |
-| `load.cypher` | Script idempotente (`MERGE`, constraints, lotes de 1000) — `cypher-shell -f load.cypher` con los CSV en la carpeta *import* del DBMS |
-| `post_import.cypher` | Constraints + propiedad `location` (punto) — para DESPUÉS de un import masivo |
-| `admin_import.txt` | El comando `neo4j-admin database import full` documentado (bash y PowerShell) |
+| Archivo | Una fila por | Columnas |
+| --- | --- | --- |
+| `route_connections.csv` | par de rutas conectadas | `route_a`, `route_b` (`route_uid`, `route_a < route_b`), `feed_id_a`, `feed_id_b`, `connection_type` (la evidencia más fuerte), `shared_stop_count`, `min_stop_distance_m` |
+| `route_connection_stops.csv` | par de rutas **y** par de paradas | `route_a`, `route_b`, `stop_uid_a` (de `route_a`), `stop_uid_b` (de `route_b`), `connection_type`, `distance_m` (0 si comparten parada). Dice **dónde** se conectan dos rutas |
+| `routes.csv` | ruta | `route_uid`, `feed_id`, `route_id`, `route_short_name`, `route_long_name`, `route_type`, `modalidad` |
+| `route_stops.csv` | ruta y parada servida | `route_uid`, `stop_uid` (paradas que la ruta atiende el día analizado) |
 
-Claves del diseño: los espacios de id (`:ID(Stop)` vs `:ID(Station)`)
-evitan la colisión — el id de una estación ES el `stop_uid` de su parada
-canónica; ningún dato viaja dentro de los `.cypher` (todo va por CSV, así
-que nombres con comillas o acentos no rompen el script); recargar el
-script es seguro (todo es `MERGE`).
+Orden de fuerza: `same_stop` > `same_parent_station` > `same_station_dedup` >
+`proximity`. Cada par de paradas conserva solo su evidencia más fuerte, y el
+tipo más fuerte de cada par de rutas coincide con el del grafo de rutas.

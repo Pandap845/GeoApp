@@ -62,8 +62,7 @@ flowchart LR
         S20["20 OSM match"] --> S21["21 side of street"] --> S22["22 coverage gaps"]
     end
 
-    subgraph P4["Exports"]
-        S23["23 Neo4j package"]
+    subgraph P4["Phase 4 · opt-in"]
         S24["24 Google QA<br/>(opt-in)"]
     end
 
@@ -96,8 +95,6 @@ flowchart TB
     C -->|writes| T4[("stop_osm_matches<br/>stop_side_of_street")]
     T4 -->|coord_confidence| A2["analyze-frequency<br/>(pass 2)"]
     A2 -->|refreshes| F1
-    F1 -->|read by| N["export-neo4j"]
-    N -->|writes| F2["neo4j/ package"]
 ```
 
 ```bash
@@ -108,7 +105,6 @@ python -m gtfs_ingest.cli analyze-frequency   --feeds $FEEDS --report ./out --ne
 python -m gtfs_ingest.cli detect-interchanges --feeds $FEEDS --report ./out
 python -m gtfs_ingest.cli conflate-osm                       --report ./out
 python -m gtfs_ingest.cli analyze-frequency   --feeds $FEEDS --report ./out --network-walk --proximity-m 300
-python -m gtfs_ingest.cli export-neo4j                       --report ./out
 ```
 
 The quality sidecar (Step 15) reads `stop_osm_matches`, which only
@@ -537,7 +533,7 @@ pairs = { (a, b) : stop_uid_a < stop_uid_b,  distance(a, b) <= --proximity-m }
 
 | Path | Used when | How |
 | --- | --- | --- |
-| PostGIS | a database is configured | `ST_DWithin(a.geom::geography, b.geom::geography, r)` on the `stops` table, GiST-indexed, restricted to the feeds that contributed stops |
+| PostGIS | a database is configured | `ST_DWithin(a.geom::geography, b.geom::geography, r)` on the `stops` table, using the GiST index on `geom::geography` (`ix_stops_geog`), restricted to the feeds that contributed stops |
 | Local | `--dry-run` | project to UTM; spatial join with `dwithin` on a spatial index |
 
 The PostGIS path reads the **table** and filters by feed id. That list must
@@ -855,6 +851,21 @@ flowchart LR
 nx.shortest_path(G, a, b, weight="time_min")  # riding + walking + transferring
 ```
 
+**Redundant arcs.** A walk pair is redundant when another walking path is as
+fast, and a same_station pair when it closes a cycle of 0-minute links. They
+are found exactly and deterministically:
+
+1. same_station pairs in `stop_uid` order through a union-find; a pair that
+   closes a cycle is redundant (a spanning tree per station remains);
+2. walk pairs longest first (`time_min`, then `distance_m`, then uids): drop
+   the pair if the remaining walking graph (walk + kept same_station) still
+   links its stops within its minutes, otherwise put it back.
+
+Each drop keeps every walking shortest time, so every shortest `time_min`
+path of the full network is kept too. The counts are always in the report;
+`--prune-station-network` also writes the pruned network. Measured: 42,557 of
+72,286 walk pairs and 247 of 2,812 same_station pairs are redundant.
+
 Stops-only nodes (MiBici docks) get **no** `walk` or `same_station` arcs. A
 node with walk arcs is a waypoint any shortest path may cross, and a dock
 between two bus stops would chain two 300 m walks into one the proximity
@@ -1051,31 +1062,7 @@ feeds or noise in OSM.
 
 ---
 
-## Phase 4 and exports
-
-### Step 23. Export to Neo4j
-
-Command `export-neo4j` · module `export/neo4j.py` · reads only files, so it
-works on any saved run.
-
-```mermaid
-flowchart LR
-    S1(("Stop"))
-    S2(("Stop"))
-    R["Route"]
-    ST{{"Station<br/>multi-member dedupe group"}}
-    S1 -->|"IN_VEHICLE<br/>time_min"| S2
-    S1 ---|"WALK"| S2
-    S1 ---|"SAME_STATION"| S2
-    R -->|"SERVES"| S1
-    S1 -->|"PART_OF"| ST
-    S2 -->|"PART_OF"| ST
-```
-
-Writes CSVs with `neo4j-admin` inline headers, an idempotent `load.cypher`
-(`IF NOT EXISTS` constraints, `MERGE`, `IN TRANSACTIONS`), `post_import.cypher`
-and `admin_import.txt`. `SERVES` is derived from `IN_VEHICLE` endpoints. No
-data value is ever interpolated into Cypher.
+## Phase 4
 
 ### Step 24. Google QA and station locator (optional)
 
@@ -1204,7 +1191,7 @@ erDiagram
 | 13 Walk graph | 129,039 ways → 512,420 vertices, 1,186,804 directed edges |
 | 13 Routing | 87,708 of 91,773 pairs on streets; typical walk 1.33× the straight line |
 | 15 `walk_source` | network 12,252 · mixed 1,356 · none 451 · straight_line 290 |
-| 16 Station network | 12,768 nodes (1,581 never-served stops left out); 25,485 in_vehicle + 144,572 walk + 5,624 same_station arcs; **1 weak component** among transit stops |
+| 16 Station network | 12,768 nodes (1,581 never-served stops left out); 25,485 in_vehicle + 144,572 walk + 5,624 same_station arcs; **1 weak component** among transit stops; 42,557 walk + 247 same_station pairs redundant (with `--prune-station-network`: 59,458 walk + 5,130 same_station arcs, same shortest times) |
 
 ### Phase 3
 

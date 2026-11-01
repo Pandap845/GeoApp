@@ -83,7 +83,7 @@ jobs:
         shell: bash
         run: |
           python -m pip wheel . --no-deps -w dist
-          python -c "import sys, zipfile, glob; names = zipfile.ZipFile(glob.glob('dist/gtfs_ingest-*.whl')[0]).namelist(); missing = [p for p in ('analysis', 'conflation', 'qa', 'export') if f'gtfs_ingest/{p}/__init__.py' not in names]; sys.exit(f'missing subpackages: {missing}' if missing else 0)"
+          python -c "import sys, zipfile, glob; names = zipfile.ZipFile(glob.glob('dist/gtfs_ingest-*.whl')[0]).namelist(); missing = [p for p in ('analysis', 'conflation', 'qa') if f'gtfs_ingest/{p}/__init__.py' not in names]; sys.exit(f'missing subpackages: {missing}' if missing else 0)"
 
   integration:
     name: Integration (PostGIS)

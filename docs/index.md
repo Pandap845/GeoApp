@@ -14,7 +14,7 @@ previous phase's tables:
 | 3 | `detect-interchanges`, `conflate-osm` | Multimodal interchange clustering, OSM location validation, side-of-street disambiguation |
 | 4 | `google-qa`, `locate-stations` | Gated, budgeted Google Maps cross-check of stop positions; station route resolution |
 
-Exports to GeoPackage, GraphML and Neo4j sit alongside phase 2.
+Exports to GeoPackage, GraphML and CSV sit alongside phase 2.
 
 :::{note}
 This documentation is generated from the source tree: the narrative chapters are

@@ -22,7 +22,7 @@ reproducible and every change must keep the tests green**.
 
 ## The ten things to remember
 
-1. **Four phases, one CLI:** `ingest` → `analyze-frequency` → `detect-interchanges` / `conflate-osm` → `google-qa` / `locate-stations`, plus `export-neo4j`. Entry point: `python -m gtfs_ingest.cli`.
+1. **Four phases, one CLI:** `ingest` → `analyze-frequency` → `detect-interchanges` / `conflate-osm` → `google-qa` / `locate-stations`. Entry point: `python -m gtfs_ingest.cli`.
 2. **A broken feed never stops a run.** Every per-feed step has a failure boundary; problems become findings in the report.
 3. **`stop_uid = "{feed_id}:{stop_id}"`** is the global key. `feed_id` comes from the file name (`mibici.csv` → `mibici`).
 4. **Dedupe groups records, it never deletes them.** Count stations with `station_dedup` from `near_stations_quality.csv`, not with row counts. Stops that no trip uses *are* left out of every Phase 2/3 output by default (`--no-drop-unserved-stops` keeps them); PostGIS `stops` keeps them all.

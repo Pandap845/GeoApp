@@ -180,3 +180,37 @@ def test_live_csv_and_gtfs_stops_coexist_under_colliding_ids(tmp_path, valid_fee
             {"f": valid_feed.feed_id},
         ).scalar_one()
     assert remaining == 3
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GTFS_TEST_DATABASE_URL"),
+    reason="GTFS_TEST_DATABASE_URL not set; skipping live PostGIS test",
+)
+def test_live_proximity_query_can_use_the_geography_index() -> None:
+    """Without ix_stops_geog the proximity query compares every pair of stops."""
+    from sqlalchemy import text
+
+    from gtfs_ingest.db import ensure_schema
+
+    engine = make_engine(os.environ["GTFS_TEST_DATABASE_URL"])
+    ensure_schema(engine)
+    with engine.connect() as conn:
+        names = set(
+            conn.execute(text("SELECT indexname FROM pg_indexes WHERE tablename = 'stops'"))
+            .scalars()
+            .all()
+        )
+        # Force the planner to show whether the index is usable at all.
+        conn.execute(text("SET enable_seqscan = off"))
+        plan = "\n".join(
+            conn.execute(
+                text(
+                    "EXPLAIN SELECT a.stop_uid, b.stop_uid FROM stops a JOIN stops b "
+                    "ON a.stop_uid < b.stop_uid "
+                    "AND ST_DWithin(a.geom::geography, b.geom::geography, 300)"
+                )
+            ).scalars()
+        )
+    assert "ix_stops_geog" in names
+    assert "ix_stops_geog" in plan
+    engine.dispose()

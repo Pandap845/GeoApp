@@ -924,3 +924,110 @@ def test_drop_unserved_default_is_the_same_in_cli_and_configs() -> None:
         assert args.drop_unserved_stops is DROP_UNSERVED_STOPS
     assert AnalysisConfig(feed_paths=[]).drop_unserved_stops is DROP_UNSERVED_STOPS
     assert InterchangeConfig(feed_paths=[]).drop_unserved_stops is DROP_UNSERVED_STOPS
+
+
+# Where routes connect: route_connection_stops
+def _connection_inputs():
+    """Four routes: R1/R2 share S1; R3 serves P1 (station ST with S2 of R1);
+    R4 serves X1, a dedupe alias of S3 (R2); R2's S3 is ~50 m from R3's P1."""
+    route_stops = rs(
+        ("f", "R1", "S1"),
+        ("f", "R1", "S2"),
+        ("f", "R2", "S1"),
+        ("f", "R2", "S3"),
+        ("f", "R3", "P1"),
+        ("g", "R4", "X1"),
+    )
+    stations = connectivity.station_map(
+        stops_meta(("f", "S2", "ST"), ("f", "P1", "ST")).assign(parent_station=["ST", "ST"])
+    )
+    stop_pairs = pd.DataFrame(
+        {"stop_uid_a": ["f:P1"], "stop_uid_b": ["f:S3"], "distance_m": [50.0]}
+    )
+    canonical = pd.DataFrame(
+        {"stop_uid": ["f:S3", "g:X1"], "canonical_uid": ["f:S3", "f:S3"], "group_id": [0, 0]}
+    )
+    stops = stops_geo(
+        ("f", "S1", 40.0, -75.0),
+        ("f", "S2", 40.001, -75.0),
+        ("f", "S3", 40.002, -75.0),
+        ("f", "P1", 40.00245, -75.0),
+        ("g", "X1", 40.00201, -75.0),
+    )
+    return route_stops, stations, stop_pairs, canonical, stops
+
+
+def test_connection_stops_lists_each_kind_of_evidence() -> None:
+    route_stops, stations, stop_pairs, canonical, stops = _connection_inputs()
+
+    rows = connectivity.connection_stops(route_stops, stations, stop_pairs, canonical, stops)
+
+    found = {
+        (
+            r.route_a.split(":")[1],
+            r.route_b.split(":")[1],
+            r.stop_uid_a,
+            r.stop_uid_b,
+        ): r.connection_type
+        for r in rows.itertuples()
+    }
+    assert found[("R1", "R2", "f:S1", "f:S1")] == "same_stop"
+    assert found[("R1", "R3", "f:S2", "f:P1")] == "same_parent_station"
+    assert found[("R2", "R4", "f:S3", "g:X1")] == "same_station_dedup"
+    # Oriented route_a < route_b, each stop on its own route's side.
+    assert found[("R2", "R3", "f:S3", "f:P1")] == "proximity"
+    assert (rows["route_a"] < rows["route_b"]).all()
+    assert rows.loc[rows["connection_type"] == "same_stop", "distance_m"].eq(0).all()
+    assert rows["distance_m"].notna().all()
+    assert list(rows.columns) == connectivity.CONNECTION_STOP_COLUMNS
+
+
+def test_connection_stops_match_the_route_graph() -> None:
+    route_stops, stations, stop_pairs, canonical, stops = _connection_inputs()
+    edges = connectivity.build_edges(route_stops, stations, stop_pairs, canonical)
+
+    rows = connectivity.connection_stops(route_stops, stations, stop_pairs, canonical, stops)
+
+    order = ["same_stop", "same_parent_station", "same_station_dedup", "proximity"]
+    strongest = (
+        rows.assign(rank=rows["connection_type"].map(order.index))
+        .sort_values("rank")
+        .drop_duplicates(["route_a", "route_b"])
+        .set_index(["route_a", "route_b"])["connection_type"]
+    )
+    expected = edges.set_index(["route_a", "route_b"])["connection_type"]
+    pd.testing.assert_series_equal(strongest.sort_index(), expected.sort_index())
+
+
+def test_a_stop_pair_keeps_only_its_strongest_evidence() -> None:
+    route_stops = rs(("f", "R1", "S1"), ("f", "R2", "S2"))
+    stations = connectivity.station_map(
+        stops_meta(("f", "S1", "ST"), ("f", "S2", "ST")).assign(parent_station=["ST", "ST"])
+    )
+    stop_pairs = pd.DataFrame(
+        {"stop_uid_a": ["f:S1"], "stop_uid_b": ["f:S2"], "distance_m": [20.0]}
+    )
+    stops = stops_geo(("f", "S1", 40.0, -75.0), ("f", "S2", 40.00018, -75.0))
+
+    rows = connectivity.connection_stops(route_stops, stations, stop_pairs, None, stops)
+
+    (row,) = rows.to_dict("records")
+    assert row["connection_type"] == "same_parent_station"  # beats proximity
+    assert 15 < row["distance_m"] < 25  # measured between the two stops
+
+
+def test_analyze_writes_route_connection_csvs(tmp_path: Path) -> None:
+    report = _run_analyze_two_feeds(tmp_path, "out")
+    out = tmp_path / "out"
+
+    connections = pd.read_csv(out / "route_connections.csv")
+    stops = pd.read_csv(out / "route_connection_stops.csv")
+    routes = pd.read_csv(out / "routes.csv")
+    served = pd.read_csv(out / "route_stops.csv")
+
+    assert len(connections) == report["graph"]["n_edges"]
+    pairs = set(zip(connections["route_a"], connections["route_b"]))
+    assert set(zip(stops["route_a"], stops["route_b"])) == pairs
+    assert len(routes) == report["graph"]["n_routes"]
+    assert list(routes.columns)[:3] == ["route_uid", "feed_id", "route_id"]
+    assert list(served.columns) == ["route_uid", "stop_uid"]

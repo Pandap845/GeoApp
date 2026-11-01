@@ -61,10 +61,6 @@ Ignore `gtfs_ingest/.venv` (a stray second virtualenv); the project env is the r
 Opt-in Google Places cross-checks with a budget and a storage guard:
 `google_client.py`, `crosscheck.py`, `station_locator.py`, `storage.py`, `pipeline_phase4.py`.
 
-### Export — `export-neo4j` (`export/neo4j.py`)
-
-Offline Neo4j package (CSV + `load.cypher`) built from the station-network CSVs.
-
 ## Key concepts
 
 - **Finding:** a validation result with severity, code, message, count, sample. Never an exception.
@@ -78,7 +74,9 @@ Offline Neo4j package (CSV + `load.cypher`) built from the station-network CSVs.
 ## Main outputs of `analyze-frequency`
 
 `analysis_report.json/.md`, `near_stations.csv`, `near_stations_quality.csv`,
-`stop_equivalences.csv`, `route_connectivity.graphml`, `station_network.graphml`
+`stop_equivalences.csv` (+ `_rejected`), `route_connectivity.graphml` with
+`route_connections.csv`, `route_connection_stops.csv`, `routes.csv`,
+`route_stops.csv`, `station_network.graphml`
 plus `station_network_nodes/edges.csv`, `route_headways.csv`,
 `route_stop_headways.csv`, `transit_analysis.gpkg`. Phase 3 adds
 `interchanges_report.*`, `conflation_report.*`, `osm_coverage_gaps.gpkg`.

@@ -42,6 +42,9 @@ EDGE_COLUMNS = [
 
 NODE_COLUMNS = ["stop_uid", "near_id", "name", "feed", "canonical_uid", "lat", "lon"]
 
+#: Write every walk/same_station arc unless pruning is asked for; CLI default too.
+PRUNE_STATION_NETWORK = False
+
 
 def build_station_graph(
     stops: pd.DataFrame,
@@ -154,6 +157,99 @@ def build_station_graph(
         ", ".join(f"{k}={v}" for k, v in _edges_by_type(graph).items()) or "none",
     )
     return graph
+
+
+def _pairs(graph: nx.MultiDiGraph, kind: str) -> dict[tuple[str, str], dict]:
+    """{(a, b): attrs} of the two-way arcs of *kind*, one entry per stop pair (a < b)."""
+    pairs: dict[tuple[str, str], dict] = {}
+    for a, b, data in graph.edges(data=True):
+        if data.get("edge_type") == kind:
+            pairs.setdefault((min(a, b), max(a, b)), data)
+    return pairs
+
+
+def _redundant_same_station(pairs: Collection[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Pairs that close a cycle: a spanning tree per station keeps every 0-minute link."""
+    root: dict[str, str] = {}
+
+    def find(uid: str) -> str:
+        root.setdefault(uid, uid)
+        while root[uid] != uid:
+            root[uid] = root[root[uid]]
+            uid = root[uid]
+        return uid
+
+    redundant = set()
+    for a, b in sorted(pairs):
+        root_a, root_b = find(a), find(b)
+        if root_a == root_b:
+            redundant.add((a, b))
+        else:
+            root[root_b] = root_a
+    return redundant
+
+
+def _redundant_walk(
+    walk: dict[tuple[str, str], dict], same_station: Collection[tuple[str, str]]
+) -> set[tuple[str, str]]:
+    """Walk pairs another walking path matches in minutes; removed longest first.
+
+    A pair is dropped only when the remaining walking graph still links its
+    stops within its own minutes, so no shortest walking time ever changes.
+    """
+    walking = nx.Graph()
+    for (a, b), data in walk.items():
+        walking.add_edge(a, b, time_min=float(data["time_min"]))
+    for a, b in same_station:
+        walking.add_edge(a, b, time_min=0.0)
+
+    order = sorted(
+        walk.items(),
+        key=lambda item: (-item[1]["time_min"], -(item[1].get("distance_m") or 0.0), item[0]),
+    )
+    redundant = set()
+    for (a, b), data in order:
+        minutes = float(data["time_min"])
+        attrs = walking[a][b]
+        if attrs["time_min"] < minutes:  # the same pair is also a 0-minute alias link
+            redundant.add((a, b))
+            continue
+        walking.remove_edge(a, b)
+        reach = nx.single_source_dijkstra_path_length(walking, a, cutoff=minutes, weight="time_min")
+        if b in reach:
+            redundant.add((a, b))
+        else:
+            walking.add_edge(a, b, **attrs)
+    return redundant
+
+
+def redundant_pairs(
+    graph: nx.MultiDiGraph,
+) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """(walk, same_station) stop pairs whose arcs change no shortest time_min path."""
+    same = _pairs(graph, "same_station")
+    same_redundant = _redundant_same_station(same)
+    kept_same = [pair for pair in same if pair not in same_redundant]
+    walk_redundant = _redundant_walk(_pairs(graph, "walk"), kept_same)
+    return walk_redundant, same_redundant
+
+
+def prune_station_graph(
+    graph: nx.MultiDiGraph,
+    walk: Collection[tuple[str, str]],
+    same_station: Collection[tuple[str, str]],
+) -> nx.MultiDiGraph:
+    """Copy of *graph* without the arcs (both ways) of the given redundant pairs."""
+    drop_by_kind = {"walk": set(walk), "same_station": set(same_station)}
+    pruned = graph.copy()
+    pruned.remove_edges_from(
+        [
+            (a, b, key)
+            for a, b, key, data in graph.edges(keys=True, data=True)
+            if (min(a, b), max(a, b)) in drop_by_kind.get(data.get("edge_type"), ())
+        ]
+    )
+    return pruned
 
 
 def _edges_by_type(graph: nx.MultiDiGraph) -> dict[str, int]:

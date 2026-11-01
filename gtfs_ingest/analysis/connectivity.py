@@ -222,3 +222,102 @@ def build_edges(
         or "none",
     )
     return result
+
+
+#: One row per route pair and stop pair: where two routes connect.
+CONNECTION_STOP_COLUMNS = [
+    "route_a",
+    "route_b",
+    "stop_uid_a",
+    "stop_uid_b",
+    "connection_type",
+    "distance_m",
+]
+
+#: Strongest evidence first; a stop pair keeps only its strongest type.
+_TYPE_ORDER = ["same_stop", "same_parent_station", "same_station_dedup", "proximity"]
+
+
+def _orient(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop self-pairs and swap rows so route_a < route_b, keeping each stop with its route."""
+    df = df[df["route_a"] != df["route_b"]].copy()
+    swap = df["route_a"] > df["route_b"]
+    cols = ["route_a", "route_b", "stop_uid_a", "stop_uid_b"]
+    df.loc[swap, cols] = df.loc[swap, ["route_b", "route_a", "stop_uid_b", "stop_uid_a"]].to_numpy()
+    return df
+
+
+def _stops_sharing(route_stops: pd.DataFrame, groups: pd.DataFrame, key: str) -> pd.DataFrame:
+    """Route/stop pairs whose two different stops share *key* (a station or dedupe group)."""
+    with_key = route_stops[["route_uid", "stop_uid"]].merge(
+        groups[["stop_uid", key]], on="stop_uid"
+    )
+    joined = with_key.merge(with_key, on=key, suffixes=("_a", "_b"))
+    joined = joined[joined["stop_uid_a"] != joined["stop_uid_b"]]
+    return joined.rename(columns={"route_uid_a": "route_a", "route_uid_b": "route_b"})
+
+
+def connection_stops(
+    route_stops: pd.DataFrame,
+    stations: pd.DataFrame,
+    stop_pairs: pd.DataFrame | None,
+    canonical: pd.DataFrame | None,
+    stops: gpd.GeoDataFrame,
+) -> pd.DataFrame:
+    """Every stop pair that connects two routes, with its type and distance.
+
+    Uses the same evidence as build_edges, so its route pairs and their
+    strongest types match the route graph exactly.
+    """
+    if route_stops.empty:
+        return pd.DataFrame(columns=CONNECTION_STOP_COLUMNS)
+    served = route_stops[["route_uid", "stop_uid"]]
+    frames = []
+
+    same = served.merge(served, on="stop_uid", suffixes=("_a", "_b"))
+    same = same.rename(columns={"route_uid_a": "route_a", "route_uid_b": "route_b"})
+    same["stop_uid_a"] = same["stop_uid_b"] = same["stop_uid"]
+    frames.append(same.assign(connection_type="same_stop", distance_m=0.0))
+
+    if not stations.empty:
+        parent = _stops_sharing(route_stops, stations, "station_uid")
+        frames.append(parent.assign(connection_type="same_parent_station", distance_m=pd.NA))
+    if canonical is not None and not canonical.empty:
+        dedup = _stops_sharing(route_stops, canonical, "canonical_uid")
+        frames.append(dedup.assign(connection_type="same_station_dedup", distance_m=pd.NA))
+
+    if stop_pairs is not None and not stop_pairs.empty:
+        prox = stop_pairs[["stop_uid_a", "stop_uid_b", "distance_m"]].merge(
+            served.rename(columns={"stop_uid": "stop_uid_a", "route_uid": "route_a"}),
+            on="stop_uid_a",
+        )
+        prox = prox.merge(
+            served.rename(columns={"stop_uid": "stop_uid_b", "route_uid": "route_b"}),
+            on="stop_uid_b",
+        )
+        frames.append(prox.assign(connection_type="proximity"))
+
+    rows = _orient(pd.concat([f[CONNECTION_STOP_COLUMNS] for f in frames], ignore_index=True))
+    rows["rank"] = rows["connection_type"].map(_TYPE_ORDER.index)
+    key = ["route_a", "route_b", "stop_uid_a", "stop_uid_b"]
+    rows = (
+        rows.sort_values([*key, "rank"], kind="mergesort")
+        .drop_duplicates(key)
+        .reset_index(drop=True)
+    )
+    rows["distance_m"] = _fill_distances(rows, stops)
+    return rows[CONNECTION_STOP_COLUMNS]
+
+
+def _fill_distances(rows: pd.DataFrame, stops: gpd.GeoDataFrame) -> pd.Series:
+    """Metres between the two stops where the evidence carried no distance (UTM, as local pairs)."""
+    distance = pd.to_numeric(rows["distance_m"], errors="coerce")
+    missing = distance.isna()
+    if not missing.any() or stops.empty:
+        return distance.round(2)
+    projected = stops[["stop_uid", "geometry"]].to_crs(stops.estimate_utm_crs())
+    geom = projected.set_index("stop_uid")["geometry"]
+    a = gpd.GeoSeries(rows.loc[missing, "stop_uid_a"].map(geom), crs=projected.crs)
+    b = gpd.GeoSeries(rows.loc[missing, "stop_uid_b"].map(geom), crs=projected.crs)
+    distance.loc[missing] = a.distance(b).to_numpy()
+    return distance.round(2)

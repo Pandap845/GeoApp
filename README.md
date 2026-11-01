@@ -189,6 +189,7 @@ CREATE TABLE stops (
     loaded_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_stops_geom    ON stops USING GIST (geom);
+CREATE INDEX ix_stops_geog    ON stops USING GIST ((geom::geography));  -- proximity query
 CREATE INDEX ix_stops_feed_id ON stops (feed_id);
 CREATE UNIQUE INDEX ux_stops_num_id ON stops (stop_num_id);
 ```
@@ -266,7 +267,9 @@ OSM street network in PostGIS instead of straight lines (pairs without a
 street path within 800 m keep the straight-line value). The built walk
 graph is cached on disk in `.gtfs_cache/` keyed by feeds + OSM state
 (`--walk-cache-dir DIR` to relocate, `--no-walk-cache` to force a rebuild —
-an OSM reimport or stop reload invalidates automatically); `--transport-mode
+an OSM reimport or stop reload invalidates automatically);
+`--prune-station-network` leaves out station-network arcs that change no
+shortest time (see the station network output below); `--transport-mode
 MODE` and `--route ROUTE` (both repeatable or
 comma-separated) restrict the analysis to certain transport modes and/or
 routes — **default: everything**. Modes accept names (bus, tram, metro,
@@ -662,7 +665,7 @@ takes no part in anything route-derived, and it is reported as `stops_only`:
 | --- | --- |
 | `stops` table rows, GeoPackage `stops`/`near_links` layers | headways (`route_stop_headways`, `route_headways`) |
 | proximity pairs and `near_stations.csv` entries | route connectivity edges of any type |
-| `station_network.graphml` nodes, flagged `stops_only` (so they reach the Neo4j package) | `route_connectivity.graphml` nodes |
+| `station_network.graphml` nodes, flagged `stops_only` | `route_connectivity.graphml` nodes |
 | | station deduplication of any kind — a dock is never an alias of a transit stop |
 | | station-network `walk`/`same_station` arcs — an unlinked node can never be a waypoint between two transit stops; `n_weak_components` counts transit stops only and `n_stops_only` reports the rest |
 | | `in_vehicle` edges, `same_line_stations` |
@@ -839,6 +842,21 @@ Files in `--report DIR`:
 - `route_connectivity.graphml` — the networkx graph (nodes: analyzed routes
   with feed/route metadata; edges: the connection attributes), loadable in
   Gephi/yEd/networkx.
+- `route_connections.csv` — the route graph as a table (same rows as the
+  `route_connections` DB table): `route_a`, `route_b` (`route_uid`s,
+  `route_a < route_b`), `feed_id_a`, `feed_id_b`, `connection_type` (the
+  strongest: `same_stop` > `same_parent_station` > `same_station_dedup` >
+  `proximity`), `shared_stop_count`, `min_stop_distance_m`.
+- `route_connection_stops.csv` — **where** two routes connect: one row per
+  route pair and stop pair, `route_a`, `route_b`, `stop_uid_a` (served by
+  `route_a`), `stop_uid_b` (served by `route_b`), `connection_type` and
+  `distance_m` (0 for a shared stop). A stop pair keeps only its strongest
+  evidence; the strongest type per route pair equals the route graph's.
+- `routes.csv` — route metadata to decode the `route_uid`s: `route_uid`,
+  `feed_id`, `route_id`, `route_short_name`, `route_long_name`, `route_type`,
+  `modalidad` (agency name).
+- `route_stops.csv` — `route_uid`, `stop_uid`: the stops each route serves
+  on the analyzed day.
 - `analysis_report.json` / `analysis_report.md` — per feed: status, the
   service date used and whether it was explicit or auto-picked, routes and
   trips analyzed; plus route-pair counts by connection type, graph metrics
@@ -913,6 +931,17 @@ Files in `--report DIR`:
   | `same_station` | reciprocal arcs | `0.0` — cross-feed alias links from the dedupe stage, so routing crosses feeds |
 
   `nx.shortest_path(g, a, b, weight="time_min")` works out of the box.
+  **Redundant arcs.** Many walk arcs never change a shortest time: another
+  walking path is as fast (A→B→C in 1 + 1 minutes matches A→C in 2). The
+  report always counts them in `station_graph` as `redundant_walk_pairs` and
+  `redundant_same_station_pairs` (pairs that close a cycle of 0-minute alias
+  links). On the paper run that is 42,557 of 72,286 walk pairs and 247 of
+  2,812 same_station pairs. `--prune-station-network` (default off) writes the
+  network without them: every shortest `time_min` path stays the same (pairs
+  are removed longest first, only when the remaining walking network still
+  links the two stops within the same minutes). Walking *metres* along a path
+  can grow, and an edge list no longer says that every two stops within the
+  proximity radius are directly linked. `near_stations.csv` is never affected.
   Gephi merges parallel edges unless "parallel edges" is enabled on import;
   yEd/igraph/networkx read the multigraph natively. The CSVs are the same
   graph flattened (reciprocal arcs deduped to one row per pair).
@@ -953,58 +982,6 @@ Files in `--report DIR`:
   (it has no calendar to share). Its stops still take part in proximity,
   near-stations and the GeoPackage, and appear as unlinked `stops_only` nodes
   in the station network; they are excluded from deduplication.
-
----
-
-# Export to Neo4j (`export-neo4j`)
-
-```bash
-# after analyze-frequency wrote its outputs:
-python -m gtfs_ingest.cli export-neo4j --report ./out          # -> ./out/neo4j/
-```
-
-Builds an **offline Neo4j load package** from an existing report directory —
-no new dependency, no running instance required. The package contains data
-CSVs with `neo4j-admin` inline headers plus generated scripts, so ONE file
-set serves both load paths:
-
-- **Any running instance**: copy the CSVs into the DBMS *import* directory
-  and run `cypher-shell -f load.cypher` (Browser: prefix the LOAD CSV blocks
-  with `:auto`). Idempotent — constraints `IF NOT EXISTS`, `MERGE`
-  throughout, batched `IN TRANSACTIONS`.
-- **Bulk import**: `neo4j-admin database import full` (see
-  `admin_import.txt`), then `cypher-shell -f post_import.cypher` for the
-  constraints and the `location` point property.
-
-Graph model: `(:Stop {stop_uid, name, feed, canonical_uid, lat, lon,
-location})`, `(:Route {route_uid, route_short_name, route_type,
-modalidad, …})` (metadata read from `route_connectivity.graphml`),
-`(:Station {canonical_uid, n_stops})` (one per multi-member dedupe group);
-relationships `[:IN_VEHICLE {time_min, linea, direction_id, route_uid}]`
-(directed), `[:WALK {time_min, distance_m}]` and `[:SAME_STATION]` (stored
-once — query undirected: `-[:WALK]-`), `(:Route)-[:SERVES]->(:Stop)` and
-`(:Stop)-[:PART_OF]->(:Station)`.
-
-Example queries once loaded:
-
-```cypher
-// fastest route between two stops, mixing vehicle + walking + transfers
-MATCH (a:Stop {stop_uid: 'improved_gtfs_mimacro_mitren_sitren:SITEUR_001'}),
-      (b:Stop {name: 'Periférico Sur'})
-CALL apoc.algo.dijkstra(a, b, 'IN_VEHICLE>|WALK|SAME_STATION', 'time_min')
-YIELD path, weight RETURN path, weight;
-
-// which physical stations mix systems? (routes of 2+ modalidades)
-MATCH (r:Route)-[:SERVES]->(:Stop)-[:PART_OF]->(st:Station)
-WITH st, collect(DISTINCT r.modalidad) AS sistemas
-WHERE size(sistemas) > 1 RETURN st.name, sistemas ORDER BY size(sistemas) DESC;
-```
-
-Notes: routes with no timed consecutive stop pair produce no `SERVES`
-(none in the current feeds); a missing `route_connectivity.graphml`
-degrades `(:Route)` nodes to uid-only with a warning; missing
-`station_network_*.csv` inputs exit 1 with a "run analyze-frequency first"
-message.
 
 ---
 
